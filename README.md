@@ -178,58 +178,151 @@ progress at the time of writing.)
 
 ---
 
-## Repository structure
+## File-by-file reference
 
-```
-cot/                      core library
-  oracle.py               patch-diff → vulnerability location (ground truth)
-  gates.py                verification gates (correspondence/localization/cwe/substance)
-  cwe_contracts.py        per-CWE reasoning contracts + cross-CWE bleed detector
-  template_reason.py      deterministic trace assembler (contract + oracle)
-  postprocess.py          field cleanup (markdown/CVE-noise/run-on repair)
-  fix_pairs.py            (vuln, fixed, cwe, language) loader from patches/CSVs
-  vuln_types.py           sink → vuln-type/CWE classifier
-  shapes/                 trace formats (shape1..4, verified, safe)
-eval/                     evaluation harness (inference, parsers, scoring, loader)
-tests/                    unit tests for oracle + gates
+### `cot/` — core library (shared, imported everywhere)
+| File | Purpose |
+|---|---|
+| `oracle.py` | Patch-diff → vulnerability location. `Region` = changed lines + touched identifiers; `locate_from_diff` / `locate_vuln` (with a Bandit fallback). This is the ground-truth localizer. |
+| `gates.py` | Verification gates for a trace: `correspondence` (identifiers exist in code), `localization` (sink near patched lines), `cwe_consistency`, `substantiveness`; `all_gates_pass`. |
+| `cwe_contracts.py` | 15 per-CWE "contracts" (markers + canonical sink + control) authored above the weak-model ceiling; `check_bleed` flags a trace that reads like a different CWE family. |
+| `template_reason.py` | **Deterministic trace assembler** — builds a `<think>`+fields trace from `(vuln, fixed, cwe)` using the oracle (real sink) + contract. No model. |
+| `postprocess.py` | Cleans raw model/template output: repairs fields, strips markdown + hallucinated CVE ids, trims run-on traces, enforces safe-verdict coherence. |
+| `fix_pairs.py` | Loads `(vuln_code, fixed_code, cwe, language)` from raw patches / morefixes / CSVs. `_EXT_LANG` (extension→language), `_RELEVANT` (sink-relevance filter), `classify`-tagging. |
+| `vuln_types.py` | Sink-pattern → vulnerability-type/CWE classifier (`classify(code)`). |
+| `generator.py` | Pluggable teacher dispatch via `WAVE_GENERATOR_BACKEND` (local / anthropic / gemini); N-sampling + critique-revise wrappers. |
+| `client.py`, `local_client.py`, `gemini_client.py` | Teacher backends: Anthropic API, local `gpt-oss-20b`, Gemini (Gemini abandoned — billing). |
+| `checkpoint.py` | Resumable JSONL checkpoint writer for long generation runs. |
+| `config.py`, `cost.py`, `code_analysis.py`, `runner.py`, `specificity.py` | Paths/config; token-cost tracking; code helpers; generation runner; candidate-specificity scorer. |
+| `shapes/` | One module per trace format: `shape1` (local scan), `shape2` (needs-context), `shape3` (cross-file), `shape4` (synthesis), plus `shape1_ts/react/verified` + `_safe` variants and `shape_react_syn`; `common.py`, `_safe_core.py`, `exemplars.py` shared helpers. |
 
-train_qwen_cot.py         QLoRA trainer (env-configurable)
-run_eval.py               full evaluation
-reformat_r2vul_to_shape1.py   R2Vul → traces (no model)
-convert_patches_wave3.py  patches → traces via template assembler
-convert_cvefixes.py       CVEfixes → traces
-convert_fixjs.py          FixJS → security traces
-clean_and_verify.py       clean + verify + quarantine
-harden_corpus.py          leak / near-dup / over-length removal
-validate_corpus.py        label-correctness & consistency audit
-balance_analysis.py       per-language / per-CWE balance report
-DATA_INVENTORY.md         full inventory of every dataset on disk
-```
+### `eval/` — evaluation harness
+| File | Purpose |
+|---|---|
+| `inference.py` | `QwenLoraPredictor` — loads base + LoRA adapter (4-bit), `predict()`, applies `postprocess`. |
+| `loader.py` | Loads the held-out eval set from `data/cot/eval/`. |
+| `parsers.py` | Parses model output → structured fields (`parse_shape1`, etc.). |
+| `scoring.py` | Metrics: headline FPR-on-safe, recall, precision, per-CWE, per-language, confusion. |
+| `config.py` | Generation config (`GEN_MAX_NEW_TOKENS`, temperature, seed). |
+| `judge.py`, `compare.py`, `report.py` | Optional Layer-2 LLM judge; run-to-run comparison; report rendering. |
 
-> Data and model checkpoints are **gitignored** (too large for git). The pipeline
-> scripts regenerate the corpus from the raw sources.
+### Conversion / mining (raw source → traces)
+| Script | Purpose |
+|---|---|
+| `reformat_r2vul_to_shape1.py` | R2Vul → traces using its **pre-written expert reasoning** (no model). Env: `WAVE_R2VUL_LANGS/_OUT/_SPLITS`. |
+| `convert_patches_wave3.py` | CVE **patches** → traces via the template assembler. `--langs`, `--sources`, `--out`. |
+| `convert_cvefixes.py` | CVEfixes CSV → traces (`classify` for CWE; safe side capped for balance). |
+| `convert_fixjs.py` | FixJS 66K JS bug-fix pairs → **security** traces (assembler declines non-security = the filter). |
+| `convert_sft.py` | Remaining SFT `<SCAN>` pairs → traces (bandit/kaggle/etc.; label read from verdict). |
+| `convert_local.py`, `mine_r2vul_deeper.py`, `mine_clean_code.py`, `upgrade_r2vul_traces.py` | Earlier/auxiliary conversion + mining paths. |
+| `seed_verified_batch.py`, `seed_verified_batch2.py`, `manual_pilot.py` | Hand-authored seed traces (teacher = me, against the oracle). |
+
+### Generation pipeline (teacher-driven)
+| Script | Purpose |
+|---|---|
+| `run_pilot.py` | Orchestrates teacher generation of shapes into `data/cot/pilot/`. |
+| `run_verified.py` | Verified-regeneration with the **gate-feedback correction loop** (`--max-attempts`). |
+
+### Data-quality pipeline (the gauntlet)
+| Script | Purpose |
+|---|---|
+| `consolidate_traces.py` | Merge all per-shape traces into one flat `all_v8_traces.jsonl`. |
+| `clean_and_verify.py` | Clean (postprocess) → verify (status↔label, CWE, bleed) → **quarantine** failures. Reads flat file or `--pilot <file>`. |
+| `harden_corpus.py` | Removes **eval-leak**, normalized near-duplicates, over-length records; reports code↔CWE mismatches. |
+| `validate_corpus.py` | Full audit: label correctness, safe-purity, vuln-completeness, cross-label contradictions, dups. |
+| `dedup_contradictions.py` | Removes same-code-both-labels contradictions + exact duplicates. |
+| `balance_analysis.py` | Per-language / per-family vuln:safe balance report. |
+| `improve_traces.py` | Send traces to a **stronger** model to rewrite reasoning, ground truth fixed (Phase-2 lever). |
+| `rebuild_from_improved.py` | Turn improved traces back into training format (`data/cot/pilot_v9/`). |
+| `split_pilot_to_eval.py` | Carve a fixed, never-trained eval holdout from the pilot. |
+| `report_vuln_types.py` | Vuln-type coverage report across the corpus. |
+
+### Training & evaluation
+| Script | Purpose |
+|---|---|
+| `train_qwen_cot.py` | QLoRA trainer. Env: `WAVE_PILOT_DIR`, `WAVE_OUTPUT_DIR`, `WAVE_BEST_DIR`, `WAVE_SHAPE_WEIGHTS`, `WAVE_MODEL_NAME`, `WAVE_EPOCHS`, … |
+| `run_eval.py` | Full per-CWE eval (~11 h, 1,125 records). For final breakdowns. |
+| `smoke_eval.py` | **Fast 42-record smoke** (~20 min) — the day-to-day eval; same sample across versions. |
+
+### Data collection (one-off provenance — how the raw data was gathered)
+`collect_cvefixes_and_morefixes.py`, `collect_vuln_datasets.py`, `collect_security_repos.py`,
+`collect_github.py`, `collect_thestack.py`, `collect_high_priority.py`, `collect_vuln_pairs.py`,
+`collect_alpaca.py`, `collect_generate.py`, `collect_explain.py`, `collect_extra_datasets.py`.
+
+### Docs
+`README.md` (this file) · `DATA_INVENTORY.md` (every dataset on disk) ·
+`verified_regen_design.md` (oracle/gates design) · `wave_cot_workflow.md` (workflow notes).
+
+> Data and model checkpoints are **gitignored** (too large for git). The scripts above
+> regenerate the corpus from the raw sources in `data/downloads/`.
 
 ---
 
-## Pipeline (end to end)
+## The exact process we ran (in order)
 
+This is the real sequence that produced the current corpus and models. Everything is
+deterministic and free unless noted.
+
+### 1 — Gather raw data (once)
 ```bash
-# 1. Convert raw sources → traces (no model needed)
-python reformat_r2vul_to_shape1.py            # R2Vul expert reasoning
-python convert_patches_wave3.py --langs javascript,typescript,react
-python convert_cvefixes.py ; python convert_fixjs.py
-
-# 2. Clean → verify → harden → audit
-python clean_and_verify.py                    # + --pilot <file> per new source
-python harden_corpus.py                       # leak / dup / length
-python validate_corpus.py                     # must report zero issues
-
-# 3. Train
-WAVE_PILOT_DIR=data/cot/pilot_clean python train_qwen_cot.py
-
-# 4. Evaluate
-WAVE_ADAPTER_PATH=data/qwen_cot_best python run_eval.py eval --label cot_vN --skip-judge
+python collect_cvefixes_and_morefixes.py   # CVE patches + CVEfixes CSV
+python collect_vuln_datasets.py            # R2Vul, FixJS, etc.
+# → data/downloads/{morefixes-patches, CVEfixes, FixJS, ...}, data/r2vul_dataset/
 ```
+
+### 2 — Convert sources → traces (no model)
+```bash
+# R2Vul expert reasoning (py/js first, then C/Java/C#, then val/test splits)
+python reformat_r2vul_to_shape1.py
+WAVE_R2VUL_LANGS=java,c_sharp,c WAVE_R2VUL_OUT=data/cot/pilot/shape1_r2vul_ml.jsonl \
+  WAVE_R2VUL_SPLITS=train python reformat_r2vul_to_shape1.py
+WAVE_R2VUL_LANGS=python,javascript,java,c_sharp,c \
+  WAVE_R2VUL_OUT=data/cot/pilot/shape1_r2vul_valtest.jsonl \
+  WAVE_R2VUL_SPLITS=validation,test python reformat_r2vul_to_shape1.py
+
+# Patches → traces (JS/TS/React first, then other langs)
+python convert_patches_wave3.py --langs javascript,typescript,react \
+  --out data/cot/pilot/shape1_wave3_jsts.jsonl
+python convert_patches_wave3.py --langs php,c,cpp,java,go,ruby,csharp \
+  --out data/cot/pilot/shape1_wave3_other.jsonl
+
+# Lower-fidelity sources
+python convert_cvefixes.py --max-safe 4000   # CVEfixes
+python convert_fixjs.py                       # FixJS (security-filtered)
+python convert_sft.py                         # remaining SFT scan pairs
+```
+
+### 3 — Clean → verify → harden → audit (the gauntlet)
+```bash
+python clean_and_verify.py                                   # the 8,132 base set
+python clean_and_verify.py --pilot data/cot/pilot/shape1_r2vul_ml.jsonl --append
+# … repeat --pilot --append for each new source file …
+python dedup_contradictions.py    # same-code-both-labels + exact dups
+python harden_corpus.py           # eval-leak + near-dup + over-length
+python validate_corpus.py         # MUST report zero issues
+python balance_analysis.py        # sanity: per-language vuln:safe balance
+# → data/cot/pilot_clean/  (clean corpus)  +  data/cot/quarantine/  (rejects, kept)
+```
+
+### 4 — Train
+```bash
+WAVE_PILOT_DIR=data/cot/pilot_clean \
+WAVE_OUTPUT_DIR=data/qwen_cot_v10 WAVE_BEST_DIR=data/qwen_cot_v10_best \
+  python train_qwen_cot.py
+# (optional weight override, e.g. the v8 rebalance:)
+# WAVE_SHAPE_WEIGHTS='{"shape1_ts":2.0,"shape1_verified_safe":1.5}' python train_qwen_cot.py
+```
+
+### 5 — Evaluate (smoke for iteration, full eval only for final breakdown)
+```bash
+WAVE_ADAPTER_PATH=data/qwen_cot_v10_best python smoke_eval.py          # ~20 min
+WAVE_ADAPTER_PATH=data/qwen_cot_v10_best python run_eval.py eval \
+  --label cot_v10 --skip-judge                                          # ~11 h, per-CWE
+```
+
+> **Checkpoint discipline:** never overwrite `data/qwen_cot_best`; each version is
+> preserved as `data/qwen_cot_vN_best`, and `qwen_cot_best` is repointed only after a
+> version proves better on the smoke.
 
 ---
 

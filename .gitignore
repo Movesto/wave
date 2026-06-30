@@ -1,0 +1,45 @@
+# ---- secrets ----
+.gemini_key
+.anthropic_key
+*.key
+
+# ---- data, models, datasets (host separately, too large for git) ----
+data/
+*.pt
+*.pkl
+*.arrow
+*.zip
+v8_training_data/
+
+# ---- logs & temp outputs ----
+*.log
+debug_output.txt
+inventory_output.txt
+inventory_report.txt
+prompt_samples.txt
+result.txt
+summary.txt
+corpus_audit_report.json
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# ---- editor / tooling ----
+.vscode/
+.idea/
+.claude/
+.DS_Store
+
+# ---- personal / unrelated to the scanner (kept on disk, out of repo) ----
+job.txt
+resume*
+*.pdf
+build_resume.py
+project summary.txt
+code_gpt_exercise.md
+memory/

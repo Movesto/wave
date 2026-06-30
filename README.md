@@ -338,3 +338,56 @@ WAVE_ADAPTER_PATH=data/qwen_cot_v10_best python run_eval.py eval \
 
 166 distinct CWEs represented; heavily web-injection (XSS/SQLi/SSRF/path-traversal)
 with crypto / DoS / auth coverage added in the mining waves.
+
+---
+
+## Acknowledgments & Citations
+
+This project is built on the work of many others. Credit and thanks to the authors of
+the datasets, models, methods, and tools below. *(Citations verified June 2026; please
+still confirm each dataset's **license/terms** before redistribution.)*
+
+### Datasets
+- **R2Vul** — Weyssow, Yang, Chen, Widyasari, Zhang, Huang, Nguyen, Tun, Bui, Li, Ang,
+  Liauw, Ouh, Shar & Lo, *"R2Vul: Learning to Reason about Software Vulnerabilities with
+  Reinforcement Learning and Structured Reasoning Distillation,"* 2025.
+  [arXiv:2504.04699](https://arxiv.org/abs/2504.04699) · [Zenodo 16741648](https://zenodo.org/records/16741648).
+  The backbone of our high-quality traces (pre-written `positive`/`negative_reasoning` + CWE).
+- **CVEfixes** — Bhandari, Naseer & Moonen, *"CVEfixes: Automated Collection of
+  Vulnerabilities and Their Fixes from Open-Source Software,"* PROMISE '21.
+  [doi:10.1145/3475960.3475985](https://doi.org/10.1145/3475960.3475985).
+- **MoreFixes** — Akhoundali, Nouri, Rietveld & Gadyatskaya, *"MoreFixes: A Large-Scale
+  Dataset of CVE Fix Commits Mined through Enhanced Repository Discovery,"* PROMISE '24.
+  [doi:10.1145/3663533.3664036](https://doi.org/10.1145/3663533.3664036) ·
+  [Zenodo 13983082](https://zenodo.org/records/13983082). (Our 32K-patch corpus.)
+- **FixJS** — Csuvik & Vidács, *"FixJS: A Dataset of Bug-fixing JavaScript Commits,"*
+  MSR 2022. [doi:10.1145/3524842.3528480](https://doi.org/10.1145/3524842.3528480).
+- **The Stack** — Kocetkov et al. (BigCode), *"The Stack: 3 TB of Permissively
+  Licensed Source Code,"* 2022. (Pretrain corpus.)
+- Additional SFT/seed sources: CyberNative, SecureCode, and a synthetic vulnerability
+  fix-pairs dataset (Kaggle). *(verify individual licenses/attribution before reuse)*
+
+### Models
+- **Qwen3-8B** — Qwen Team, Alibaba, *"Qwen3 Technical Report,"*
+  [arXiv:2505.09388](https://arxiv.org/abs/2505.09388) — the student model we fine-tune.
+- **gpt-oss-20b** — OpenAI, *"gpt-oss-120b & gpt-oss-20b Model Card,"*
+  [arXiv:2508.10925](https://arxiv.org/abs/2508.10925) (Apache-2.0) — the local (free) teacher.
+- **DeepSeek-R1-Distill-Qwen-14B** — DeepSeek-AI, *"DeepSeek-R1: Incentivizing Reasoning
+  Capability in LLMs via Reinforcement Learning,"*
+  [arXiv:2501.12948](https://arxiv.org/abs/2501.12948) — tested as a larger student (not adopted).
+
+### Methods & papers
+- **LoRA** — Hu et al., *"LoRA: Low-Rank Adaptation of Large Language Models,"*
+  [arXiv:2106.09685](https://arxiv.org/abs/2106.09685) (2021).
+- **QLoRA** — Dettmers et al., *"QLoRA: Efficient Finetuning of Quantized LLMs,"*
+  [arXiv:2305.14314](https://arxiv.org/abs/2305.14314) (NeurIPS 2023).
+- **Chain-of-Thought prompting** — Wei et al., *"Chain-of-Thought Prompting Elicits
+  Reasoning in Large Language Models,"* [arXiv:2201.11903](https://arxiv.org/abs/2201.11903) (NeurIPS 2022).
+- **Verifier-gated / rejection-sampling generation** — the "verified regeneration"
+  approach: keep only generations that pass an oracle/verifier.
+
+### Tools & standards
+- **CWE** — MITRE Common Weakness Enumeration ([cwe.mitre.org](https://cwe.mitre.org)) — the taxonomy.
+- **Bandit** — PyCQA static analyzer — oracle fallback and a source of labeled pairs.
+- **Hugging Face** `transformers` / `peft` / `datasets` and **bitsandbytes** — training,
+  LoRA adapters, and 4-bit quantization.

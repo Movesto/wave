@@ -53,9 +53,17 @@ _PROSE_TRACE = re.compile(
 _CODE_TOK = re.compile(r"[A-Za-z_][\w.]*\([^)]*\)|[A-Za-z_]\w*(?:\.\w+)+|--?[A-Za-z][\w-]+")
 
 
+def _dedup_phrases(v: str) -> str:
+    """Collapse an immediately-repeated trailing phrase (e.g. a doubled
+    'before any sink before any sink' the model sometimes emits)."""
+    v = re.sub(r"\b(\w[\w ]{2,40}?)\s+\1\b", r"\1", v, flags=re.I)      # repeated 3-4 word phrase
+    v = re.sub(r"(before any sink)(\s+before any sink)+", r"\1", v, flags=re.I)
+    return re.sub(r"\s{2,}", " ", v).strip()
+
+
 def _trim_trace(value: str) -> str:
     """Keep the concise source->sink chain (or sink construct); drop prose."""
-    v = value.replace("`", "").strip()
+    v = _dedup_phrases(value.replace("`", "").strip())
     # 1. If it already has an arrow chain, keep it — only drop trailing prose.
     if "->" in v or "→" in v:
         for sep in [" — ", " -- ", ". ", "; Since", " Since ", ", an attacker",

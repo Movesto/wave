@@ -14,6 +14,8 @@ import argparse, ast, json, os, sys, hashlib
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # eval/ at repo root
+
 EXT_LANG = {".py": "python", ".js": "javascript", ".ts": "typescript",
             ".jsx": "react", ".tsx": "react", ".php": "php", ".java": "java",
             ".go": "go", ".rb": "ruby", ".c": "c", ".cpp": "cpp", ".cs": "csharp"}

@@ -102,7 +102,10 @@ def build_vuln_trace(vuln_code, fixed_code, cwe):
 def build_safe_trace(fixed_code, cwe_hint=None):
     """Assemble a safe trace from FIXED code (explains the control that neutralizes it)."""
     fam = family_of(cwe_hint) if cwe_hint else None
-    control = CONTRACTS[fam]["control"] if fam else "the untrusted input is validated/neutralized before any sink"
+    control = CONTRACTS[fam]["control"] if fam else "input is validated/neutralized before any sink"
+    control_short = control.split(";")[0].strip()
+    # avoid duplicating a trailing "...before any sink" the control phrase may already have
+    tail = "" if re.search(r"before any sink\s*$", control_short, re.I) else " before any sink"
     think = (
         f"<think>\n"
         f"1. Untrusted input is present, but it does not reach a dangerous sink unguarded.\n"
@@ -112,7 +115,7 @@ def build_safe_trace(fixed_code, cwe_hint=None):
     )
     fields = (
         f"status: safe\ncwe: none\nseverity: none\nline: none\n"
-        f"trace: input is neutralized by {control.split(';')[0].strip()} before any sink\n"
+        f"trace: input is neutralized by {control_short}{tail}\n"
         f"fix: none"
     )
     return think + "\n" + fields, True

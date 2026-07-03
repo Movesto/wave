@@ -15,7 +15,8 @@ from .config import EVAL_SET_DIR
 
 SHAPES = ("shape1", "shape2", "shape3", "shape4",
           "shape1_ts", "shape1_react", "shape_react_syn",
-          "shape1_ts_safe", "shape1_react_safe", "shape1_verified", "shape1_verified_safe")
+          "shape1_ts_safe", "shape1_react_safe", "shape1_verified", "shape1_verified_safe",
+          "shape3_codeql")   # CodeQL cross-file holdout
 
 
 def iter_jsonl(path: Path) -> Iterator[dict]:

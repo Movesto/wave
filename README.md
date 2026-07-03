@@ -34,6 +34,42 @@ kills a scanner in practice); vuln recall is secondary.
 
 ---
 
+## Usage
+
+`scan.py` is the CLI. It chunks code into functions, scans each, and reports findings
+with their reasoning.
+
+```bash
+python scan.py app.py             # scan a file (pretty terminal output)
+python scan.py src/               # scan a directory
+cat snippet.py | python scan.py -  # scan stdin
+python scan.py app.py --explain    # include the model's <think> reasoning
+python scan.py app.py --json       # machine-readable
+python scan.py src/ --sarif        # SARIF 2.1.0 → GitHub Code Scanning / IDEs
+```
+
+Example output:
+
+```
+app.py
+  [HIGH] CWE-89 SQL Injection  (line 14, in get_user)
+      trace: request.args["id"] -> q -> db.execute
+      fix:   use a parameterized query
+  [MEDIUM] CWE-79 Cross-site Scripting  (line 31, in render)
+      trace: req.query.name -> innerHTML
+      fix:   escape output
+
+2 issues found.
+```
+
+- **SARIF output** carries CWE tags and `security-severity`, so it renders in GitHub's
+  Security tab and IDEs with no extra config.
+- **CI-friendly**: exits non-zero when any HIGH finding is present (fails the build).
+- Unlike grep-based linters, every finding includes the **source → sink data-flow trace**
+  and a fix — that's the point of a reasoning scanner.
+
+---
+
 ## The core architecture
 
 - **Teacher → student distillation.** A teacher generates chain-of-thought traces;

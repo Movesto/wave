@@ -42,7 +42,8 @@ CONFIG = {
                         "shape1_r2vul_ml", "shape1_wave3_jsts",
                         "shape1_wave3_other", "shape1_cvefixes",
                         "shape1_cvefixpairs", "shape1_fixjs",
-                        "shape1_r2vul_valtest", "shape1_sft"],   # + Wave 6 SFT (v11 only, synthetic-heavy)
+                        "shape1_r2vul_valtest", "shape1_sft",
+                        "shape3_codeql"],   # + Wave 6 SFT + CodeQL verified cross-file
     # Effective sampling weight per shape. shape1 has ~4k records, the others
     # ~170-300. With weights [1,4,4,4] each minibatch sees roughly equal
     # representation despite the 14x raw imbalance. shape1_ts is now vuln-only;
@@ -59,7 +60,8 @@ CONFIG = {
                         "shape1_cvefixes": 1.0,
                         "shape1_cvefixpairs": 2.0, "shape1_fixjs": 1.0,
                         "shape1_r2vul_valtest": 1.0,
-                        "shape1_sft": 0.5},   # Wave 6 SFT: synthetic-heavy -> lowest weight
+                        "shape1_sft": 0.5,
+                        "shape3_codeql": 2.5},   # CodeQL verified cross-file: high value, fills the multi-hop gap
 
     # LoRA — attention-only to keep VRAM headroom on the 8B base. Add gate/up/
     # down_proj if you have memory to spare and want more capacity.

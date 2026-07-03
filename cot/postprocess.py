@@ -45,20 +45,46 @@ def _is_degraded(value: str) -> bool:
     return False
 
 
+_PROSE_TRACE = re.compile(
+    r"the vulnerabilit|is (?:primarily |)related|handling of|argument in|because of|"
+    r"due to|this (?:code|function|line)|specific code|mechanism of|note that|refers to",
+    re.I)
+# a "strong" code token: a call foo(...), a dotted name a.b.c, or a --flag.
+_CODE_TOK = re.compile(r"[A-Za-z_][\w.]*\([^)]*\)|[A-Za-z_]\w*(?:\.\w+)+|--?[A-Za-z][\w-]+")
+
+
 def _trim_trace(value: str) -> str:
     """Keep the concise source->sink chain (or sink construct); drop prose."""
-    v = value.strip().strip("`").strip()
-    # Cut off any trailing prose explanation at the first such separator.
+    v = value.replace("`", "").strip()
+    # 1. If it already has an arrow chain, keep it — only drop trailing prose.
+    if "->" in v or "→" in v:
+        for sep in [" — ", " -- ", ". ", "; Since", " Since ", ", an attacker",
+                    ", because", " which ", " where the "]:
+            if sep in v:
+                v = v.split(sep, 1)[0].strip()
+                break
+        return v.rstrip(",")[:160]
+    # 2. Cut trailing prose at a separator, keeping a code-construct head.
     for sep in [" — ", " -- ", ". ", "; Since", " Since ", ", an attacker", ", because"]:
         if sep in v:
             head = v.split(sep, 1)[0].strip()
-            # Accept the head if it's a real chain or a code construct (not just a word).
-            if "→" in head or "->" in head or re.search(r"[=(]", head):
-                v = head
+            if re.search(r"[=(]", head) or "->" in head:
+                return head.rstrip(",")[:160]
+    # 3. Degraded prose (analysis dumped into the field): extract the code tokens
+    #    it mentions and present a minimal chain, instead of keeping the prose.
+    if _PROSE_TRACE.search(v) or len(v) > 130:
+        toks = []
+        for t in _CODE_TOK.findall(v):
+            t = t.strip()
+            if t not in toks:
+                toks.append(t)
+            if len(toks) >= 3:
                 break
-    else:
-        v = re.split(r"(?<=[.;])\s", v, 1)[0]
-    return v.strip().strip("`").strip().rstrip(",")[:200]
+        if toks:
+            return " -> ".join(toks)[:160]
+        return v.split(".")[0].strip()[:90]        # last resort: first clause
+    # 4. Otherwise it's already a short code construct / sentence — keep it.
+    return re.split(r"(?<=[.;])\s", v, 1)[0].strip().rstrip(",")[:160]
 
 
 def _clean_value(field: str, value: str, cwe: str) -> str:

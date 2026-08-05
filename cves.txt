@@ -1,0 +1,15 @@
+https://vulners.com/search/tags/TypeScript
+
+https://attackerkb.com/search?q=typescript
+
+https://dbugs.ptsecurity.com/vulnerability?fts%5Bvalue%5D=typescript&filter%5Bhas_fix%5D=true
+
+https://osv.dev/list?q=Typescript
+
+https://euvd.enisa.europa.eu/search?product=Typescript
+
+https://github.com/cisagov/vulnrichment
+
+and this paper i liked it. 
+
+https://thegriffyn.me/blog/oss/twelve-cves-in-datamodel-code-generator

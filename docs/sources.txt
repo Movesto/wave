@@ -1,0 +1,39 @@
+
+
+Skip to content
+Using Gmail with screen readers
+4 of 1,267
+read them
+Inbox
+
+Zahir <zahirabdi415@gmail.com>
+Wed, Jul 22, 5:47 PM (8 days ago)
+to me
+
+- Practical repo-level benchmark: JITVUL / "Benchmarking LLMs and LLM-based Agents in Practical Vulnerability Detection for Code Repositories" (ACL 2025 (https://aclanthology.org/2025.acl-long.1490.pdf), arxiv (https://arxiv.org/pdf/2503.03586)) — argues interprocedural/multi-hop is the real-world requirement (your exact bet).
+- ZeroDayBench (arxiv 2603.02297 (https://arxiv.org/pdf/2603.02297)) — LLM agents on unseen zero-days.
+- SafeGenBench (arxiv 2506.05692 (https://arxiv.org/abs/2506.05692)) — security of LLM-generated code (the flip side of your Part-2 question earlier).
+- Two solid surveys to map the field: arxiv 2502.07049 (https://arxiv.org/pdf/2502.07049) and arxiv 2507.22659 (https://arxiv.org/pdf/2507.22659); remediation-focused SLR at arxiv 2412.15004 (https://arxiv.org/html/2412.15004v4).
+
+What this tells you about wave's position
+
+The surveys and repo-level papers all converge on the same "open frontier": cross-file / interprocedural / repository-level detection is the recognized hard problem, and datasets that represent it are scarce. That's precisely where you're investing (CodeQL-verified cross-file traces + the v11 run). So the research landscape validates your direction — you're not behind the field, you're working its open edge, with a data strategy (verified interprocedural taint paths) that several of these papers explicitly call for.
+
+My suggested reading order for maximum leverage: (1) the Semantic Trap paper — it's about whether your whole approach works; (2) the interprocedural-context paper — controlled evidence for v11; (3) skim the Awesome index's repo-level section to find anything newer. If any of these turns out load-bearing, hand it to me and I'll do the same close read I did on the Foundation-Sec report.
+
+(v11 rerun still training in the background, untouched.)
+
+Sources:
+- Awesome-LLMs-for-Vulnerability-Detection (index) (https://github.com/huhusmang/Awesome-LLMs-for-Vulnerability-Detection)
+- Foundation-Sec-8B (HF) (https://huggingface.co/fdtn-ai/Foundation-Sec-8B) · base tech report (https://arxiv.org/html/2504.21039v1)
+- Lily-Cybersecurity-7B (HF) (https://huggingface.co/segolilylabs/Lily-Cybersecurity-7B-v0.2)
+- WhiteRabbitNeo overview (https://taico.ca/posts/whiterabbitneo/)
+- Do Fine-Tuned LLMs Understand Vulnerabilities? (Semantic Trap) (https://arxiv.org/pdf/2601.22655)
+- Interprocedural Context in Multiple Languages (https://arxiv.org/html/2604.08417)
+- ReposVul dataset (https://www.researchgate.net/publication/380828080_ReposVul_A_Repository-Level_High-Quality_Vulnerability_Dataset)
+- Scalable Automated Repository-Level Datasets (https://arxiv.org/html/2603.17974)
+- Benchmarking LLMs/Agents for Repo Vuln Detection (ACL 2025) (https://aclanthology.org/2025.acl-long.1490.pdf) · arxiv (https://arxiv.org/pdf/2503.03586)
+- ICSE 2026 – Vuln Discovery via Code Metrics (PrimeVul) (https://mlsec.org/docs/2026-icse.pdf)
+- ZeroDayBench (https://arxiv.org/pdf/2603.02297)
+- SafeGenBench (https://arxiv.org/abs/2506.05692)
+- Survey: LLMs in Software Security (https://arxiv.org/pdf/2502.07049) · SLR: Detecting Software Vulnerabilities with LLMs (https://arxiv.org/pdf/2507.22659) · SLR: Vulnerabilities to Remediation (https://arxiv.org/html/2412.15004v4)

@@ -78,12 +78,25 @@ def build_vuln_trace(vuln_code, fixed_code, cwe):
     line = sink_line or (min(region.lines) if region.lines else None)
     sev = _SEV.get(fam, "MEDIUM")
 
+    # Vary the "fix adds a control" sentence so a single string isn't repeated
+    # across thousands of template traces (memorization risk). Deterministic per code.
+    _V = [
+        "The fix adds a control the vulnerable code lacks: ",
+        "The patched version adds a control the original lacks: ",
+        "The fix introduces the missing control: ",
+        "What the vulnerable code omits, the fix supplies: ",
+        "The remediation adds the absent control: ",
+        "The fix restores the control the code was missing: ",
+        "A control absent from the vulnerable code is added: ",
+    ]
+    import hashlib as _h
+    _fixln = _V[int(_h.md5((source + sink).encode()).hexdigest(), 16) % len(_V)] + c["control"]
     think = (
         f"<think>\n"
         f"1. `{source}` is untrusted input entering this code"
         + (f" (near line {line})" if line else "") + ".\n"
         f"2. It flows to `{sink}`, which is {c['sink']}.\n"
-        f"3. The fix adds a control the vulnerable code lacks: {c['control']}.\n"
+        f"3. {_fixln}.\n"
         f"4. An attacker controlling `{source}` can therefore exploit it — this is {cwe}.\n"
         f"</think>"
     )

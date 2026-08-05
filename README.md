@@ -8,6 +8,11 @@ tainted data flows from source to sink, and how to fix it — all on a single
 This README is the honest project log: what we built, the dead ends we hit, how we
 got past them, and the things we got **wrong**. The mistakes are the most useful part.
 
+> **📄 [docs/TECHNICAL_REPORT.md](docs/TECHNICAL_REPORT.md)** — the technical reference:
+> system design, all 12 model iterations, the evaluation methodology *and its limits*, and
+> the central finding (the model learned **topic** discrimination, not **guard**
+> discrimination). Start there for the engineering; this README is the story.
+
 ---
 
 ## What the model does

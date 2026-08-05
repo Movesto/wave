@@ -33,7 +33,8 @@ import os
 import re
 import sys
 
-from scan_ts_standard import BOILERPLATE, code_of, trace_of
+from scan_ts_standard import (BOILERPLATE, code_of, trace_of,
+                              guard_claim, guard_is_a_control)
 
 OUT_DIR = "data/cot/filtered/"
 MANIFEST = "data/osv/corpus_filter_manifest.tsv"
@@ -234,6 +235,14 @@ def judge(r, evalcodes, shape=""):
         # is genuinely the wrong rule for them and rejected 100% as a false positive.
         if not think or len(think.group(1).split()) < 45:
             bad.append(("R7", "reasoning too thin"))
+
+    # R18: a trace that says "constrained by `X`" is claiming X is a control. 21% of
+    # ours named SQL string-building, HTML building, a docstring line or a DNS query --
+    # and the model reproduced that on real code, quoting an assignment as the guard
+    # instead of the `startsWith` check beside it.
+    _g = guard_claim(t)
+    if _g and not guard_is_a_control(_g):
+        bad.append(("R18", f"claimed guard is not a control: {_g[:60]}"))
 
     if re.sub(r"\s+", " ", code).strip().lower() in evalcodes:
         bad.append(("R10", "eval leakage"))

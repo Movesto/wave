@@ -54,6 +54,51 @@ BOILERPLATE = [
 ]
 
 
+
+# ---- R18: the quoted guard must BE a control ----------------------------
+# A trace that says "constrained by `X`" is making a claim about X. Measured on the
+# shipped sets, 21% of those X's were not controls at all: SQL string-building
+# (`$update = "UPDATE ... "`), HTML building (`$btnGo = "<input ..."`), a docstring
+# line (`:raises ValidationError:`), a DNS query. The model learned from that and, on a
+# real project, quoted `const raw = new URL(request.url).searchParams.get("next")` --
+# the ASSIGNMENT -- as the guard, instead of the `startsWith` check on the next line.
+#
+# A guard is a CONDITIONAL or a call to a recognised sanitiser/validator. Note the
+# sanitiser names carry no `` prefix on purpose: they are embedded inside
+# identifiers like `mysqli_real_escape_string` and `getCanonicalPath`, where a word
+# boundary never matches and the rule would reject real controls.
+_GUARD_COND = re.compile(
+    r"^\s*(if|elif|unless|assert|raise|throw|while|return\s+[^;]*[<>=!])", re.I)
+_GUARD_SANI = re.compile(
+    r"(validate|sanitiz|sanitis|escape|quote|encode|htmlspecial|canonical|realpath"
+    r"|normpath|abspath|startsWith|endsWith|fullmatch|isinstance|allowlist|whitelist"
+    r"|verify|authoriz|authenticat|hasPermission|deny|reject|block|forbid|require"
+    r"|ensure|guard|purify|bleach|strip_tags|\.test|\.match|\.search|\.includes"
+    r"|\.indexOf|parseInt|strip|trim|filter)\w*\s*\(", re.I)
+_GUARD_JUNK = re.compile(
+    r"^\s*[:#*]|=\s*['\"].*(SELECT|INSERT|UPDATE|DELETE|<input|<div|<a )", re.I)
+_GUARD_CLAIM = re.compile(
+    r"constrained by `([^`]+)`|control is `([^`]+)`|now contains `([^`]+)`"
+    r"|find `([^`]+)` on it")
+
+
+def guard_claim(trace_text):
+    """The guard a trace claims, or None."""
+    m = _GUARD_CLAIM.search(trace_text)
+    if not m:
+        return None
+    return next(x for x in m.groups() if x).strip()
+
+
+def guard_is_a_control(guard):
+    """Is the claimed guard actually a control?"""
+    if not guard:
+        return True                       # no claim made, nothing to check
+    if _GUARD_JUNK.search(guard):
+        return False
+    return bool(_GUARD_COND.search(guard) or _GUARD_SANI.search(guard))
+
+
 def code_of(r):
     return r["messages"][0]["content"].replace("<SCAN>", "").replace("</SCAN>", "").strip()
 

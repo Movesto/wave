@@ -26,6 +26,76 @@ _JS_FN_START = re.compile(
     r"[\w$]+\s*\([^)]*\)\s*\{|(?:async\s+)?[\w$]+\s*=\s*(?:async\s*)?function")
 
 
+
+
+# ---- Station 2b: localise and validate what the model claimed ---------------
+# The model cites a guard as TEXT and never a location -- it has never seen a line
+# number in training input or output, so it cannot produce one. But the scanner has
+# the file, so the line is a string search, not a thing the model must recite.
+#
+# The same pass applies R18 at runtime: a claimed guard must BE a control. Measured
+# on the training corpus, 21% of guard claims were not (SQL string-building, HTML
+# building, a docstring line), and the model reproduced that on real code -- on
+# Manga_Ryu it cited `const raw = new URL(request.url).searchParams.get("next")`,
+# the assignment, instead of the `startsWith` check on the next line.
+#
+# A runtime filter cannot invent reasoning the model lacks. It can refuse to present
+# a claim that is checkably wrong, and point at the real control instead.
+from scan_ts_standard import guard_claim, guard_is_a_control, _GUARD_COND, _GUARD_SANI
+
+
+def _is_control_line(line: str) -> bool:
+    return bool(_GUARD_COND.search(line) or _GUARD_SANI.search(line))
+
+
+def localise_guard(file_path: str, trace: str, fn_line: int):
+    """(guard_text, guard_line, verdict) for the guard a trace claims.
+
+    verdict is one of:
+      'located'    -- the claim is a control and we found its line
+      'relocated'  -- the claim was NOT a control; we report the nearest real one
+      'unlocated'  -- the claimed text is not in the file
+      'no_claim'   -- the trace claimed no guard
+    """
+    claimed = guard_claim(trace or "")
+    if not claimed:
+        # The training traces backtick the guard; the model's live output does not
+        # ("...is only partly constrained by const raw = new URL(...)"). The data
+        # rule stays strict; the runtime extractor has to accept what is actually
+        # emitted or it silently sees no claim at all.
+        m = re.search(r"constrained by\s+(.+?)\s*$", trace or "", re.S)
+        claimed = m.group(1).strip().strip("`") if m else None
+    if not claimed:
+        return None, None, "no_claim"
+    try:
+        lines = Path(file_path).read_text(encoding="utf-8",
+                                          errors="replace").splitlines()
+    except OSError:
+        return claimed, None, "unlocated"
+
+    def find(text):
+        needle = " ".join(text.split())
+        for i, l in enumerate(lines, 1):
+            if needle and needle in " ".join(l.split()):
+                return i
+        return None
+
+    line = find(claimed)
+    if guard_is_a_control(claimed):
+        return claimed, line, "located" if line else "unlocated"
+
+    # The claim is not a control. Look for the nearest real one around the function,
+    # so the finding still points somewhere useful instead of at an assignment.
+    anchor = line or fn_line or 1
+    best, best_d = None, 10 ** 9
+    for i, l in enumerate(lines, 1):
+        if _is_control_line(l) and abs(i - anchor) < best_d:
+            best, best_d = i, abs(i - anchor)
+    if best is not None and best_d <= 25:
+        return lines[best - 1].strip(), best, "relocated"
+    return claimed, line, "unlocated"
+
+
 def _js_function_source(code, line):
     """Brace-match the function enclosing `line` (1-indexed)."""
     lines = code.splitlines()
@@ -215,6 +285,13 @@ def main():
             "trace": p.get("trace", ""), "fix": p.get("fix", ""),
             "patch": patch,
         })
+        # localise + validate the guard claim (no model involved)
+        g_text, g_line, g_verdict = localise_guard(file, p.get("trace", ""), line)
+        results[-1].update({"guard": g_text, "guard_line": g_line,
+                            "guard_check": g_verdict})
+        if g_verdict in ("relocated", "unlocated") and \
+                results[-1]["confidence"].startswith(("HIGH", "MEDIUM")):
+            results[-1]["confidence"] += "  [guard claim failed R18]"
 
     if args.json:
         print(json.dumps(results, indent=2))
@@ -236,6 +313,12 @@ def main():
             print(f"    model:  {r['model_status']} / {r['model_cwe']}")
             if r["trace"]:
                 print(f"    trace:  {r['trace']}")
+            if r.get("guard_check") and r["guard_check"] != "no_claim":
+                loc = f"line {r['guard_line']}" if r.get("guard_line") else "not found in file"
+                tag = {"located": "guard", "relocated": "guard (RELOCATED - model cited a non-control)",
+                       "unlocated": "guard (UNVERIFIED)"}[r["guard_check"]]
+                print(f"    {tag}: {loc}"
+                      + (f"  {r['guard'][:70]}" if r.get("guard") else ""))
             if r.get("patch"):
                 print(format_patch(r["patch"]))
     print(f"\n{len(high)} confirmed, {len(review)} for review "

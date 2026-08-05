@@ -160,6 +160,45 @@ PATTERNS = [
     (re.compile(r"\.(save|update|delete|get)\([^)]*\bid\s*=\s*(request|req|params|kwargs|self\.request)"
                 r"|filter_by\(\s*id\s*=\s*(request|req|params)", re.I),
      "CWE-639", "object access by user-supplied id without owner check (possible IDOR)", "py", True),
+
+    # ---- FLOW-FREE SINK PATTERNS -------------------------------------------
+    # The taint engine only starts a flow at a recognised request object IN THE SAME
+    # FUNCTION as the sink (_SRC_ATTR). A helper that takes the tainted value as a
+    # PARAMETER is therefore invisible to it -- which is the ordinary shape of real
+    # code: the route pulls request.args["x"] and hands it to a helper that does the
+    # work. Measured on a planted test: 5 of 7 vulnerabilities were never surfaced,
+    # including string-concatenated SQL and shell=True, so the model never saw them.
+    #
+    # These patterns need no flow: the CONSTRUCT itself is the defect wherever the
+    # value came from. Concatenation/interpolation into the dangerous call is the
+    # signal; a fully literal argument is not matched.
+    (re.compile(r"(?:execute|executemany|executescript|raw|query)\s*\(\s*"
+                r"(?:f[\"']|[\"'][^\"']*[\"']\s*(?:\+|%|\.format\()|[\w.]+\s*\+)",
+                re.I),
+     "CWE-89", "SQL built by concatenation/interpolation instead of parameters", "any", False),
+
+    (re.compile(r"shell\s*=\s*True"),
+     "CWE-78", "subprocess with shell=True", "py", False),
+
+    (re.compile(r"(?:os\.system|os\.popen|commands\.getoutput)\s*\(\s*"
+                r"(?:f[\"']|[\"'][^\"']*[\"']\s*(?:\+|%|\.format\()|[\w.]+\s*\+)"),
+     "CWE-78", "shell command built by concatenation/interpolation", "py", False),
+
+    (re.compile(r"(?:child_process\.)?(?:exec|execSync)\s*\(\s*(?:`[^`]*\$\{|"
+                r"[\"'][^\"']*[\"']\s*\+|[\w.]+\s*\+)"),
+     "CWE-78", "shell command built by concatenation/template literal", "js", False),
+
+    (re.compile(r"\bopen\s*\(\s*(?:f[\"']|[\"'][^\"']*[\"']\s*\+|[\w.]+\s*\+\s*[\w.]+)"
+                r"|os\.path\.join\s*\([^)]*\+"),
+     "CWE-22", "file path built by concatenation", "py", False),
+
+    (re.compile(r"(?:readFile|readFileSync|createReadStream|sendFile)\s*\(\s*"
+                r"(?:`[^`]*\$\{|[\"'][^\"']*[\"']\s*\+|[\w.]+\s*\+)"),
+     "CWE-22", "file path built by concatenation", "js", False),
+
+    (re.compile(r"(?:requests\.(?:get|post|put|head|delete)|urlopen|httpx\.(?:get|post))"
+                r"\s*\(\s*(?!['\"]https?://[\w.-]+['\"]\s*[,)])[\w.]+\s*[,)]"),
+     "CWE-918", "outbound request to a non-literal URL", "py", False),
 ]
 _SEC_CTX = re.compile(r"password|passwd|token|secret|sign|hmac|hash_|cert|credential|auth|"
                       r"user_id|owner|current_user|permission", re.I)

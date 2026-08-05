@@ -85,14 +85,86 @@ def _extract_follow_ups(text: str) -> list[str]:
     return out
 
 
+
+# Verdict words that are only asserted when the model has DECIDED, not while it
+# hedges. The negations ("no vulnerability", "not vulnerable", "appears safe") are
+# checked first so a "not vulnerable" sentence is not read as a vuln because it
+# contains the word "vulnerable".
+_SAFE_PHRASE = re.compile(
+    r"\b(no\s+(?:security\s+)?(?:vulnerabilit|issue|flaw|risk)"
+    r"|not\s+(?:vulnerable|exploitable)"
+    r"|is\s+safe|appears?\s+safe|properly\s+(?:sanitiz|validat|escap|paramet)"
+    r"|correctly\s+(?:sanitiz|validat|handl)|code\s+is\s+secure)", re.I)
+_VULN_PHRASE = re.compile(
+    r"\b(is\s+vulnerable|vulnerabilit(?:y|ies)\s+aris|this\s+is\s+an?\s+"
+    r"(?:sql|command|os\s+command|path|xss|ssrf|code|xxe|insecure)"
+    r"|an?\s+attacker\s+(?:can|could|is\s+able|provides?|controls?)"
+    r"|allows?\s+(?:an?\s+)?(?:attacker|injection|traversal|arbitrary)"
+    r"|can\s+(?:inject|be\s+exploited|control)"
+    r"|(?:could|can|may|would)\s+lead\s+to\s+(?:sql|command|remote|arbitrary|"
+    r"ssrf|xss|path|injection)"
+    r"|without\s+(?:any\s+)?(?:sanitiz|validat|parameter|escap))", re.I)
+
+
+def _status_from_prose(text: str) -> Optional[str]:
+    """Infer a verdict from free-form reasoning when there is no status: line.
+
+    v14 free-forms into numbered prose on a bare <SCAN> prompt and emits no status:
+    line, so the scanner scored correct SQLi/SSRF/path catches as no-finding.
+
+    Regex-first-match was too fragile: "does NOT properly validate" fired the safe
+    pattern on the word "validate", ignoring the negation that reverses it. This scores
+    EVIDENCE instead -- count vuln vs safe signals, and let an explicit exploit
+    demonstration settle ties. It is a fallback, and deliberately abstains (None) when
+    the signals are weak rather than guessing.
+    """
+    t = " ".join(text.lower().split())
+
+    # An explicit exploit demonstration is near-decisive: the model does not narrate an
+    # attack payload for code it thinks is safe.
+    exploit = bool(re.search(
+        r"\.\./|/etc/passwd|<script|;\s*rm\s|;\s*cat\s|union\s+select"
+        r"|or\s+1\s*=\s*1|127\.0\.0\.1|169\.254|attacker[- ]controlled", t))
+
+    vuln_hits = len(re.findall(
+        r"is\s+vulnerable|vulnerabilit(?:y|ies)\s+aris|an?\s+attacker\s+(?:can|could|"
+        r"is\s+able|provides?|controls?|injects?|supplies)|can\s+(?:inject|be\s+"
+        r"exploited|control|traverse)|(?:could|can|may|would)\s+lead\s+to|"
+        r"without\s+(?:any\s+)?(?:sanitiz|validat|paramet|escap)|"
+        r"direct(?:ly)?\s+concatenat|string\s+concatenation|not\s+(?:properly\s+)?"
+        r"(?:sanitiz|validat|paramet|escap)|user[- ](?:provided|controlled|supplied)"
+        r"|arbitrary\s+(?:sql|command|file|code)|injection|traversal", t))
+
+    # Safe signals must NOT be negated. "does not properly validate" is a vuln signal,
+    # so a preceding "not"/"n't"/"fails to"/"missing" cancels the safe reading.
+    safe_hits = 0
+    for m in re.finditer(
+            r"(is\s+safe|appears?\s+safe|properly\s+(?:sanitiz|validat|escap|paramet)"
+            r"|correctly\s+(?:sanitiz|validat|handl)|code\s+is\s+secure|no\s+"
+            r"(?:security\s+)?(?:vulnerabilit|issue|flaw|risk)|is\s+not\s+"
+            r"(?:vulnerable|exploitable)|uses?\s+(?:a\s+)?parameter)", t):
+        pre = t[max(0, m.start() - 24):m.start()]
+        if not re.search(r"(not|n't|fails?\s+to|without|missing|lacks?|no)", pre):
+            safe_hits += 1
+
+    if exploit and safe_hits == 0:
+        return "confirmed"
+    if vuln_hits >= safe_hits and vuln_hits >= 1:
+        return "confirmed"
+    if safe_hits > vuln_hits and safe_hits >= 1:
+        return "safe"
+    return None
+
+
 def parse_shape1(text: str) -> dict:
     fields = {}
     for m in FIELD_RE.finditer(text):
         fields[m.group(1).lower()] = m.group(2).strip()
     return {
         "think":    _extract_think(text),
-        "status":   _normalize_status(_extract_status_raw(text)),
-        "cwe":      _normalize_cwe(fields.get("cwe")),
+        "status":   (_normalize_status(_extract_status_raw(text))
+                     or _status_from_prose(text)),
+        "cwe":      _normalize_cwe(fields.get("cwe")) or _normalize_cwe(text),
         "severity": (fields.get("severity") or "").upper() if fields.get("severity") else None,
         "trace":    fields.get("trace"),
         "fix":      fields.get("fix"),

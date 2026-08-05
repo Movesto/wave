@@ -1,0 +1,4121 @@
+<!doctype html><meta charset="utf-8"><title>Corpus reasoning audit</title>
+<style>
+:root{--bg:#0d0d0d;--surf:#1a1a19;--ink:#e8e8e3;--mut:#898781;--line:#2c2c2a;--acc:#3987e5}
+@media(prefers-color-scheme:light){:root{--bg:#f9f9f7;--surf:#fff;--ink:#0b0b0b;--mut:#6a6a66;--line:#e1e0d9;--acc:#2a78d6}}
+body{background:var(--bg);color:var(--ink);font:14px system-ui,-apple-system,"Segoe UI",sans-serif;margin:0 auto;padding:24px;max-width:1400px}
+h1{font-size:1.2rem}.lead{color:var(--mut);max-width:70ch;line-height:1.5}
+.card{background:var(--surf);border:1px solid var(--line);border-radius:10px;margin:18px 0;overflow:hidden}
+.hd{display:flex;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
+.id{font-weight:700;color:var(--acc)}.shape{color:var(--mut);font-size:.8rem;font-family:ui-monospace,monospace}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:0}
+@media(max-width:900px){.cols{grid-template-columns:1fr}}
+.col{padding:12px 14px}.col:first-child{border-right:1px solid var(--line)}
+.col h3{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:0 0 8px}
+pre{white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;max-height:460px;overflow:auto}
+.q{padding:10px 14px;border-top:1px solid var(--line);color:var(--mut);font-size:.85rem}
+.rubric{background:var(--surf);border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin:16px 0}
+.rubric b{color:var(--acc)} code{background:var(--line);padding:1px 5px;border-radius:4px}
+</style>
+<h1>Corpus reasoning-quality audit</h1>
+<p class="lead">Our validators prove structure (label matches status, fields complete, no dupes/leaks). They do <b>not</b> prove the reasoning is real &mdash; that is your job. For each trace: read the code on the left, then judge the reasoning on the right.</p>
+<div class="rubric">
+<b>For each card, log two things in <code>corpus_audit.csv</code>:</b><br><br>
+<b>1. reasoning_verdict</b> &mdash; <code>real</code> (trace follows the actual source&rarr;sink flow) / <code>theater</code> (plausible but doesn&rsquo;t match the code / cites a sink that isn&rsquo;t reached / hand-waves) / <code>wrong-label</code> (verdict itself is wrong &mdash; safe called vuln or vice-versa) / <code>unsure</code>.<br>
+<b>2. notes</b> &mdash; one line on <i>why</i>, for anything not <code>real</code>.<br><br>
+<b>Why it matters:</b> if &gt;~5&#37; are theater or wrong-label, that&rsquo;s a v12 data finding no automation would surface &mdash; and it recalibrates how much to trust v11. The 12 <code>shape3_codeql</code> cards are the cross-file slice v11 is training on right now: your read on those is tonight&rsquo;s most valuable data point.
+</div>
+<section class="card">
+  <div class="hd"><span class="id">#1</span><span class="shape">shape3</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+// caller
+const { isValidRedirectUrl } = require(&#x27;./auth/redirect_check&#x27;);
+const express = require(&#x27;express&#x27;);
+const app = express();
+
+app.get(&#x27;/login&#x27;, (req, res) =&gt; {
+  const candidate = req.query.return_to;
+  if (isValidRedirectUrl(candidate)) {
+    res.redirect(candidate);
+  } else {
+    res.redirect(&#x27;/default&#x27;);
+  }
+});
+
+// auth/redirect_check.js
+const allowedHosts = [&#x27;example.com&#x27;, &#x27;www.example.com&#x27;];
+function isValidRedirectUrl(candidate) {
+  try {
+    const parsed = new URL(candidate, &#x27;http://localhost&#x27;);
+    return allowedHosts.includes(parsed.hostname);
+  } catch (_) {
+    return false;
+  }
+}
+module.exports = { isValidRedirectUrl };
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The caller imports isValidRedirectUrl from &#x27;./auth/redirect_check&#x27;.  
+It reads user input from req.query.return_to and assigns it to candidate.  
+The candidate is passed to isValidRedirectUrl(candidate).  
+Inside isValidRedirectUrl, the URL constructor parses the candidate with a base.  
+The function checks that the hostname is in the allowedHosts list.  
+If parsing fails or hostname not allowed, it returns false.  
+Thus the redirect is only performed when the URL is validated, making the code safe.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+trace: req.query.return_to → isValidRedirectUrl(candidate) → hostname check against allowedHosts → safe redirect or fallback
+fix: none</pre></div>
+  </div>
+  <div class="q">#1 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#2</span><span class="shape">shape1_sft</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+import java.sql.*;
+
+public class SQLInjectionVulnerability {
+    public static void main(String[] args) {
+        try {
+            String username = &quot;admin&#x27;; DROP TABLE users; --&quot;;
+            String password = &quot;password123&quot;;
+
+            // Establishing a connection to the database
+            Connection connection = DriverManager.getConnection(&quot;jdbc:mysql://localhost:3306/mydatabase&quot;, &quot;root&quot;, &quot;password&quot;);
+
+            // Creating a SQL statement with user input
+            String query = &quot;SELECT * FROM users WHERE username=&#x27;&quot; + username + &quot;&#x27; AND password=&#x27;&quot; + password + &quot;&#x27;&quot;;
+            
+            // Executing the SQL query
+            Statement statement = connection.createStatement();
+            ResultSet resultSet = statement.executeQuery(query);
+            
+            // Processing the results
+            while (resultSet.next()) {
+                System.out.println(&quot;Username: &quot; + resultSet.getString(&quot;username&quot;));
+                System.out.println(&quot;Password: &quot; + resultSet.getString(&quot;password&quot;));
+            }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `Username` is untrusted input entering this code (near line 12).
+2. It flows to `sql`, which is concatenated into a SQL query.
+3. The fix adds a control the vulnerable code lacks: uses a parameterized query / bound placeholder.
+4. An attacker controlling `Username` can therefore exploit it — this is CWE-89.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-89
+severity: HIGH
+line: 12
+trace: Username -&gt; sql
+fix: Uses a parameterized query / bound placeholder</pre></div>
+  </div>
+  <div class="q">#2 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#3</span><span class="shape">shape1_fixjs</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+function(key) {
+    return ((function(){
+        var __monad__ = dbDeferredMonad;
+        var query = &quot;START a=node:users(key={key}) MATCH a-[r:adds]-&gt;b RETURN b&quot;
+        return __monad__.bind(liftDbOp(function(db) {
+            return function(handler) {
+                return db.query(query, {
+                    &quot;key&quot;: key
+                }, handler);
+            };
+        }), function(res) {
+            
+            return __monad__.return(res.map(function(a) {
+                return a.b;
+            }));
+        });
+    })());
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `query` is untrusted input entering this code (near line 7).
+2. It flows to `db.query`, which is concatenated into a SQL query.
+3. The fix adds a control the vulnerable code lacks: uses a parameterized query / bound placeholder.
+4. An attacker controlling `query` can therefore exploit it — this is CWE-89.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-89
+severity: HIGH
+line: 7
+trace: query -&gt; db.query
+fix: Uses a parameterized query / bound placeholder</pre></div>
+  </div>
+  <div class="q">#3 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#4</span><span class="shape">shape1_r2vul_valtest</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+static struct tls_ticket_key *get_ticket_key(unsigned char *key_name,
+    size_t key_namelen) {
+  struct tls_ticket_key *k = NULL;
+
+  if (tls_ticket_keys == NULL) {
+    return NULL;
+  }
+
+  for (k = (struct tls_ticket_key *) tls_ticket_keys-&gt;xas_list;
+       k;
+       k = k-&gt;next) {
+    if (memcmp(key_name, k-&gt;key_name, key_namelen) == 0) {
+      break;
+    }
+  }
+
+  return k;
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**:
+   - **Null Pointer Checks**: The function begins by checking if `tls_ticket_keys` is `NULL`. This prevents dereferencing a null pointer, which could lead to undefined behavior or crashes. This is a critical safety measure in C programming.
+   - **Use of `memcmp` for Comparison**: The function uses `memcmp` to compare `key_name` with `k-&gt;key_name`. This is a safe way to compare memory regions, especially when dealing with binary data or strings of unknown length. Unlike `strcmp`, `memcmp` does not assume null-termination, making it safer for arbitrary byte sequences.
+   - **Loop Control**: The loop iterates through a linked list using the `next` pointer of each `tls_ticket_key` structure. The loop condition checks if `k` is `NULL` before proceeding, ensuring that the loop will terminate once the end of the list is reached.
+
+2. **Absence of Common Vulnerabilities**:
+   - **Buffer Overflows**: The function does not perform any operations that could lead to buffer overflows, such as copying data into fixed-size buffers without checking sizes. The use of `memcmp` with explicit length (`key_namelen`) further mitigates this risk.
+   - **Integer Overflows**: There are no arithmetic operations that could result in integer overflows, which could be used to manipulate pointers or array indices.
+   - **Uninitialized Variables**: All variables are properly initialized before use. For instance, `k` is set to `NULL` initially, and the loop ensures that `k` is only dereferenced after being assigned a valid pointer from the list.
+   - **Race Conditions**: While not directly related to this function, the function does not introduce race conditions since it does not modify shared data structures. It only reads from `tls_ticket_keys` and its associated list.
+
+3. **Validation of the Non-Vulnerable Label**:
+   - **Code Review Evidence**: The function has undergone a review process, which is a strong indicator of its security. Code reviews can catch issues that automated tools might miss, such as logical errors or subtle security flaws.
+   - **No External Inputs**: The function does not directly handle external inputs, which reduces the attack surface. The `key_name` and `key_namelen` parameters are assumed to be validated or sanitized before being passed to this function.
+   - **Memory Management**: The function does not allocate or free memory, which avoids common issues related to memory management, such as double frees or use-after-free errors.
+   - **Consistent Use of Safe Functions**: The use of `memcmp` for comparison and the careful handling of pointers and memory regions demonstrate a consistent application of safe coding practices.
+
+In conclusion, based on the analysis of code safety, the absence of common vulnerabilities, and the validation provided by the code review, the function is justified in being labeled as non-vulnerable.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: Analysis of Code Safety:
+fix: none</pre></div>
+  </div>
+  <div class="q">#4 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#5</span><span class="shape">shape1_wave3_jsts</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+// the global report path
+// @TODO This will have to factor in the type of report - report uuid can be looked up in `saved_report` table
+const REPORT_PATH = path.resolve(path.join(__dirname, &#x27;../reports/&#x27;));
+
+/**
+ * @function keys
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `path` is untrusted input entering this code (near line 4).
+2. It flows to `path.resolve`, which is used to build a filesystem path.
+3. The fix adds a control the vulnerable code lacks: path is confined to a base dir; &#x27;..&#x27; rejected.
+4. An attacker controlling `path` can therefore exploit it — this is CWE-22.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-22
+severity: HIGH
+line: 4
+trace: path -&gt; path.resolve
+fix: Path is confined to a base dir; &#x27;..&#x27; rejected</pre></div>
+  </div>
+  <div class="q">#5 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#6</span><span class="shape">shape2</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+const express = require(&#x27;express&#x27;);
+const router = express.Router();
+const { serveFile } = require(&#x27;../files/serve&#x27;);
+
+router.get(&#x27;/download/:name&#x27;, (req, res) =&gt; {
+  const filename = req.params.name;
+  serveFile(filename, res);
+});
+
+module.exports = router;
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The request parameter `req.params.name` is user-supplied and therefore untrusted.  
+It is assigned to the local variable `filename`.  
+`filename` is passed directly to the imported function `serveFile`.  
+`serveFile` is imported from `files/serve.js`, whose implementation is not visible here.  
+Because the safety of the call depends on whether `serveFile` sanitizes the filename, we cannot determine the risk without inspecting that file.  
+Guessing that the function is safe or unsafe would be incorrect; the correct action is to request the missing context.
+&lt;/think&gt;
+
+status: needs_context open_refs: - serveFile (files/serve.js) partial_trace: user input from req.params.name flows into serveFile(filename) — verdict depends on serveFile&#x27;s implementation</pre></div>
+  </div>
+  <div class="q">#6 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#7</span><span class="shape">shape1_sft</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+import java.io.*;
+import java.util.*;
+
+public class XSSVulnerableCode {
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+        
+        System.out.print(&quot;Enter your name: &quot;);
+        String userName = scanner.nextLine();
+        
+        // Vulnerability: User input is directly included in the HTML response without proper escaping
+        String htmlResponse = &quot;&lt;h1&gt;Welcome, &quot; + userName + &quot;!&lt;/h1&gt;&quot;;
+        
+        System.out.println(htmlResponse);
+    }
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. Untrusted input is present, but it does not reach a dangerous sink unguarded.
+2. The code applies a control: the untrusted input is validated/neutralized before any sink.
+3. Because that control neutralizes the risk on the path to the sink, the code is safe.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: input is neutralized by the untrusted input is validated/neutralized before any sink before any sink
+fix: none</pre></div>
+  </div>
+  <div class="q">#7 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#8</span><span class="shape">shape1_ts</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+import { createContext } from &#x27;react&#x27;;
+const ConfigurationContext = createContext&lt;ConfigurationContextValue&gt;({
+  logos: {
+    auth: { default: &#x27;&#x27; },
+    menu: { default: &#x27;&#x27; },
+  },
+  showTutorials: false,
+  showReleaseNotification: false,
+  updateProjectSettings: () =&gt; {
+    throw new Error(&#x27;updateProjectSettings was not implemented&#x27;);
+  },
+});
+export { ConfigurationContext };
+
+export interface ConfigurationContextValue {
+  logos: {
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The file imports `createContext` from React and immediately creates a `ConfigurationContext` with a default value. The default value contains an `updateProjectSettings` function that simply throws an `Error`. This function is part of the context value and will be exposed to any component that consumes the context. If a consumer calls `updateProjectSettings`, the function will throw, causing the application to crash. This is a classic denial‑of‑service scenario: a missing implementation leads to an unhandled exception. The function is defined on line 9, so the vulnerable sink is the `throw` statement inside `updateProjectSettings`. The data flow is trivial: the context value is exported, a consumer obtains it, and the consumer calls `updateProjectSettings`, which triggers the throw. The fix is to provide a real implementation or remove the placeholder.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-400
+severity: MEDIUM
+line: 9
+trace: ConfigurationContext.updateProjectSettings throws error
+fix: Implement updateProjectSettings or remove placeholder</pre></div>
+  </div>
+  <div class="q">#8 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#9</span><span class="shape">shape1_r2vul_valtest</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+@Override
+    public void onPerform(CommandEvent commandEvent) {
+
+        if (commandEvent.getMember().hasPermission(Permission.ADMINISTRATOR) &amp;&amp; commandEvent.getMember().hasPermission(Permission.MANAGE_SERVER)) {
+
+            EmbedBuilder embedBuilder = new EmbedBuilder()
+                    .setTitle(&quot;Setup Menu&quot;)
+                    .setFooter(commandEvent.getGuild().getName() + &quot; - &quot; + Data.ADVERTISEMENT, commandEvent.getGuild().getIconUrl())
+                    .setColor(Color.cyan)
+                    .setDescription(&quot;Which configuration do you want to check out?&quot;);
+
+            List&lt;SelectOption&gt; optionList = new ArrayList&lt;&gt;();
+            optionList.add(SelectOption.of(&quot;Audit-Logging&quot;, &quot;log&quot;));
+            optionList.add(SelectOption.of(&quot;Welcome-channel&quot;, &quot;welcome&quot;));
+            optionList.add(SelectOption.of(&quot;News-channel&quot;, &quot;news&quot;));
+            optionList.add(SelectOption.of(&quot;Autorole&quot;, &quot;autorole&quot;));
+            optionList.add(SelectOption.of(&quot;Temporal-Voice&quot;, &quot;tempvoice&quot;));
+            optionList.add(SelectOption.of(&quot;Statistics&quot;, &quot;statistics&quot;));
+
+            SelectMenu selectMenu = new SelectMenuImpl(&quot;setupActionMenu&quot;, &quot;Select a configuration Step!&quot;, 1, 1, false, optionList);
+
+            if (commandEvent.isSlashCommand()) {
+                commandEvent.getInteractionHook().sendMessageEmbeds(embedBuilder.build())
+                        .addActionRow(selectMenu).queue();
+            } else {
+                commandEvent.getChannel().sendMessageEmbeds(embedBuilder.build())
+                        .addActionRow(selectMenu).queue();
+            }
+        } else {
+            Main.getInstance().getCommandManager().sendMessage(&quot;You dont have the Permission for this Command!&quot;, 5, commandEvent.getChannel(), commandEvent.getInteractionHook());
+        }
+        Main.getInstance().getCommandManager().deleteMessage(commandEvent.getMessage(), commandEvent.getInteractionHook());
+    }
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Specific Code Constructs**: The vulnerability primarily stems from the lack of validation or sanitization of the `SelectOption` values and the subsequent actions taken based on these values. Specifically, the code constructs that contribute to this are:
+   - The creation of `SelectOption` objects with predefined keys (`&quot;log&quot;`, `&quot;welcome&quot;`, etc.) without any validation mechanism. - The assumption that the selected option will only correspond to valid configurations within the same guild, without checking the actual target channels or their guild affiliations. 2. **Mechanism of the Vulnerability**: The vulnerability arises because the function does not verify whether the target channels (like audit logs) belong to the same guild where the command is executed. An attacker could theoretically exploit this by creating a custom configuration outside the bot&#x27;s intended setup, pointing to a channel in a different guild. When the bot processes the selection, it might send messages to this external channel, bypassing protections like raid detection and webhook restrictions. This is facilitated by the fact that the bot uses the selected option to determine which configuration to apply, but it does not validate the guild association of the channels involved in these configurations. 3. **Potential Impact**: Exploiting this vulnerability could lead to several serious consequences:
+   - **Spamming**: Attackers could flood a different server&#x27;s channel with unwanted messages, disrupting its normal operations. - **Mass Advertisements**: Similar to spamming, attackers could use the bot to promote their own services or content across multiple servers, potentially violating Discord&#x27;s terms of service. - **Bypassing Protections**: By sending messages to channels in other servers, attackers could circumvent protections designed to prevent abuse, such as rate limits, raid detection, and webhook filters. 4. **Contextual Relevance**: This vulnerability aligns with CWE-863, which involves improper neutralization of special elements used in an OS command (&#x27;OS Command Injection&#x27;). In this context, the &quot;special elements&quot; are the `SelectOption` values that determine the bot&#x27;s behavior. The core issue is the lack of validation for the target channels&#x27; guild affiliations, allowing an attacker to manipulate the bot&#x27;s actions in unintended ways.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-863
+severity: HIGH
+line: none
+trace: Specific Code Constructs: The vulnerability primarily stems from the lack of validation or sanitization of the `Sel...
+fix: Validate/neutralize the untrusted input before it reaches the sink.</pre></div>
+  </div>
+  <div class="q">#9 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#10</span><span class="shape">shape1_cvefixes</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+/*-
+
+ * Copyright 2014 Square Inc.
+
+ *
+
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+
+ * you may not use this file except in compliance with the License.
+
+ * You may obtain a copy of the License at
+
+ *
+
+ *     http://www.apache.org/licenses/LICENSE-2.0
+
+ *
+
+ * Unless required by applicable law or agreed to in writing, software
+
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+ * See the License for the specific language governing permissions and
+
+ * limitations under the License.
+
+ */
+
+
+
+package josecipher
+
+
+
+import (
+
+	&quot;bytes&quot;
+
+	&quot;crypto/cipher&quot;
+
+	&quot;crypto/hmac&quot;
+
+	&quot;crypto/sha256&quot;
+
+	&quot;crypto/sha512&quot;
+
+	&quot;crypto/subtle&quot;
+
+	&quot;encoding/binary&quot;
+
+	&quot;errors&quot;
+
+	&quot;hash&quot;
+
+)
+
+
+
+const (
+
+	nonceBytes = 16
+
+)
+
+
+
+// NewCBCHMAC instantiates a new AEAD based on CBC+HMAC.
+
+func NewCBCHMAC(key []byte, newBlockCipher func([]byte) (cipher.Block, error)) (cipher.AEAD, error) {
+
+	keySize := len(key) / 2
+
+	integrityKey := key[:keySize]
+
+	encryptionKey := key[keySize:]
+
+
+
+	blockCipher, err := newBlockCipher(encryptionKey)
+
+	if err != nil {
+
+		return nil, err
+
+	}
+
+
+
+	var hash func() hash.Hash
+
+	switch keySize {
+
+	case 16:
+
+		hash = sha256.New
+
+	case 24:
+
+		hash = sha512.New384
+
+	case 32:
+
+		hash = sha512.New
+
+	}
+
+
+
+	return &amp;cbcAEAD{
+
+		hash:         hash,
+
+		blockCipher:  blockCipher,
+
+		authtagBytes: keySize,
+
+		integrityKey: integrityKey,
+
+	}, nil
+
+}
+
+
+
+// An AEAD based on CBC+HMAC
+
+type cbcAEAD struct {
+
+	hash         func() hash.Hash
+
+	authtagBytes int
+
+	integrityKey []byte
+
+	blockCipher  cipher.Block
+
+}
+
+
+
+func (ctx *cbcAEAD) NonceSize() int {
+
+	return nonceBytes
+
+}
+
+
+
+func (ctx *cbcAEAD) Overhead() int {
+
+	// Maximum overhead is block size (for padding) plus auth tag length, where
+
+	// the length of the auth tag is equivalent to the key size.
+
+	return ctx.blockCipher.BlockSize() + ctx.authtagBytes
+
+}
+
+
+
+// Seal encrypts and authenticates the plaintext.
+
+func (ctx *cbcAEAD) Seal(dst, nonce, plaintext, data []byte) []byte {
+
+	// Output buffer -- must take care not to mangle plaintext input.
+
+	ciphertext := make([]byte, len(plaintext)+ctx.Overhead())[:len(plaintext)]
+
+	copy(ciphertext, plaintext)
+
+	ciphertext = padBuffer(ciphertext, ctx.blockCipher.BlockSize())
+
+
+
+	cbc := cipher.NewCBCEncrypter(ctx.blockCipher, nonce)
+
+
+
+	cbc.CryptBlocks(ciphertext, ciphertext)
+
+	authtag := ctx.computeAuthTag(data, nonce, ciphertext)
+
+
+
+	ret, out := resize(dst, len(dst)+len(ciphertext)+len(authtag))
+
+	copy(out, ciphertext)
+
+	copy(out[len(ciphertext):], authtag)
+
+
+
+	return ret
+
+}
+
+
+
+// Open decrypts and authenticates the ciphertext.
+
+func (ctx *cbcAEAD) Open(dst, nonce, ciphertext, data []byte) ([]byte, error) {
+
+	if len(ciphertext) &lt; ctx.authtagBytes {
+
+		return nil, errors.New(&quot;square/go-jose: invalid ciphertext (too short)&quot;)
+
+	}
+
+
+
+	offset := len(ciphertext) - ctx.authtagBytes
+
+	expectedTag := ctx.computeAuthTag(data, nonce, ciphertext[:offset])
+
+	match := subtle.ConstantTimeCompare(expectedTag, ciphertext[offset:])
+
+	if match != 1 {
+
+		return nil, errors.New(&quot;square/go-jose: invalid ciphertext (auth tag mismatch)&quot;)
+
+	}
+
+
+
+	cbc := cipher.NewCBCDecrypter(ctx.blockCipher, nonce)
+
+
+
+	// Make copy of ciphertext buffer, don&#x27;t want to modify in place
+
+	buffer := append([]byte{}, []byte(ciphertext[:offset])...)
+
+
+
+	if len(buffer)%ctx.blockCipher.BlockSize() &gt; 0 {
+
+		return nil, errors.New(&quot;square/go-jose: invalid ciphertext (invalid length)&quot;)
+
+	}
+
+
+
+	cbc.CryptBlocks(buffer, buffer)
+
+
+
+	// Remove padding
+
+	plaintext, err := unpadBuffer(buffer, ctx.blockCipher.BlockSize())
+
+	if err != nil {
+
+		return nil, err
+
+	}
+
+
+
+	ret, out := resize(dst, len(dst)+len(plaintext))
+
+	copy(out, plaintext)
+
+
+
+	return ret, nil
+
+}
+
+
+
+// Compute an authentication tag
+
+func (ctx *cbcAEAD) computeAuthTag(aad, nonce, ciphertext []byte) []byte {
+
+	buffer := make([]byte, len(aad)+len(nonce)+len(ciphertext)+8)
+
+	n := 0
+
+	n += copy(buffer, aad)
+
+	n += copy(buffer[n:], nonce)
+
+	n += copy(buffer[n:], ciphertext)
+
+	binary.BigEndian.PutUint64(buffer[n:], uint64(len(aad)*8))
+
+
+
+	// According to documentation, Write() on hash.Hash never fails.
+
+	hmac := hmac.New(ctx.hash, ctx.integrityKey)
+
+	_, _ = hmac.Write(buffer)
+
+
+
+	return hmac.Sum(nil)[:ctx.authtagBytes]
+
+}
+
+
+
+// resize ensures the the given slice has a capacity of at least n bytes.
+
+// If the capacity of the slice is less than n, a new slice is allocated
+
+// and the existing data will be copied.
+
+func resize(in []byte, n int) (head, tail []byte) {
+
+	if cap(in) &gt;= n {
+
+		head = in[:n]
+
+	} else {
+
+		head = make([]byte, n)
+
+		copy(head, in)
+
+	}
+
+
+
+	tail = head[len(in):]
+
+	return
+
+}
+
+
+
+// Apply padding
+
+func padBuffer(buffer []byte, blockSize int) []byte {
+
+	missing := blockSize - (len(buffer) % blockSize)
+
+	ret, out := resize(buffer, len(buffer)+missing)
+
+	padding := bytes.Repeat([]byte{byte(missing)}, missing)
+
+	copy(out, padding)
+
+	return ret
+
+}
+
+
+
+// Remove padding
+
+func unpadBuffer(buffer []byte, blockSize int) ([]byte, error) {
+
+	if len(buffer)%blockSize != 0 {
+
+		return nil, errors.New(&quot;square/go-jose: invalid padding&quot;)
+
+	}
+
+
+
+	last := buffer[len(buffer)-1]
+
+	count := int(last)
+
+
+
+	if count == 0 || count &gt; blockSize || count &gt; len(buffer) {
+
+		return nil, errors.New(&quot;square/go-jose: invalid padding&quot;)
+
+	}
+
+
+
+	padding := bytes.Repeat([]byte{last}, count)
+
+	if !bytes.HasSuffix(buffer, padding) {
+
+		return nil, errors.New(&quot;square/go-jose: invalid padding&quot;)
+
+	}
+
+
+
+	return buffer[:len(buffer)-count], nil
+
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `data` is untrusted input entering this code (near line 163).
+2. It flows to `authentic`, which is reached without an authorization/authentication check.
+3. The fix adds a control the vulnerable code lacks: an explicit access-control / authentication check guards it.
+4. An attacker controlling `data` can therefore exploit it — this is CWE-284.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-284
+severity: HIGH
+line: 163
+trace: data -&gt; authentic
+fix: An explicit access-control / authentication check guards it</pre></div>
+  </div>
+  <div class="q">#10 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#11</span><span class="shape">shape1_r2vul_ml</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+@Override
+	public ICStorageElement[] getChildrenByName(String name) {
+		synchronized (fLock) {
+			createChildren();
+			ArrayList&lt;ICStorageElement&gt; children = new ArrayList&lt;&gt;();
+			for (ICStorageElement child : fChildList)
+				if (name.equals(child.getName()))
+					children.add(child);
+			return children.toArray(new ICStorageElement[children.size()]);
+		}
+	}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**:
+   - The function `getChildrenByName` uses synchronization (`synchronized (fLock)`) to ensure thread safety when accessing shared resources (`fChildList`). This prevents concurrent modification issues and ensures that the list is accessed in a controlled manner, which is crucial in multi-threaded environments.
+   - The method `createChildren()` is called before iterating over `fChildList`. Assuming `createChildren()` initializes or updates `fChildList`, this ensures that the list is up-to-date and properly initialized before use, reducing the risk of null pointer exceptions or working with stale data.
+   - The use of `ArrayList&lt;ICStorageElement&gt;` for collecting matching children is a safe practice. It dynamically resizes and handles memory allocation internally, avoiding buffer overflow issues that might occur with fixed-size arrays.
+   - The comparison `name.equals(child.getName())` is used instead of `child.getName().equals(name)`. This protects against `NullPointerException` if `child.getName()` returns `null`.
+
+2. **Absence of Common Vulnerabilities**:
+   - **Injection Attacks**: There are no external inputs being directly executed or interpreted, so SQL injection, command injection, or other forms of injection attacks are not applicable.
+   - **Buffer Overflows**: The use of `ArrayList` and converting it to an array at the end avoids manual memory management and thus buffer overflows.
+   - **Null Pointer Exceptions**: By using `name.equals(child.getName())`, the function avoids calling methods on potentially null objects, which could lead to runtime exceptions.
+   - **Race Conditions**: The synchronized block around the critical section of the code prevents race conditions by ensuring that only one thread can execute the block at a time.
+
+3. **Validation of the Non-Vulnerable Label**:
+   - The function does not perform any operations that could lead to common security vulnerabilities such as those mentioned above.
+   - The code adheres to safe coding practices, including proper synchronization, null checks, and dynamic memory management.
+   - There is no indication of improper input handling or lack of validation, which are often sources of vulnerabilities in similar functions.
+   - The function&#x27;s behavior is predictable and does not involve complex logic that could introduce subtle bugs or security flaws.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: Analysis of Code Safety:
+fix: none</pre></div>
+  </div>
+  <div class="q">#11 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#12</span><span class="shape">shape1_wave3_other</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+$k = $translate[$k];
+            if ($k == &#x27;&#x27;) continue;
+            if (strstr($k, &#x27;.&#x27;)) {
+                eval(&quot;\$block&quot; . getvarname($k) . &quot;=\$v;&quot;);
+                continue;
+            }
+        } else $k = strtolower($k);
+
+        if ($k == &#x27;handle&#x27;) {
+            $v = strtok($v, &#x27; &#x27;);
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `getvarname` is untrusted input entering this code (near line 4).
+2. It flows to `eval`, which is interpreted as code / merged into an object prototype.
+3. The fix adds a control the vulnerable code lacks: no dynamic code execution; safe parser / key allow-list.
+4. An attacker controlling `getvarname` can therefore exploit it — this is CWE-94.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-94
+severity: HIGH
+line: 4
+trace: getvarname -&gt; eval
+fix: No dynamic code execution; safe parser / key allow-list</pre></div>
+  </div>
+  <div class="q">#12 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#13</span><span class="shape">shape3</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# caller
+from flask import request
+from io.validate import validate_filename
+
+def delete_file():
+    candidate = request.args.get(&#x27;name&#x27;)
+    if candidate:
+        validate_filename(candidate)
+
+# io/validate.py
+def validate_filename(candidate):
+    &quot;&quot;&quot;
+    Unsafe validation: directly uses user input in a shell command.
+    &quot;&quot;&quot;
+    import os
+    os.system(f&quot;rm {candidate}&quot;)
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. In app.py, request.args.get(&#x27;name&#x27;) retrieves user input into variable candidate.  
+2. candidate is passed to validate_filename(candidate) from io/validate.py.  
+3. Inside validate_filename, the function imports os.  
+4. The function calls os.system(f&quot;rm {candidate}&quot;) without sanitizing candidate.  
+5. os.system executes the shell command with the raw user input, enabling arbitrary command execution.  
+6. Therefore the input bypasses validation and reaches a dangerous sink.  
+7. The vulnerability is confirmed.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-78
+severity: HIGH
+trace: request.args.get(&#x27;name&#x27;) -&gt; validate_filename(candidate) -&gt; os.system(&#x27;rm &#x27; + candidate)
+fix: Sanitize input or use a safe API (e.g., shutil.rmtree with path validation).</pre></div>
+  </div>
+  <div class="q">#13 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#14</span><span class="shape">shape1_r2vul_ml</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+int GmfSetKwd(int64_t MshIdx, int KwdCod, int64_t NmbLin, ...)
+{
+   int         i, *TypTab;
+   int64_t     CurPos;
+   va_list     VarArg;
+   GmfMshSct   *msh = (GmfMshSct *)MshIdx;
+   KwdSct      *kwd;
+
+   RecBlk(msh, msh-&gt;buf, 0);
+
+   if( (KwdCod &lt; 1) || (KwdCod &gt; GmfMaxKwd) )
+      return(0);
+
+   kwd = &amp;msh-&gt;KwdTab[ KwdCod ];
+
+   // Read further arguments if this kw is a solution
+   if(!strcmp(GmfKwdFmt[ KwdCod ][2], &quot;sr&quot;)
+   || !strcmp(GmfKwdFmt[ KwdCod ][2], &quot;hr&quot;))
+   {
+      va_start(VarArg, NmbLin);
+
+      kwd-&gt;NmbTyp = va_arg(VarArg, int);
+      TypTab = va_arg(VarArg, int *);
+
+      for(i=0;i&lt;kwd-&gt;NmbTyp;i++)
+         kwd-&gt;TypTab[i] = TypTab[i];
+
+      // Add two extra paramaters for HO elements: degree and nmb nodes
+      if(!strcmp(&quot;hr&quot;, GmfKwdFmt[ KwdCod ][2]))
+      {
+         kwd-&gt;deg = va_arg(VarArg, int);
+         kwd-&gt;NmbNod = va_arg(VarArg, int);
+      }
+
+      va_end(VarArg);
+   }
+
+   // Setup the kwd info
+   ExpFmt(msh, KwdCod);
+
+   if(!kwd-&gt;typ)
+      return(0);
+   else if(kwd-&gt;typ == InfKwd)
+      kwd-&gt;NmbLin = 1;
+   else
+      kwd-&gt;NmbLin = NmbLin;
+
+   // Store the next kwd position in binary file
+   if( (msh-&gt;typ &amp; Bin) &amp;&amp; msh-&gt;NexKwdPos )
+   {
+      CurPos = GetFilPos(msh);
+
+      if(!SetFilPos(msh, msh-&gt;NexKwdPos))
+         return(0);
+
+      SetPos(msh, CurPos);
+
+      if(!SetFilPos(msh, CurPos))
+         return(0);
+   }
+
+   // Write the header
+   if(msh-&gt;typ &amp; Asc)
+   {
+      fprintf(msh-&gt;hdl, &quot;\n%s\n&quot;, GmfKwdFmt[ KwdCod ][0]);
+
+      if(kwd-&gt;typ != InfKwd)
+         fprintf(msh-&gt;hdl, INT64_T_FMT&quot;\n&quot;, kwd-&gt;NmbLin);
+
+      // In case of solution field, write the extended header
+      if(kwd-&gt;typ == SolKwd)
+      {
+         fprintf(msh-&gt;hdl, &quot;%d &quot;, kwd-&gt;NmbTyp);
+
+         for(i=0;i&lt;kwd-&gt;NmbTyp;i++)
+            fprintf(msh-&gt;hdl, &quot;%d &quot;, kwd-&gt;TypTab[i]);
+
+         fprintf(msh-&gt;hdl, &quot;\n&quot;);
+      }
+
+      if(!strcmp(&quot;hr&quot;, GmfKwdFmt[ KwdCod ][2]))
+         fprintf(msh-&gt;hdl, &quot;%d %d\n&quot;, kwd-&gt;deg, kwd-&gt;NmbNod);
+   }
+   else
+   {
+      RecWrd(msh, (unsigned char *)&amp;KwdCod);
+      msh-&gt;NexKwdPos = GetFilPos(msh);
+      SetPos(msh, 0);
+
+      if(kwd-&gt;typ != InfKwd)
+      {
+         if(msh-&gt;ver &lt; 4)
+         {
+            i = (int)kwd-&gt;NmbLin;
+            RecWrd(msh, (unsigned char *)&amp;i);
+         }
+         else
+            RecDblWrd(msh, (unsigned char *)&amp;kwd-&gt;NmbLin);
+      }
+
+      // In case of solution field, write the extended header at once
+      if(kwd-&gt;typ == SolKwd)
+      {
+         RecWrd(msh, (unsigned char *)&amp;kwd-&gt;NmbTyp);
+
+         for(i=0;i&lt;kwd-&gt;NmbTyp;i++)
+            RecWrd(msh, (unsigned char *)&amp;kwd-&gt;TypTab[i]);
+
+         if(!strcmp(&quot;hr&quot;, GmfKwdFmt[ KwdCod ][2]))
+         {
+            RecWrd(msh, (unsigned char *)&amp;kwd-&gt;deg);
+            RecWrd(msh, (unsigned char *)&amp;kwd-&gt;NmbNod);
+         }
+      }
+   }
+
+   // Reset write buffer position
+   msh-&gt;pos = 0;
+
+   // Compute the total file size and check if it crosses the 2GB threshold
+   msh-&gt;siz += kwd-&gt;NmbLin * kwd-&gt;NmbWrd * WrdSiz;
+
+   return(1);
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**:
+   - **Bounds Checking**: The function includes checks to ensure `KwdCod` is within valid bounds (`1 &lt;= KwdCod &lt;= GmfMaxKwd`). This prevents out-of-bounds access to `msh-&gt;KwdTab`.
+   - **Use of `va_list`**: The function uses `va_start`, `va_arg`, and `va_end` correctly to handle variable arguments, which helps prevent issues like stack corruption or buffer overflows that can occur with improper handling of variadic functions.
+   - **String Comparison**: The function uses `strcmp` for string comparisons, which is appropriate for comparing C-style strings. However, it does not use unsafe functions like `strcpy` or `strcat` that can lead to buffer overflows.
+   - **File Operations**: The function performs file operations using `fprintf` and custom functions like `RecWrd`, `RecDblWrd`, `GetFilPos`, and `SetFilPos`. These operations are checked for success, and errors are handled by returning `0`.
+
+2. **Absence of Common Vulnerabilities**:
+   - **Buffer Overflows**: The function avoids buffer overflows by using `va_arg` to extract arguments safely and by checking array indices against predefined limits.
+   - **Integer Overflows**: There are no explicit integer overflows in the code. The multiplication `kwd-&gt;NmbLin * kwd-&gt;NmbWrd * WrdSiz` is performed after all values have been set, but without additional context on the maximum possible values of these variables, it&#x27;s difficult to conclusively state there&#x27;s no risk. However, the function does check the file size against a 2GB threshold, which mitigates some risks.
+   - **Format String Vulnerabilities**: The function does not use format strings from untrusted input. All format strings used in `fprintf` are hardcoded.
+   - **Memory Management**: The function does not allocate or deallocate memory directly, reducing the risk of memory leaks or use-after-free vulnerabilities.
+
+3. **Validation of the Non-Vulnerable Label**:
+   - **Comprehensive Checks**: The function includes multiple checks to validate inputs and states, such as verifying `KwdCod` and handling different keyword types appropriately.
+   - **Error Handling**: The function returns `0` in several error cases, such as invalid `KwdCod`, failure to set file positions, or when certain conditions are not met. This ensures that the function does not proceed in an undefined state.
+   - **Code Review Evidence**: The absence of common vulnerabilities and the presence of safety measures provide strong evidence that the function is secure. The code review likely identified these safety practices and concluded that the function does not introduce exploitable flaws under normal operation.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: Analysis of Code Safety:
+fix: none</pre></div>
+  </div>
+  <div class="q">#14 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#15</span><span class="shape">shape1_ts</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+import * as vscode from &#x27;vscode&#x27;;
+import { beforeEach, afterEach } from &#x27;mocha&#x27;;
+        return callback(null, [&#x27;Text message&#x27;]);
+      client: {}
+    };
+    testConnectionController.setActiveConnection(mockActiveConnection);
+import chai from &#x27;chai&#x27;;
+import sinon from &#x27;sinon&#x27;;
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The code imports testing utilities and defines a mock connection object `mockActiveConnection` that contains a `client` property. This mock is then passed to `testConnectionController.setActiveConnection`. The `client` field is user‑controlled (in a real scenario it could be derived from external input). By calling `setActiveConnection` with this unvalidated client, the application may later use it to establish a database connection or execute queries without proper sanitization, exposing the system to injection or unauthorized access. The data flow is: `mockActiveConnection.client` → `testConnectionController.setActiveConnection`. This constitutes a vulnerable sink because the client object is not validated before being used to configure a connection.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-200
+severity: HIGH
+line: 6
+trace: mockActiveConnection.client → testConnectionController.setActiveConnection
+fix: Validate or sanitize the client object before passing it to setActiveConnection.</pre></div>
+  </div>
+  <div class="q">#15 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#16</span><span class="shape">shape1_verified</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+#lxdui.lxd.sslverify = true
+#lxdui.lxd.remote.name = host
+lxdui.jwt.token.expiration = 1200
+lxdui.jwt.secret.key = AC8d83&amp;21Almnis710sds
+lxdui.admin.user = admin
+lxdui.conf.dir = {{app_root}}/conf
+lxdui.conf.file = ${lxdui.conf.dir}/lxdui.conf
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The JWT signing secret is hard-coded in the config: lxdui.jwt.secret.key = AC8d83. A committed static secret can be read from source control and used to forge valid tokens.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-798
+severity: HIGH
+line: 4
+trace: lxdui.jwt.secret.key hardcoded secret -&gt; JWT signing
+fix: load the secret from an environment variable or secrets manager, never commit it</pre></div>
+  </div>
+  <div class="q">#16 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#17</span><span class="shape">shape1_verified</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+ * Lists all the user permissions for user with :id
+ */
+function list(req, res, next) {
+  let sql = `
+    SELECT permission.id, permission.unit_id FROM permission
+    WHERE permission.user_id = ?;
+  `;
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The snippet shows a SQL string being constructed at line 4 with a placeholder (`?`).  
+The only untrusted data that could reach the database is whatever value is taken from the request object (`req`). If a value from `req` were interpolated into that string instead of using the placeholder, the data would flow from `req` to the SQL string and then to the database driver.  
+Because the snippet does not include the interpolation or the actual query execution, a concrete source‑to‑sink path cannot be demonstrated from the provided code.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-284
+severity: HIGH
+line: 4
+trace: req` → `sql` at line 4
+fix: ensure that any user‑supplied value is passed as a parameter to the query execution rather than concatenated into the SQL string.</pre></div>
+  </div>
+  <div class="q">#17 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#18</span><span class="shape">shape1</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+def newest_commit_hash(self):
+        return self._newest_commit_hash
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**: The function `newest_commit_hash` is a simple getter method that returns the value stored in the instance variable `_newest_commit_hash`. This method does not perform any operations that could lead to common security issues such as input handling, data manipulation, or external resource access. It simply retrieves and returns a pre-existing value, which is inherently safe from injection attacks, buffer overflows, and other typical coding errors.
+
+2. **Absence of Common Vulnerabilities**: Potential vulnerabilities in similar functions often stem from improper handling of user input, lack of validation, or insecure data storage. For example, if this function were to accept parameters or modify data, there could be risks of SQL injection, cross-site scripting (XSS), or command injection. However, since `newest_commit_hash` only returns a stored value without any form of input or modification, these types of vulnerabilities are not applicable. Additionally, it does not interact with external systems or resources, ruling out issues related to network communication or file system access.
+
+3. **Validation of the Non-Vulnerable Label**: The function&#x27;s simplicity and lack of interaction with external factors or user inputs provide strong evidence for its security. There are no opportunities for malicious actors to influence the behavior of the function or extract sensitive information through this method. The function&#x27;s sole purpose is to return a value, and it does so without performing any operations that could introduce security risks. Therefore, based on the current implementation, the label of &quot;non-vulnerable&quot; is justified and supported by the absence of any code constructs that could lead to security vulnerabilities.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: no untrusted-input-to-sink data flow involving `newest_commit_hash`;
+fix: none</pre></div>
+  </div>
+  <div class="q">#18 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#19</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# mobsf/MobSF/views/api/api_static_analysis.py (line 62)
+
+
+@request_method([&#x27;POST&#x27;])
+@csrf_exempt
+def api_scan(request):
+    &quot;&quot;&quot;POST - Scan API.&quot;&quot;&quot;
+    if &#x27;hash&#x27; not in request.POST:
+        return make_api_response(
+            {&#x27;error&#x27;: &#x27;Missing Parameters&#x27;}, 422)
+
+# mobsf/StaticAnalyzer/views/ios/binary_analysis.py (line 95)
+        msg = &#x27;Starting Binary Analysis&#x27;
+        logger.info(msg)
+        append_scan_status(checksum, msg)
+
+        dot_app_path = next(Path(src).glob(&#x27;**/*.app&#x27;), None)
+
+        if not dot_app_path:
+            logger.warning(&#x27;Could not find .app directory.&#x27;)
+            return bin_dict
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `mobsf/MobSF/views/api/api_static_analysis.py` (line 62).
+2. The value flows across files: api_static_analysis.py:62 -&gt; api_static_analysis.py:67 -&gt; api_static_analysis.py:80 -&gt; static_analyzer.py:37 -&gt; static_analyzer.py:76 -&gt; static_analyzer.py:76.
+3. It reaches a sink in `mobsf/StaticAnalyzer/views/ios/binary_analysis.py` (line 95) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-22.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-22
+severity: HIGH
+line: 95
+trace: api_static_analysis.py:62 -&gt; api_static_analysis.py:67 -&gt; api_static_analysis.py:80 -&gt; static_analyzer.py:37 -&gt; static_analyzer.py:76 -&gt; static_analyzer.py:76
+fix: Validate/neutralize the tainted value before it reaches the sink in binary_analysis.py.</pre></div>
+  </div>
+  <div class="q">#19 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#20</span><span class="shape">shape1_r2vul_ml</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+static inline void l2cap_chan_set_err(struct l2cap_chan *chan, int err)
+{
+	chan-&gt;ops-&gt;state_change(chan, chan-&gt;state, err);
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**:
+   - The function `l2cap_chan_set_err` is a simple inline function designed to set an error state for a Bluetooth Low Energy (BLE) L2CAP channel. It does not directly handle user input or perform complex operations that could lead to common vulnerabilities.
+   - The function calls another function `state_change` through a function pointer stored in `chan-&gt;ops`. This implies that the behavior of `state_change` is defined elsewhere, but the function itself does not manipulate raw data or pointers in a way that could lead to buffer overflows or underflows.
+   - The parameters passed to `state_change` (`chan`, `chan-&gt;state`, and `err`) are all controlled by the context in which `l2cap_chan_set_err` is called. There is no indication of improper memory management or direct manipulation of memory regions.
+
+2. **Absence of Common Vulnerabilities**:
+   - **Buffer Overflows/Underflows**: The function does not allocate, copy, or manipulate buffers. It simply passes existing data to another function, reducing the risk of buffer-related vulnerabilities.
+   - **Null Pointer Dereferences**: While the function assumes that `chan` and `chan-&gt;ops` are valid pointers, it does not perform any checks before dereferencing them. However, given the context in which this function is likely used, it is reasonable to assume that these pointers are validated elsewhere in the codebase.
+   - **Integer Overflows**: The function uses an integer `err` to represent an error code. There is no arithmetic operation performed on `err` that could lead to overflow, and the value is passed directly to `state_change`.
+   - **Race Conditions**: The function does not modify shared resources in a way that could lead to race conditions. It simply calls a function with the current state and error code.
+
+3. **Validation of the Non-Vulnerable Label**:
+   - The function&#x27;s simplicity and lack of direct interaction with external data sources or system resources support the claim that it is non-vulnerable.
+   - The function&#x27;s role is to propagate an error state, which is a common pattern in state machine implementations. Such patterns are generally considered safe if the surrounding code ensures that all pointers and states are valid.
+   - The absence of dynamic memory allocation, complex data structures, and direct user input handling further supports the conclusion that the function does not introduce new vulnerabilities.
+   - Given that the function is marked as inline, it suggests that it is intended to be a lightweight utility function, which aligns with its simple implementation and lack of complex logic that could introduce vulnerabilities.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: Analysis of Code Safety:
+fix: none</pre></div>
+  </div>
+  <div class="q">#20 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#21</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# airflow/configuration.py (line 469)
+        env_var_secret_path = env_var + &#x27;_SECRET&#x27;
+        if env_var_secret_path in os.environ:
+            # if this is a valid secret path...
+            if (section, key) in self.sensitive_config_values:
+                return _get_config_value_from_secret_backend(os.environ[env_var_secret_path])
+        return None
+
+    def _get_cmd_option(self, section: str, key: str):
+        fallback_key = key + &#x27;_cmd&#x27;
+
+# airflow/logging_config.py (line 47)
+            # Make sure that the variable is in scope
+            if not isinstance(logging_config, dict):
+                raise ValueError(&quot;Logging Config should be of dict type&quot;)
+
+            log.info(&#x27;Successfully imported user-defined logging config from %s&#x27;, logging_class_path)
+        except Exception as err:
+            # Import default logging configurations.
+            raise ImportError(f&#x27;Unable to load custom logging from {logging_class_path} due to {err}&#x27;)
+    else:
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `airflow/configuration.py` (line 469).
+2. The value flows across files: configuration.py:469 -&gt; configuration.py:624 -&gt; configuration.py:624 -&gt; configuration.py:626 -&gt; configuration.py:545 -&gt; configuration.py:545.
+3. It reaches a sink in `airflow/logging_config.py` (line 47) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-312.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-312
+severity: HIGH
+line: 47
+trace: configuration.py:469 -&gt; configuration.py:624 -&gt; configuration.py:624 -&gt; configuration.py:626 -&gt; configuration.py:545 -&gt; configuration.py:545
+fix: Validate/neutralize the tainted value before it reaches the sink in logging_config.py.</pre></div>
+  </div>
+  <div class="q">#21 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#22</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# cinder/tests/unit/test_volume_transfer.py (line 137)
+        self.ctxt.user_id = &#x27;new_user_id&#x27;
+        self.ctxt.project_id = &#x27;new_project_id&#x27;
+        response = tx_api.accept(self.ctxt,
+                                 transfer[&#x27;id&#x27;],
+                                 transfer[&#x27;auth_key&#x27;])
+        volume = db.volume_get(self.ctxt, &#x27;1&#x27;)
+        self.assertEqual(&#x27;new_project_id&#x27;, volume[&#x27;project_id&#x27;],
+                         &#x27;Unexpected project id&#x27;)
+        self.assertEqual(&#x27;new_user_id&#x27;, volume[&#x27;user_id&#x27;],
+
+# cinder/transfer/api.py (line 102)
+
+    def _get_crypt_hash(self, salt, auth_key):
+        &quot;&quot;&quot;Generate a random hash based on the salt and the auth key.&quot;&quot;&quot;
+        return hmac.new(str(salt),
+                        str(auth_key),
+                        hashlib.sha1).hexdigest()
+
+    def create(self, context, volume_id, display_name):
+        &quot;&quot;&quot;Creates an entry in the transfers table.&quot;&quot;&quot;
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `cinder/tests/unit/test_volume_transfer.py` (line 137).
+2. The value flows across files: test_volume_transfer.py:137 -&gt; api.py:141 -&gt; api.py:148 -&gt; api.py:99 -&gt; api.py:102.
+3. It reaches a sink in `cinder/transfer/api.py` (line 102) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-327.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-327
+severity: HIGH
+line: 102
+trace: test_volume_transfer.py:137 -&gt; api.py:141 -&gt; api.py:148 -&gt; api.py:99 -&gt; api.py:102
+fix: Validate/neutralize the tainted value before it reaches the sink in api.py.</pre></div>
+  </div>
+  <div class="q">#22 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#23</span><span class="shape">shape1_wave3_jsts</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+// Underline the matching results
+        if (!this.customOption) {
+          item.textContent = match(string, option);
+        }
+      } else {
+        util.addClass(item, &quot;excluded&quot;);
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. Untrusted input is present, but it does not reach a dangerous sink unguarded.
+2. The code applies a control: output is HTML-escaped / encoded before rendering.
+3. Because that control neutralizes the risk on the path to the sink, the code is safe.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: input is neutralized by output is HTML-escaped / encoded before rendering before any sink
+fix: none</pre></div>
+  </div>
+  <div class="q">#23 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#24</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# app/api/controllers/container.py (line 120)
+        return response.replyFailed(message=e.__str__())
+
+@container_api.route(&#x27;/clone/&lt;string:name&gt;&#x27;, methods=[&#x27;POST&#x27;])
+@jwt_required
+def cloneContainer(name):
+    input = request.get_json(silent=True)
+    validation = doValidateCloneMove(input)
+    if validation:
+        return response.reply(message=validation.message, status=403)
+
+# app/api/models/LXCContainer.py (line 274)
+            container.start(wait=True)
+            newContainer.start(wait=True)
+            return self.client.api.instances[self.data.get(&#x27;newContainer&#x27;)].get().json()[&#x27;metadata&#x27;]
+        except Exception as e:
+            logging.error(&#x27;Failed to clone container {}&#x27;.format(self.data.get(&#x27;name&#x27;)))
+            logging.exception(e)
+            raise ValueError(e)
+
+    def move(self):
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `app/api/controllers/container.py` (line 120).
+2. The value flows across files: container.py:120 -&gt; container.py:126 -&gt; container.py:126 -&gt; container.py:128 -&gt; LXCContainer.py:7 -&gt; LXCContainer.py:15.
+3. It reaches a sink in `app/api/models/LXCContainer.py` (line 274) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-117.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-117
+severity: HIGH
+line: 274
+trace: container.py:120 -&gt; container.py:126 -&gt; container.py:126 -&gt; container.py:128 -&gt; LXCContainer.py:7 -&gt; LXCContainer.py:15
+fix: Validate/neutralize the tainted value before it reaches the sink in LXCContainer.py.</pre></div>
+  </div>
+  <div class="q">#24 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#25</span><span class="shape">shape1</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+def permissions(permissions: PermissionManager) -&gt; None:
+    &quot;&quot;&quot;
+    Define the permissions for this resource.
+
+    Parameters
+    ----------
+    permissions : PermissionManager
+        Permission manager instance to which permissions are added
+    &quot;&quot;&quot;
+    add = permissions.appender(module_name)
+
+    add(scope=S.GLOBAL, operation=P.VIEW, description=&quot;view any task&quot;)
+    add(scope=S.COLLABORATION, operation=P.VIEW, assign_to_container=True,
+        assign_to_node=True, description=&quot;view tasks of your organization&quot;)
+
+    add(scope=S.GLOBAL, operation=P.CREATE, description=&quot;create a new task&quot;)
+    add(scope=S.COLLABORATION, operation=P.CREATE,
+        description=(
+            &quot;create a new task for collaborations in which your organization &quot;
+            &quot;participates with&quot;
+        ))
+
+    add(scope=S.GLOBAL, operation=P.DELETE,
+        description=&quot;delete a task&quot;)
+    add(scope=S.COLLABORATION, operation=P.DELETE,
+        description=&quot;delete a task from your collaborations&quot;)
+    add(scope=S.ORGANIZATION, operation=P.DELETE,
+        description=(
+            &quot;delete a task from a collaboration in which your organization &quot;
+            &quot;participates with&quot;
+        ))
+    add(scope=S.OWN, operation=P.DELETE,
+        description=&quot;delete tasks that you created&quot;)
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Specific Code Constructs**: The vulnerability is primarily related to the way permissions are defined and applied in the `permissions` function. Specifically, the issue arises from the permissions being set up without ensuring that viewing a collaboration inherently includes the ability to view tasks within that collaboration. This is evident in the lines where permissions are added for viewing tasks globally and within collaborations:
+   ```python
+   add(scope=S.GLOBAL, operation=P.VIEW, description=&quot;view any task&quot;)
+   add(scope=S.COLLABORATION, operation=P.VIEW, assign_to_container=True,
+       assign_to_node=True, description=&quot;view tasks of your organization&quot;)
+   ```
+   These lines define separate permissions for viewing tasks globally and within collaborations, which could be misconfigured or misunderstood. 2. **Mechanism of the Vulnerability**: The vulnerability stems from the fact that the system does not enforce a hierarchical or dependent relationship between permissions. In other words, having permission to view a collaboration does not automatically grant permission to view tasks within that collaboration. This separation can lead to a scenario where a user might be able to see a collaboration but not the tasks within it, or vice versa. The code does not explicitly link the permission to view a collaboration with the permission to view tasks within that collaboration, leading to potential inconsistencies. 3. **Potential Impact**: Exploiting this vulnerability could allow unauthorized users to access tasks within collaborations they are not supposed to see. This breach of confidentiality could lead to sensitive data exposure, misuse of information, and potential compliance issues. For example, a user might gain insights into tasks that are part of a collaboration their organization is not involved in, leading to competitive disadvantages or security risks. 4. **Contextual Relevance**: This vulnerability aligns with CWE-863 (Improper Neutralization of Special Elements used in an OS Command (&#x27;OS Command Injection&#x27;) and CWE-284 (Improper Access Control). However, the primary relevance here is to CWE-284, which focuses on improper access control mechanisms. This misalignment in permission settings directly contributes to the vulnerability, as described in the CVE details.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-863
+severity: HIGH
+line: none
+trace: CWE-863 in `permissions
+fix: This separation can lead to a scenario where a user might be able to see a collaboration but not the tasks within it, or vice versa.</pre></div>
+  </div>
+  <div class="q">#25 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#26</span><span class="shape">shape1_sft</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.Scanner;
+
+public class PathTraversalExample {
+
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+        System.out.print(&quot;Enter file name: &quot;);
+        String fileName = scanner.nextLine();
+
+        File file = new File(&quot;/path/to/files/&quot; + fileName);
+
+        try {
+            FileInputStream fis = new FileInputStream(file);
+            int data;
+            while ((data = fis.read()) != -1) {
+                System.out.print((char) data);
+            }
+            fis.close();
+        } catch (IOException e) {
+            System.out.println(&quot;Error reading file: &quot; + e.getMessage());
+        }
+    }
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. Untrusted input is present, but it does not reach a dangerous sink unguarded.
+2. The code applies a control: the untrusted input is validated/neutralized before any sink.
+3. Because that control neutralizes the risk on the path to the sink, the code is safe.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: input is neutralized by the untrusted input is validated/neutralized before any sink before any sink
+fix: none</pre></div>
+  </div>
+  <div class="q">#26 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#27</span><span class="shape">shape1_r2vul_ml</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+protected static File getTmpFolder() {
+        try {
+            File outputFolder = Files.createTempDirectory(&quot;codegen-&quot;).toFile();
+            outputFolder.deleteOnExit();
+            return outputFolder;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**:
+   - The function `getTmpFolder` uses `Files.createTempDirectory`, which is designed to create a temporary directory with a unique name. This method helps prevent directory traversal attacks by ensuring that the created directory is unique and not predictable.
+   - The method `deleteOnExit()` is called on the `outputFolder`. This ensures that the temporary directory will be deleted when the JVM exits, which is a good practice for cleaning up temporary files and directories and preventing disk space exhaustion.
+   - The exception handling in the form of a try-catch block around the directory creation logic is appropriate. It catches any exceptions that might occur during the directory creation process, logs them using `e.printStackTrace()`, and returns `null`. While logging stack traces can sometimes leak sensitive information, in this context, it seems to be used for debugging purposes rather than being exposed to end-users.
+
+2. **Absence of Common Vulnerabilities**:
+   - **Directory Traversal**: The use of `Files.createTempDirectory` mitigates the risk of directory traversal attacks because it automatically generates a unique directory name.
+   - **Resource Exhaustion**: The `deleteOnExit()` method helps mitigate resource exhaustion by ensuring that temporary directories are cleaned up when the application exits.
+   - **Improper Error Handling**: Although the function catches exceptions, it does not handle them in a way that could lead to further vulnerabilities, such as rethrowing them or logging sensitive information. However, it could be improved by logging at a higher level (e.g., using a logging framework instead of `printStackTrace`) and possibly handling specific exceptions differently.
+   - **Null Pointer Exceptions**: The function returns `null` if an exception occurs, which could lead to a `NullPointerException` if the caller does not check for `null`. While this is not a vulnerability per se, it is something to be aware of in terms of robustness.
+
+3. **Validation of the Non-Vulnerable Label**:
+   - The function does not directly interact with user input, network data, or perform operations that could lead to injection attacks (SQL, command injection, etc.), which are common sources of vulnerabilities.
+   - The use of Java&#x27;s built-in methods for creating and managing temporary files reduces the risk of introducing vulnerabilities through manual file path manipulation.
+   - The function&#x27;s simplicity and the use of high-level abstractions provided by the Java standard library contribute to its security. There are no complex logic flows or external dependencies that could introduce hidden vulnerabilities.
+   - Given the current implementation, there are no obvious security flaws or common vulnerabilities present. The function appears to be correctly handling the creation and cleanup of temporary directories, which is its intended purpose.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: Analysis of Code Safety:
+fix: none</pre></div>
+  </div>
+  <div class="q">#27 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#28</span><span class="shape">shape1_cvefixes</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# Fail2Ban configuration file
+
+#
+
+# Author: Jan Wagner &lt;waja@cyconet.org&gt;
+
+#
+
+#
+
+
+
+[Definition]
+
+
+
+# Option:  failregex
+
+# Notes.:  regex to match the password failures messages in the logfile. The
+
+#          host must be matched by a group named &quot;host&quot;. The tag &quot;&lt;HOST&gt;&quot; can
+
+#          be used for standard IP/hostname matching and is only an alias for
+
+#          (?:::f{4,6}:)?(?P&lt;host&gt;[\w\-.^_]+)
+
+# Values:  TEXT
+
+#
+
+failregex = : badlogin: .*\[&lt;HOST&gt;\] plaintext .*SASL\(-13\): authentication failure: checkpass failed$
+
+	    : badlogin: .*\[&lt;HOST&gt;\] LOGIN \[SASL\(-13\): authentication failure: checkpass failed\]$
+
+	    : badlogin: .*\[&lt;HOST&gt;\] (?:CRAM-MD5|NTLM) \[SASL\(-13\): authentication failure: incorrect (?:digest|NTLM) response\]$
+
+	    : badlogin: .*\[&lt;HOST&gt;\] DIGEST-MD5 \[SASL\(-13\): authentication failure: client response doesn&#x27;t match what we generated\]$
+
+
+
+# Option:  ignoreregex
+
+# Notes.:  regex to ignore. If this regex matches, the line is ignored.
+
+# Values:  TEXT
+
+#
+
+ignoreregex =
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `Values` is untrusted input entering this code (near line 35).
+2. It flows to `incorrect`, which is used in a security-sensitive cryptographic operation.
+3. The fix adds a control the vulnerable code lacks: strong, current algorithm with proper verification.
+4. An attacker controlling `Values` can therefore exploit it — this is CWE-327.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-327
+severity: MEDIUM
+line: 35
+trace: Values -&gt; incorrect
+fix: Strong, current algorithm with proper verification</pre></div>
+  </div>
+  <div class="q">#28 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#29</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# horizon/dashboards/nova/instances_and_volumes/volumes/views.py (line 94)
+    def handle_form(self):
+        instances = api.nova.server_list(self.request)
+        initial = {&#x27;volume&#x27;: self.get_object(),
+                   &#x27;instances&#x27;: instances}
+        return AttachForm.maybe_handle(self.request, initial=initial)
+
+    def get(self, request, *args, **kwargs):
+        self.form, handled = self.handle_form()
+        if handled:
+
+# horizon/dashboards/settings/project/forms.py (line 77)
+
+        except Exception, e:
+            LOG.exception(&quot;Exception in DownloadOpenRCForm.&quot;)
+            messages.error(request, _(&#x27;Error Downloading RC File: %s&#x27;) % e)
+            return shortcuts.redirect(request.build_absolute_uri())
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `horizon/dashboards/nova/instances_and_volumes/volumes/views.py` (line 94).
+2. The value flows across files: views.py:94 -&gt; base.py:74 -&gt; base.py:99 -&gt; forms.py:52 -&gt; forms.py:77.
+3. It reaches a sink in `horizon/dashboards/settings/project/forms.py` (line 77) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-601.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-601
+severity: HIGH
+line: 77
+trace: views.py:94 -&gt; base.py:74 -&gt; base.py:99 -&gt; forms.py:52 -&gt; forms.py:77
+fix: Validate/neutralize the tainted value before it reaches the sink in forms.py.</pre></div>
+  </div>
+  <div class="q">#29 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#30</span><span class="shape">shape1_fixjs</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+function makeCats() {
+		var formTag = document.getElementsByTagName(&quot;petForm&quot;),
+			selectLi = gebi(&quot;petsType&quot;),
+			makeSelect = document.createElement(&quot;petsType&quot;);
+			makeSelect.setAttribute(&quot;id&quot;, &quot;petGroups&quot;);
+		for (var i=0, j=petGroups.length; i&lt;j; i++) {
+			var makeOption = document.createElement(&quot;option&quot;);
+			var optTxt = petGroups[i];
+			makeOption.setAttribute(&quot;value&quot;, optTxt);
+			makeOption.innerHTML = optTxt;
+			makeSelect.appendChild(makeOption);
+		};
+		selectLi.appendChild(makeSelect);
+	}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `formTag` is untrusted input entering this code (near line 10).
+2. It flows to `innerhtml`, which is rendered into the page/DOM without escaping.
+3. The fix adds a control the vulnerable code lacks: output is HTML-escaped / encoded before rendering.
+4. An attacker controlling `formTag` can therefore exploit it — this is CWE-79.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-79
+severity: MEDIUM
+line: 10
+trace: formTag -&gt; innerhtml
+fix: Output is HTML-escaped / encoded before rendering</pre></div>
+  </div>
+  <div class="q">#30 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#31</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# class/public/common.py (line 1114)
+    return &#x27;:&#x27;.join(h[0:-1])
+
+
+def GetClientIp():
+    from flask import request
+    ipaddr = request.remote_addr.replace(&#x27;::ffff:&#x27;, &#x27;&#x27;)
+    if not check_ip(ipaddr): return &#x27;Unknown IP address&#x27;
+    return ipaddr
+
+
+# BTPanel/routes/v2.py (line 31)
+@app.route(route_v2 + &#x27;/&#x27;, methods=method_all)
+def home_v2():
+    # 面板首页
+    comReturn = comm.local()
+    if comReturn: return comReturn
+    data = {}
+    data[public.to_string([112,
+                           100])], data[&#x27;pro_end&#x27;], data[&#x27;ltd_end&#x27;] = get_pd()
+    data[&#x27;siteCount&#x27;] = public.M(&#x27;sites&#x27;).count()
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `class/public/common.py` (line 1114).
+2. The value flows across files: common.py:1114 -&gt; common.py:1114 -&gt; common.py:1115 -&gt; common.py:1117 -&gt; common.py:193 -&gt; common.py:193.
+3. It reaches a sink in `BTPanel/routes/v2.py` (line 31) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-79.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-79
+severity: HIGH
+line: 31
+trace: common.py:1114 -&gt; common.py:1114 -&gt; common.py:1115 -&gt; common.py:1117 -&gt; common.py:193 -&gt; common.py:193
+fix: Validate/neutralize the tainted value before it reaches the sink in v2.py.</pre></div>
+  </div>
+  <div class="q">#31 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#32</span><span class="shape">shape1</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+def get_non_subscribed_subs() -&gt; List[Tuple[UserProfile, Stream]]:
+        stream_ids = {stream.id for stream in streams}
+
+        not_subscribed: List[Tuple[UserProfile, Stream]] = []
+
+        for user_profile in users:
+            user_sub_stream_info = existing_subs_by_user[user_profile.id]
+
+            subscribed_stream_ids = {sub_info.stream.id for sub_info in user_sub_stream_info}
+            not_subscribed_stream_ids = stream_ids - subscribed_stream_ids
+
+            for stream_id in not_subscribed_stream_ids:
+                stream = stream_dict[stream_id]
+                not_subscribed.append((user_profile, stream))
+
+        return not_subscribed
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**:
+   - **Use of Set Operations**: The function uses set operations (`set` and `-` operator) to determine which streams a user is not subscribed to. This approach is efficient and reduces the risk of errors that might occur with manual iteration and comparison.
+   - **Dictionary Access**: The function accesses dictionaries (`existing_subs_by_user` and `stream_dict`) using keys that are assumed to be valid based on the context (user IDs and stream IDs). This avoids issues like key errors if the keys are guaranteed to exist.
+   - **Type Annotations**: The function uses type annotations (`List[Tuple[UserProfile, Stream]]`) which can help catch type-related errors during development and maintenance, although they do not enforce type safety at runtime.
+
+2. **Absence of Common Vulnerabilities**:
+   - **SQL Injection**: Since there is no database interaction in this function, SQL injection is not a concern.
+   - **Cross-Site Scripting (XSS)**: XSS vulnerabilities typically arise in web applications where user input is directly included in HTML output without proper sanitization. This function does not involve any web output or user input handling, so XSS is not applicable.
+   - **Buffer Overflow**: Buffer overflow vulnerabilities are more common in lower-level languages like C or C++. Python&#x27;s dynamic memory management and list resizing mitigate this risk.
+   - **Insecure Direct Object References (IDOR)**: IDOR vulnerabilities occur when an application exposes a reference to an internal object through a user-supplied parameter. While the function uses user IDs and stream IDs, it does not appear to expose these IDs directly to end-users or allow them to manipulate objects in an insecure manner.
+   - **Race Conditions**: The function does not perform any concurrent operations that could lead to race conditions. It processes data sequentially without shared mutable state that could be accessed by multiple threads simultaneously.
+
+3. **Validation of the Non-Vulnerable Label**:
+   - **Data Integrity**: The function assumes that the input data (`streams`, `users`, `existing_subs_by_user`, `stream_dict`) is correctly populated and that the relationships between these data structures are consistent. If these assumptions hold true, the function will operate correctly without introducing vulnerabilities.
+   - **Error Handling**: The function does not include explicit error handling (e.g., try-except blocks). However, given the nature of the operations (dictionary and set manipulations), the absence of error handling is less critical as long as the input data is valid.
+   - **Code Simplicity**: The function is relatively simple and straightforward, which makes it easier to review and understand. This simplicity reduces the likelihood of hidden vulnerabilities.
+   - **No External Dependencies**: The function does not rely on external libraries or services that could introduce vulnerabilities. It operates solely on the provided data structures and performs basic data manipulation.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: no untrusted-input-to-sink data flow involving `set`;
+fix: none</pre></div>
+  </div>
+  <div class="q">#32 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#33</span><span class="shape">shape1</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+def scan_local(self, path, rules=None) -&gt; dict:
+        &quot;&quot;&quot;
+        Scans local package
+
+        Args:
+            path (str): path to package
+            rules (set, optional): Set of rule names to use. Defaults to all rules.
+
+        Raises:
+            Exception: Analyzer exception
+
+        Returns:
+            dict: Analyzer output with rules to results mapping
+        &quot;&quot;&quot;
+
+        if rules is not None:
+            rules = set(rules)
+
+        if os.path.exists(path):
+            if path.endswith(&#x27;.tar.gz&#x27;):
+                with tempfile.TemporaryDirectory() as tmpdirname:
+                    tarfile.open(path).extractall(tmpdirname)
+                    return self.analyzer.analyze_sourcecode(tmpdirname, rules=rules)
+            elif os.path.isdir(path):
+                return self.analyzer.analyze_sourcecode(path, rules=rules)
+        else:
+            raise Exception(f&quot;Path {path} does not exist.&quot;)
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Specific Code Constructs**: The specific code construct contributing to the vulnerability is the use of `tarfile.open(path).extractall(tmpdirname)` without any sanitization or validation of the contents of the tar file. This line of code is responsible for extracting the contents of a `.tar.gz` file into a temporary directory. 2. **Mechanism of the Vulnerability**: The vulnerability arises from the fact that `tarfile.TarFile.extractall()` does not sanitize the paths of files contained within the tar archive before writing them to the filesystem. An attacker can craft a tar file containing paths that traverse outside the intended extraction directory (`tmpdirname`). For example, a file named `../../etc/passwd` in the tar archive would be extracted to `/etc/passwd` on the filesystem, potentially overwriting critical system files. This behavior is by design in the `tarfile` module, but it becomes a security risk when used without proper precautions. 3. **Potential Impact**: Exploiting this vulnerability could allow an attacker to write arbitrary files to the filesystem of the machine running GuardDog. This could lead to a wide range of negative outcomes, including data corruption, unauthorized access, privilege escalation, and even remote code execution, depending on the files overwritten or created by the attacker. 4. **Contextual Relevance**: This vulnerability is directly related to CWE-23 (Relative Path Traversal) and CWE-22 (Improper Limitation of a Pathname to a Restricted Directory (&#x27;Path Traversal&#x27;)). CWE-23 specifically addresses the issue of allowing an attacker to traverse directories via user-supplied input, which is exactly what happens here when the tar file contents are extracted without validation. CWE-22 is broader, encompassing any failure to properly limit a pathname to a restricted directory, which also applies to this scenario.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-23
+severity: MEDIUM
+line: none
+trace: tarfile.open(path).extractall(tmpdirname)
+fix: Validate/neutralize the untrusted input before it reaches the sink.</pre></div>
+  </div>
+  <div class="q">#33 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#34</span><span class="shape">shape1_react</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+// @flow
+/* eslint-disable react/jsx-no-bind, no-return-assign */
+import Spinner from &#x27;@atlaskit/spinner&#x27;;
+    const [ storedImages, setStoredImages ] = useState((localImages &amp;&amp; JSON.parse(localImages)) || []);
+- 
+import { jitsiLocalStorage } from &#x27;@jitsi/js-utils/jitsi-local-storage&#x27;;
+import React, { useState, useEffect } from &#x27;react&#x27;;
+import uuid from &#x27;uuid&#x27;;
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The code imports `JSON.parse` implicitly via the global function. It declares a state variable `storedImages` initialized with `useState((localImages &amp;&amp; JSON.parse(localImages)) || [])`. The variable `localImages` is not defined in this snippet, but given the import of `jitsiLocalStorage`, it is likely sourced from local storage or some external input that could be tampered with by an attacker. `JSON.parse` will parse any JSON string, including objects that can set `__proto__` or `constructor` properties, leading to prototype pollution. This is a known vulnerability when parsing untrusted JSON. Therefore the data flow is: `localImages` (potentially attacker-controlled) → `JSON.parse` → `storedImages`. The reference fix shows replacing `JSON.parse` with `Bourne.parse`, which mitigates prototype pollution. Hence the snippet is vulnerable.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-1321
+severity: HIGH
+line: 4
+trace: localImages → JSON.parse → storedImages
+fix: replace JSON.parse with Bourne.parse or a safe JSON parser that blocks prototype pollution.</pre></div>
+  </div>
+  <div class="q">#34 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#35</span><span class="shape">shape1_wave3_other</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+// implementation, so code that simply want to verify if a user can delete (but is not actually deleting)
+        // has to call checkAccess. This happen really often, and this why we should not redirect to login on failed
+        // delete, since it would prevent most user to do anything.
+        if (context.getUserReference() == null &amp;&amp; !DELETE_ACTION.equals(action) &amp;&amp; !LOGIN_ACTION.equals(action)) {
+            LOGGER.debug(&quot;Redirecting unauthenticated user to login, since it have been denied [{}] on [{}].&quot;,
+                         right, entityReference);
+            showLogin(context);
+-
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `getUserReference` is untrusted input entering this code (near line 5).
+2. It flows to `LOGGER.debug`, which is reached without an authorization/authentication check.
+3. The fix adds a control the vulnerable code lacks: an explicit access-control / authentication check guards it.
+4. An attacker controlling `getUserReference` can therefore exploit it — this is CWE-287.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-287
+severity: HIGH
+line: 5
+trace: getUserReference -&gt; LOGGER.debug
+fix: An explicit access-control / authentication check guards it</pre></div>
+  </div>
+  <div class="q">#35 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#36</span><span class="shape">shape1_sft</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+import sqlite3
+
+def get_secret_data():
+    conn = sqlite3.connect(&#x27;sensitive_data.db&#x27;)
+    cursor = conn.cursor()
+    cursor.execute(&quot;SELECT secret FROM secrets WHERE id=1&quot;)
+    data = cursor.fetchone()
+    conn.close()
+    return data
+
+print(get_secret_data())
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `data` is untrusted input entering this code (near line 6).
+2. It flows to `cursor.execute`, which is concatenated into a SQL query.
+3. The fix adds a control the vulnerable code lacks: uses a parameterized query / bound placeholder.
+4. An attacker controlling `data` can therefore exploit it — this is CWE-89.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-89
+severity: HIGH
+line: 6
+trace: data -&gt; cursor.execute
+fix: Uses a parameterized query / bound placeholder</pre></div>
+  </div>
+  <div class="q">#36 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#37</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# demo/super_html/run.py (line 49)
+    # CSS Templating
+    We can also template CSS, which is automatically scoped to the component.
+    &quot;&quot;&quot;)
+    with gr.Row():
+        name2 = gr.Textbox(label=&quot;Person&quot;)
+        color = gr.ColorPicker(label=&quot;Text Color&quot;, value=&quot;#00ff00&quot;)
+        bold = gr.Checkbox(label=&quot;Bold Text&quot;, value=True)
+        templated_html_css = gr.HTML(
+            [&quot;J&quot;, &quot;o&quot;, &quot;h&quot;, &quot;n&quot;],
+
+# gradio/components/file.py (line 230)
+        else:
+            return FileData(
+                path=value,
+                orig_name=Path(value).name,
+                size=Path(value).stat().st_size,
+            )
+
+    def process_example(self, value: str | list | None) -&gt; str:
+        if value is None:
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `demo/super_html/run.py` (line 49).
+2. The value flows across files: run.py:49 -&gt; run.py:49 -&gt; run.py:81 -&gt; run.py:76 -&gt; run.py:77 -&gt; run.py:77.
+3. It reaches a sink in `gradio/components/file.py` (line 230) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-22.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-22
+severity: HIGH
+line: 230
+trace: run.py:49 -&gt; run.py:49 -&gt; run.py:81 -&gt; run.py:76 -&gt; run.py:77 -&gt; run.py:77
+fix: Validate/neutralize the tainted value before it reaches the sink in file.py.</pre></div>
+  </div>
+  <div class="q">#37 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#38</span><span class="shape">shape1_verified</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+	id: &#x27;request&#x27;,
+
+	handler: async ({ url, method, body, headers }) =&gt; {
+		const axios = (await import(&#x27;axios&#x27;)).default;
+
+		const customHeaders =
+			headers?.reduce((acc, { header, value }) =&gt; {
+				acc[header] = value;
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The handler receives `url`, `method`, `body`, and `headers` from an external caller – these are untrusted inputs.  
+The code builds a `customHeaders` object by iterating over the supplied `headers` array and then passes that object (along with `url`, `method`, and `body`) to `axios.default` to perform an HTTP request.  
+Thus the data flow is:
+
+`headers` (untrusted source) → `customHeaders` (intermediate) → `axios.default` (dangerous sink).  
+The sink occurs on the line where `axios.default` is invoked (the first call to `axios` after the shown snippet, which is line 6 in the original file).
+
+The patch changed lines 4‑5 to filter or whitelist headers, preventing arbitrary header injection.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-918
+severity: HIGH
+line: 6
+trace: headers → customHeaders → axios.default
+fix: whitelist or sanitize headers before passing them to axios (e.g., only allow safe header names and values).</pre></div>
+  </div>
+  <div class="q">#38 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#39</span><span class="shape">shape1_ts</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+return clusterName;
+}
+
+    await predeploy(integrationId, namespace);
+function getEnvVariableOrDefault(
+  envVarName: string,
+  defaultValue: string,
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The snippet defines a helper `getEnvVariableOrDefault` but never calls it.  
+Immediately after, the code invokes `predeploy(integrationId, namespace)`.  
+Since `integrationId` is passed directly to a potentially dangerous function (`predeploy`) without any shown sanitization or validation, it is likely that `integrationId` originates from an untrusted source such as an environment variable or user input.  
+Thus the data flow is: untrusted source → `integrationId` → `predeploy`.  
+Because the value is used in a deployment‑related operation, this represents a vulnerability where an attacker could influence the deployment configuration.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-200
+severity: HIGH
+line: none
+trace: integrationId → predeploy
+fix: Validate or sanitize `integrationId` before passing it to `predeploy`.</pre></div>
+  </div>
+  <div class="q">#39 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#40</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# openstack_dashboard/dashboards/project/networks/subnets/views.py (line 109)
+    page_title = &quot;{{ subnet.name|default:subnet.id }}&quot;
+
+    @memoized.memoized_method
+    def get_data(self):
+        subnet_id = self.kwargs[&#x27;subnet_id&#x27;]
+        try:
+            subnet = api.neutron.subnet_get(self.request, subnet_id)
+        except Exception:
+            subnet = []
+
+# openstack_dashboard/api/neutron.py (line 1175)
+
+@profiler.trace
+def subnet_get(request, subnet_id, **params):
+    LOG.debug(&quot;subnet_get(): subnetid=%(subnet_id)s, params=%(params)s&quot;,
+              {&#x27;subnet_id&#x27;: subnet_id, &#x27;params&#x27;: params})
+    subnet = neutronclient(request).show_subnet(subnet_id,
+                                                **params).get(&#x27;subnet&#x27;)
+    return Subnet(subnet)
+
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `openstack_dashboard/dashboards/project/networks/subnets/views.py` (line 109).
+2. The value flows across files: views.py:109 -&gt; views.py:109 -&gt; views.py:111 -&gt; neutron.py:1173 -&gt; neutron.py:1175.
+3. It reaches a sink in `openstack_dashboard/api/neutron.py` (line 1175) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-117.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-117
+severity: HIGH
+line: 1175
+trace: views.py:109 -&gt; views.py:109 -&gt; views.py:111 -&gt; neutron.py:1173 -&gt; neutron.py:1175
+fix: Validate/neutralize the tainted value before it reaches the sink in neutron.py.</pre></div>
+  </div>
+  <div class="q">#40 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#41</span><span class="shape">shape1</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+function u0n(t){var e,n,r,s,o;if(t==null)return Nu;for(o=new ab(ao,&quot;[&quot;,&quot;]&quot;),n=t,r=0,s=n.length;r&lt;s;++r)e=n[r],o.a?ri(o.a,o.b):o.a=new jl(o.d),r_(o.a,&quot;&quot;+e);return o.a?o.e.length==0?o.a.a:o.a.a+(&quot;&quot;+o.e):o.c}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**:
+   - The function `u0n` begins by checking if the input `t` is null or undefined (`if(t==null)`). This is a good practice to prevent errors that could arise from attempting to operate on null or undefined values, which can lead to runtime exceptions.
+   - The function initializes a new object `o` using the constructor `ab` with parameters `ao`, `&quot;[&quot;`, and `&quot;]&quot;`. This suggests that the function is preparing to build a structured output, possibly a string representation of an array or list.
+   - The function iterates over the elements of the input `t` using a for loop (`for(r=0,s=n.length;r&lt;s;++r)`). It checks if `o.a` is defined before calling `ri(o.a,o.b)`, otherwise it initializes `o.a` with a new `jl` object. This conditional initialization ensures that operations are performed only when the necessary objects are available, reducing the risk of undefined behavior.
+   - Inside the loop, each element `e` of `t` is converted to a string (`&quot;&quot;+e`) and added to `o.a` using the function `r_`. This conversion to string ensures that non-string elements are handled safely, preventing type-related issues.
+
+2. **Absence of Common Vulnerabilities**:
+   - **Injection Attacks**: The function does not appear to construct any executable code or SQL queries, so injection attacks (such as SQL injection or command injection) are not applicable.
+   - **Buffer Overflows**: JavaScript does not suffer from buffer overflows in the same way that languages like C or C++ do, because it manages memory automatically. However, the function does not perform any manual memory management that could lead to such issues.
+   - **Cross-Site Scripting (XSS)**: While the function converts elements to strings, there is no indication that the output is being inserted into HTML or used in a context where XSS could occur. If this function&#x27;s output is used in a web application, additional measures would be needed to prevent XSS.
+   - **Null Pointer Dereferences**: The initial check for `t` being null prevents null pointer dereferences. Additionally, the function checks if `o.a` is defined before using it, further mitigating this risk.
+
+3. **Validation of the Non-Vulnerable Label**:
+   - The function includes checks for null inputs and performs safe operations on its data structures, which are critical for avoiding common runtime errors.
+   - There are no indications of unsafe operations such as direct execution of user input, improper handling of file I/O, or lack of input validation that could lead to security vulnerabilities.
+   - The function appears to be designed to handle a specific type of input (likely an array) and produce a structured output, without introducing side effects or performing operations that could lead to security issues.
+   - Given the absence of common vulnerabilities and the presence of safety checks, the label of &quot;non-vulnerable&quot; is justified based on the provided code snippet.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: no untrusted-input-to-sink data flow involving `u0n`;
+fix: none</pre></div>
+  </div>
+  <div class="q">#41 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#42</span><span class="shape">shape2</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+from flask import request, jsonify
+from io.files import load_file
+
+@app.route(&#x27;/download&#x27;)
+def download():
+    filename = request.args.get(&#x27;name&#x27;)
+    content = load_file(filename)
+    return jsonify({&#x27;content&#x27;: content})
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. The user input comes from request.args.get(&#x27;name&#x27;), which is untrusted.  
+2. This value is assigned to the variable filename.  
+3. filename is passed directly to load_file(filename) without any validation or sanitization.  
+4. load_file is imported from io/files.py, so its implementation is not visible in this snippet.  
+5. Therefore, whether a path traversal vulnerability exists depends entirely on how load_file handles its argument.  
+6. Guessing the safety of load_file would be incorrect; the correct action is to request the missing context.
+&lt;/think&gt;
+
+status: needs_context open_refs: - load_file (io/files.py) partial_trace: user input from request.args.get(&#x27;name&#x27;) flows into load_file(filename) — verdict depends on load_file&#x27;s implementation</pre></div>
+  </div>
+  <div class="q">#42 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#43</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# bookwyrm/views/books/edit_book.py (line 220)
+    &quot;&quot;&quot;confirm edits to a book&quot;&quot;&quot;
+
+    # pylint: disable=too-many-locals
+    # pylint: disable=too-many-branches
+    def post(self, request, book_id=None):
+        &quot;&quot;&quot;edit a book cool&quot;&quot;&quot;
+        # returns None if no match is found
+        book = models.Edition.objects.filter(id=book_id).first()
+        form = forms.EditionForm(request.POST, request.FILES, instance=book)
+
+# bookwyrm/connectors/abstract_connector.py (line 260)
+    &quot;&quot;&quot;wrapper for requesting an image&quot;&quot;&quot;
+    raise_not_valid_url(url)
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                &quot;User-Agent&quot;: settings.USER_AGENT,
+            },
+            timeout=timeout,
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `bookwyrm/views/books/edit_book.py` (line 220).
+2. The value flows across files: edit_book.py:220 -&gt; edit_book.py:287 -&gt; edit_book.py:287 -&gt; edit_book.py:287 -&gt; edit_book.py:289 -&gt; books.py:154.
+3. It reaches a sink in `bookwyrm/connectors/abstract_connector.py` (line 260) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-918.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-918
+severity: HIGH
+line: 260
+trace: edit_book.py:220 -&gt; edit_book.py:287 -&gt; edit_book.py:287 -&gt; edit_book.py:287 -&gt; edit_book.py:289 -&gt; books.py:154
+fix: Validate/neutralize the tainted value before it reaches the sink in abstract_connector.py.</pre></div>
+  </div>
+  <div class="q">#43 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#44</span><span class="shape">shape1_wave3_jsts</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+elt.style.whiteSpace = &#x27;nowrap&#x27;;
+	elt.style.overflow = &#x27;hidden&#x27;;
+	elt.style.width = &#x27;30px&#x27;;
+	elt.innerText = &#x27;&#x27;;
+
+	var div = document.createElement(&#x27;div&#x27;);
+	div.className = &#x27;geSprite geSprite-table&#x27;;
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. Untrusted input is present, but it does not reach a dangerous sink unguarded.
+2. The code applies a control: output is HTML-escaped / encoded before rendering.
+3. Because that control neutralizes the risk on the path to the sink, the code is safe.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: input is neutralized by output is HTML-escaped / encoded before rendering before any sink
+fix: none</pre></div>
+  </div>
+  <div class="q">#44 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#45</span><span class="shape">shape1_verified</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+        body = data.get(&#x27;body&#x27;, &#x27;&#x27;)
+        if args.get(&#x27;method&#x27;).lower() != &#x27;get&#x27;:
+            args[&#x27;body&#x27;] = &quot;&#x27;&quot; + json.dumps(body, ensure_ascii=False) + &quot;&#x27;&quot;
+        
+        args_cmd = &#x27; &#x27;.join(
+            [&#x27;--{arg} {value}&#x27;.format(arg=arg, value=value) for arg, value in args.items()])
+        logger.debug(&#x27;args cmd %s&#x27;, args_cmd)
+        cmd = &#x27;gerapy parse {args_cmd} {project_path} {spider_name}&#x27;.format(
+            args_cmd=args_cmd,
+            project_path=project_path,
+            spider_name=spider_name
+        )
+        logger.debug(&#x27;parse cmd %s&#x27;, cmd)
+        p = Popen(cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, close_fds=True)
+        stdout, stderr = bytes2str(p.stdout.read()), bytes2str(p.stderr.read())
+        logger.debug(&#x27;stdout %s, stderr %s&#x27;, stdout, stderr)
+        if not stderr:
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The untrusted input comes from `data[&#x27;body&#x27;]`.  
+If the request method is not GET, this value is JSON‑encoded and stored in `args[&#x27;body&#x27;]`.  
+`args_cmd` is built by iterating over all items in `args`, so the JSON string is inserted into the command string.  
+`cmd` concatenates `args_cmd` with other parameters to form the final shell command.  
+Finally, `Popen(cmd, shell=True, …)` executes this command string.  
+Thus the data flow is: `data[&#x27;body&#x27;] → args[&#x27;body&#x27;] → args_cmd → cmd → Popen`.  
+The dangerous sink is the `Popen` call on line 14, which runs an arbitrary shell command constructed from untrusted data.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-78
+severity: HIGH
+line: 14
+trace: data[&#x27;body&#x27;] → args[&#x27;body&#x27;] → args_cmd → cmd → Popen
+fix: Remove `shell=True` and pass the command and arguments as a list, or sanitize/quote the user input (e.g., using `shlex.quote`) before including it in the command string.</pre></div>
+  </div>
+  <div class="q">#45 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#46</span><span class="shape">shape1_react</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+render() {
+        return &lt;div className={_JSXStyle.dynamic([
+            [
+                &quot;35bb702eb335aa6f&quot;,
+                &quot;35bb702eb335aa6f&quot;,
+          &lt;_JSXStyle id={&quot;35bb702eb335aa6f&quot;} dynamic={[
+                [
+                    a || &quot;var(--c)&quot;,
+                    b || &quot;inherit&quot;
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The component renders a `&lt;div&gt;` whose `className` is generated by `_JSXStyle.dynamic`.  
+Inside the dynamic array, the values `a` and `b` are inserted directly:  
+`a || &quot;var(--c)&quot;` and `b || &quot;inherit&quot;`.  
+If `a` or `b` originate from user input (e.g., props, state, or query parameters), they are passed straight into the CSS generation logic.  
+`_JSXStyle.dynamic` ultimately injects these values into a `&lt;style&gt;` tag in the DOM, creating CSS rules that can be manipulated by an attacker.  
+Thus the data flow is: user input → `a`/`b` → `_JSXStyle.dynamic` → injected CSS → potential CSS injection attack.  
+This is a classic CSS injection vulnerability.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-1138
+severity: HIGH
+line: 5
+trace: a → _JSXStyle.dynamic → CSS injection
+fix: Validate or whitelist the values of `a` and `b` before passing them to `_JSXStyle.dynamic`.</pre></div>
+  </div>
+  <div class="q">#46 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#47</span><span class="shape">shape1_cvefixes</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+// shared styles used
+
+// on both the login and
+
+// create account modals
+
+.login-modal,
+
+.create-account {
+
+  #login-buttons:not(.hidden) {
+
+    display: flex;
+
+    flex: 0 1 auto;
+
+    flex-direction: column;
+
+    align-items: stretch;
+
+    min-height: 75px;
+
+    padding: s(0 6);
+
+    order: 2;
+
+
+
+    button {
+
+      display: flex;
+
+      text-align: left;
+
+      margin: 0.35em;
+
+      white-space: nowrap;
+
+      &amp;:lang(zh_CN) {
+
+        min-width: 200px;
+
+      }
+
+      &amp;:first-of-type:last-of-type {
+
+        &amp;.oauth2_basic {
+
+          // Handles a strange fringe case where OAuth2 and account approval are enabled
+
+          margin-left: auto;
+
+          margin-right: auto;
+
+          justify-content: center;
+
+        }
+
+      }
+
+    }
+
+  }
+
+
+
+  form {
+
+    min-width: 300px;
+
+  }
+
+
+
+  #modal-alert {
+
+    max-width: 500px;
+
+    padding: s(2 4);
+
+  }
+
+
+
+  .login-modal {
+
+    #login-buttons:not(.hidden) {
+
+      button {
+
+        &amp;:first-of-type {
+
+          margin-top: 2.8em;
+
+        }
+
+        &amp;:last-of-type {
+
+          margin-bottom: 3em;
+
+        }
+
+      }
+
+    }
+
+  }
+
+
+
+  .create-account {
+
+    #login-buttons:not(.hidden) {
+
+      justify-content: flex-start;
+
+      padding-top: 2.7em;
+
+      + .login-form {
+
+        border-right: 1px solid $primary-low; // Only show border when login-form is present
+
+      }
+
+    }
+
+  }
+
+
+
+  #login-form {
+
+    box-sizing: border-box;
+
+    flex: 1 0 auto;
+
+    padding: s(0 6);
+
+    + #login-buttons {
+
+      border-left: 1px solid $primary-low; // Only show border when login-form is present
+
+    }
+
+  }
+
+
+
+  tr:not(.instructions) {
+
+    td {
+
+      display: flex;
+
+      padding: 5px 0 0 0;
+
+    }
+
+  }
+
+  .tip,
+
+  td label {
+
+    display: block;
+
+    overflow: hidden;
+
+    word-wrap: break-word;
+
+    margin-bottom: 0;
+
+    max-width: 280px;
+
+    @media screen and (min-width: 500px) {
+
+      max-width: 400px;
+
+    }
+
+  }
+
+}
+
+
+
+.has-alt-auth {
+
+  .tip,
+
+  td label {
+
+    max-width: 250px;
+
+  }
+
+}
+
+
+
+// styles used on
+
+// login modal only
+
+.d-modal.login-modal {
+
+  .modal-body,
+
+  #credentials {
+
+    display: flex;
+
+    align-items: center;
+
+    padding: 15px 0;
+
+
+
+    tr {
+
+      display: flex;
+
+      flex-direction: column;
+
+    }
+
+
+
+    &amp;.hidden {
+
+      display: none;
+
+    }
+
+  }
+
+}
+
+
+
+// styles used on the
+
+// create account
+
+// modal only
+
+.d-modal.create-account {
+
+  .modal-body {
+
+    display: flex;
+
+    padding: 15px 0;
+
+  }
+
+
+
+  .create-account-form tr {
+
+    display: flex;
+
+    flex-direction: column;
+
+  }
+
+
+
+  .login-form {
+
+    position: relative;
+
+    display: flex;
+
+    overflow: hidden;
+
+    flex: 1 1 auto;
+
+
+
+    &amp;:after,
+
+    &amp;:before {
+
+      content: &quot;&quot;;
+
+      display: block;
+
+      height: 25px;
+
+      position: absolute;
+
+      width: 100%;
+
+      pointer-events: none;
+
+    }
+
+    &amp;:after {
+
+      bottom: 0;
+
+      background-image: linear-gradient(
+
+        to bottom,
+
+        rgba($secondary, 0) 0%,
+
+        rgba($secondary, 1) 100%
+
+      );
+
+    }
+
+    &amp;:before {
+
+      top: 0;
+
+      background-image: linear-gradient(
+
+        to top,
+
+        rgba($secondary, 0) 0%,
+
+        rgba($secondary, 1) 100%
+
+      );
+
+    }
+
+    form {
+
+      box-sizing: border-box;
+
+      padding: s(4 6);
+
+      margin-bottom: 5px;
+
+      max-height: 475px;
+
+      @media screen and (max-height: 768px) {
+
+        max-height: 60vh;
+
+      }
+
+      overflow-x: hidden;
+
+      overflow-y: auto;
+
+    }
+
+
+
+    form,
+
+    table {
+
+      width: 100%;
+
+      display: block; //IE11
+
+    }
+
+
+
+    tr {
+
+      display: flex;
+
+      flex-direction: column;
+
+      margin-top: 0.15em;
+
+      &amp;.password-confirmation {
+
+        display: none;
+
+      }
+
+    }
+
+  }
+
+
+
+  tr.input {
+
+    input,
+
+    label {
+
+      margin-bottom: 0;
+
+      width: 100%;
+
+    }
+
+    .tip {
+
+      max-width: 340px;
+
+    }
+
+  }
+
+
+
+  .user-field {
+
+    display: flex;
+
+    flex-direction: column;
+
+
+
+    &amp;.confirm {
+
+      margin-top: 5px;
+
+    }
+
+
+
+    &gt; label {
+
+      width: auto;
+
+    }
+
+
+
+    .controls {
+
+      margin-left: 0;
+
+    }
+
+  }
+
+
+
+  .invites-show {
+
+    padding-top: 20px;
+
+
+
+    .two-col {
+
+      margin-top: 30px;
+
+    }
+
+    .col-form {
+
+      margin-left: 200px;
+
+      .inline-invite-img {
+
+        display: none;
+
+      }
+
+    }
+
+    form {
+
+      .controls,
+
+      .input {
+
+        margin-left: 20px;
+
+      }
+
+      input,
+
+      label {
+
+        margin-bottom: 0;
+
+      }
+
+      .user-field .control-label:not(.checkbox-label) {
+
+        margin-left: 20px;
+
+      }
+
+    }
+
+  }
+
+
+
+  .tos-agree {
+
+    margin-bottom: 12px;
+
+  }
+
+}
+
+
+
+.login-form {
+
+  .tip {
+
+    &amp;:not(:empty) + td {
+
+      display: none;
+
+    }
+
+    &amp;:not(:empty),
+
+    &amp;:empty + td {
+
+      min-height: 1.75em;
+
+      &amp;.bad .svg-icon {
+
+        vertical-align: middle;
+
+      }
+
+    }
+
+  }
+
+}
+
+
+
+.password-reset,
+
+.email-login,
+
+.invites-show {
+
+  .col-form {
+
+    padding-left: 20px;
+
+  }
+
+  .col-image {
+
+    width: 175px;
+
+    img {
+
+      width: 100%;
+
+    }
+
+  }
+
+  h2 {
+
+    margin-bottom: 12px;
+
+  }
+
+}
+
+
+
+.password-reset,
+
+.email-login {
+
+  .col-form {
+
+    padding-top: 40px;
+
+  }
+
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. Untrusted input is present, but it does not reach a dangerous sink unguarded.
+2. The code applies a control: an explicit access-control / authentication check guards it.
+3. Because that control neutralizes the risk on the path to the sink, the code is safe.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: input is neutralized by an explicit access-control / authentication check guards it before any sink
+fix: none</pre></div>
+  </div>
+  <div class="q">#47 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#48</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# tests/test-tunnel.js (line 66)
+      if (match) {
+        dest += &#x27;-&gt;&#x27; + match[1]
+      }
+      event(&#x27;%s proxy to %s&#x27;, type, dest)
+      request(req.url, { followRedirect: false }).pipe(res)
+    }
+  })
+
+  server.on(&#x27;/redirect/http&#x27;, function (req, res) {
+
+# index.js (line 42)
+  params.callback = callback || params.callback
+  return params
+}
+
+function request (uri, options, callback) {
+  if (typeof uri === &#x27;undefined&#x27;) {
+    throw new Error(&#x27;undefined is not a valid uri or options object.&#x27;)
+  }
+
+
+# request.js (line 92)
+    request: requestToJSON.call(self.request)
+  }
+}
+
+function Request (options) {
+  // if given the method property in options, set property explicitMethod to true
+
+  // extend the Request instance with any non-reserved properties
+  // remove any reserved functions from the options object
+
+# lib/tunnel.js (line 134)
+  return false
+}
+
+Tunnel.prototype.setup = function (options) {
+  var self = this
+  var request = self.request
+
+  options = options || {}
+
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. [Source — test-tunnel.js:66] req.url
+2. [Step — index.js:42] uri
+3. [Step — index.js:47] uri
+4. [Step — index.js:24] uri
+5. [Step — index.js:35] uri
+6. [Step — index.js:29] params
+7. [Step — index.js:39] params
+8. [Step — index.js:47] initPar ... llback)
+The tainted value flows across 4 files — from `tests/test-tunnel.js` to the sink in `lib/tunnel.js` — with no sanitizing step in between, so this cross-file data flow is exploitable (CWE-250).
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-250
+severity: HIGH
+line: 53
+trace: test-tunnel.js:66 -&gt; index.js:42 -&gt; index.js:47 -&gt; index.js:24 -&gt; index.js:35 -&gt; index.js:29 -&gt; index.js:39 -&gt; index.js:47
+fix: Validate/neutralize the tainted value before it reaches the sink in tunnel.js.</pre></div>
+  </div>
+  <div class="q">#48 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#49</span><span class="shape">shape1_wave3_other</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+return ident.ID()
+}
+
+func initializeACLs(nodeName string) (acl.Authorizer, error) {
+	// Build a policy for the agent master token.
+	// The builtin agent master policy allows reading any node information
+	// and allows writes to the agent with the node name of the running agent
+	// only. This used to allow a prefix match on agent names but that seems
+	// entirely unnecessary so it is now using an exact match.
+	policy := &amp;acl.Policy{
+		PolicyRules: acl.PolicyRules{
+			Agents: []*acl.AgentRule{
+				{
+					Node:   nodeName,
+					Policy: acl.PolicyWrite,
+				},
+			},
+			NodePrefixes: []*acl.NodeRule{
+				{
+					Name:   &quot;&quot;,
+					Policy: acl.PolicyRead,
+				},
+			},
+		},
+	}
+	return acl.NewPolicyAuthorizerWithDefaults(acl.DenyAll(), []*acl.Policy{policy}, nil)
+}
+
+// vetServiceRegister makes sure the service registration action is allowed by
+// the given token.
+func (a *Agent) vetServiceRegister(token string, service *structs.NodeService) error {
+	// Resolve the token and bail if ACLs aren&#x27;t enabled.
+	authz, err := a.resolveToken(token)
+	if err != nil {
+		return err
+	}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `resolveToken` is untrusted input entering this code (near line 4).
+2. It flows to `initializeACLs`, which is reached without an authorization/authentication check.
+3. The fix adds a control the vulnerable code lacks: an explicit access-control / authentication check guards it.
+4. An attacker controlling `resolveToken` can therefore exploit it — this is CWE-284.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-284
+severity: HIGH
+line: 4
+trace: resolveToken -&gt; initializeACLs
+fix: An explicit access-control / authentication check guards it</pre></div>
+  </div>
+  <div class="q">#49 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#50</span><span class="shape">shape1_cvefixes</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+version: &#x27;3.7&#x27;
+
+
+
+volumes:
+
+  kong_data: {}
+
+
+
+networks:
+
+  kong-net:
+
+    external: false
+
+
+
+services:
+
+  kong-migrations:
+
+    image: &quot;${KONG_DOCKER_TAG:-kong:latest}&quot;
+
+    command: kong migrations bootstrap
+
+    depends_on:
+
+      - db
+
+    environment:
+
+      KONG_DATABASE: postgres
+
+      KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
+
+      KONG_PG_HOST: db
+
+      KONG_PG_USER: ${KONG_PG_USER:-kong}
+
+      KONG_PG_PASSWORD_FILE: /run/secrets/kong_postgres_password
+
+    secrets:
+
+      - kong_postgres_password
+
+    networks:
+
+      - kong-net
+
+    restart: on-failure
+
+    deploy:
+
+      restart_policy:
+
+        condition: on-failure
+
+
+
+  kong-migrations-up:
+
+    image: &quot;${KONG_DOCKER_TAG:-kong:latest}&quot;
+
+    command: kong migrations up &amp;&amp; kong migrations finish
+
+    depends_on:
+
+      - db
+
+    environment:
+
+      KONG_DATABASE: postgres
+
+      KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
+
+      KONG_PG_HOST: db
+
+      KONG_PG_USER: ${KONG_PG_USER:-kong}
+
+      KONG_PG_PASSWORD_FILE: /run/secrets/kong_postgres_password
+
+    secrets:
+
+      - kong_postgres_password
+
+    networks:
+
+      - kong-net
+
+    restart: on-failure
+
+    deploy:
+
+      restart_policy:
+
+        condition: on-failure
+
+
+
+  kong:
+
+    image: &quot;${KONG_DOCKER_TAG:-kong:latest}&quot;
+
+    user: &quot;${KONG_USER:-kong}&quot;
+
+    depends_on:
+
+      - db
+
+    environment:
+
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+
+      KONG_ADMIN_LISTEN: &#x27;0.0.0.0:8001&#x27;
+
+      KONG_CASSANDRA_CONTACT_POINTS: db
+
+      KONG_DATABASE: postgres
+
+      KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
+
+      KONG_PG_HOST: db
+
+      KONG_PG_USER: ${KONG_PG_USER:-kong}
+
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+
+      KONG_PG_PASSWORD_FILE: /run/secrets/kong_postgres_password
+
+    secrets:
+
+      - kong_postgres_password
+
+    networks:
+
+      - kong-net
+
+    ports:
+
+      - &quot;8000:8000/tcp&quot;
+
+      - &quot;127.0.0.1:8001:8001/tcp&quot;
+
+      - &quot;8443:8443/tcp&quot;
+
+      - &quot;127.0.0.1:8444:8444/tcp&quot;
+
+    healthcheck:
+
+      test: [&quot;CMD&quot;, &quot;kong&quot;, &quot;health&quot;]
+
+      interval: 10s
+
+      timeout: 10s
+
+      retries: 10
+
+    restart: on-failure
+
+    deploy:
+
+      restart_policy:
+
+        condition: on-failure
+
+    
+
+  db:
+
+    image: postgres:9.5
+
+    environment:
+
+      POSTGRES_DB: ${KONG_PG_DATABASE:-kong}
+
+      POSTGRES_USER: ${KONG_PG_USER:-kong}
+
+      POSTGRES_PASSWORD_FILE: /run/secrets/kong_postgres_password
+
+    secrets:
+
+      - kong_postgres_password
+
+    healthcheck:
+
+      test: [&quot;CMD&quot;, &quot;pg_isready&quot;, &quot;-U&quot;, &quot;${KONG_PG_USER:-kong}&quot;]
+
+      interval: 30s
+
+      timeout: 30s
+
+      retries: 3
+
+    restart: on-failure
+
+    deploy:
+
+      restart_policy:
+
+        condition: on-failure
+
+    stdin_open: true
+
+    tty: true
+
+    networks:
+
+      - kong-net
+
+    volumes:
+
+      - kong_data:/var/lib/postgresql/data
+
+
+
+secrets:
+
+  kong_postgres_password:
+
+    file: ./POSTGRES_PASSWORD
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. Untrusted input is present, but it does not reach a dangerous sink unguarded.
+2. The code applies a control: the untrusted input is validated/neutralized before any sink.
+3. Because that control neutralizes the risk on the path to the sink, the code is safe.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: input is neutralized by the untrusted input is validated/neutralized before any sink before any sink
+fix: none</pre></div>
+  </div>
+  <div class="q">#50 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#51</span><span class="shape">shape4</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SYNTHESIZE&gt;
+PROJECT MAP
+  unknown_1095.py
+  unknown_1810.py
+  unknown_1910.py
+  unknown_359.js
+  unknown_778.js
+  unknown_891.js
+
+FINDINGS (6):
+  [1] CWE-1333 finding  (CWE-1333, sev=MEDIUM, file=unknown_778.js, lang=javascript)
+  [2] `app.config[&quot;SESSION_COOKIE_NAME&quot;] = &quot;pyload_session&quot;` — By not setting this att  (CWE-319, sev=MEDIUM, file=unknown_1910.py, lang=python)
+  [3] `jwt_token` — If an attacker can control the contents of `jwt_token`, they could  (CWE-79, sev=HIGH, file=unknown_1810.py, lang=python)
+  [4] `searchkey` — The provided CVE-2014-125049, although marked as unsupported, desc  (CWE-89, sev=HIGH, file=unknown_359.js, lang=javascript)
+  [5] `requests.get()` — An attacker could manipulate the `recipe.link` to point to an  (CWE-918, sev=HIGH, file=unknown_1095.py, lang=python)
+  [6] `it(t)` — If `t` can be manipulated by an attacker to contain malicious content,  (CWE-79, sev=HIGH, file=unknown_891.js, lang=javascript)
+&lt;/SYNTHESIZE&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. Identified two XSS findings (#3 and #6) that stem from the same root cause: unsanitized user input.  
+2. The SSRF (#5) and SQLi (#4) findings have the widest blast radius, affecting internal networks and data integrity.  
+3. The remaining findings (#2 and #1) are medium‑severity configuration and implementation issues.  
+4. Ranking follows exploitability: SSRF &gt; SQLi &gt; XSS &gt; configuration &gt; implementation.  
+5. Systemic patterns: (a) No central input‑validation layer, leading to repeated XSS.  
+6. (b) Sensitive data (session cookie, JWT) handled inconsistently, exposing secrets.  
+7. (c) Inconsistent application of secure coding practices across modules.  
+8. Deduplication clusters findings #3 and #6.  
+9. All titles are preserved verbatim from the input.  
+10. Ranks are sequential and severity non‑increasing.  
+11. The executive summary highlights the presence of critical vulnerabilities.  
+12. The report format follows the exact required structure.  
+13. No new findings are introduced.  
+14. The dedup_notes clearly state the clustered items.  
+15. The systemic observations are concise and actionable.  
+&lt;/think&gt;
+
+executive_summary: The project contains several high‑severity vulnerabilities, notably SSRF and SQL injection, that pose significant risk to data confidentiality and system integrity. While medium‑severity configuration issues are present, the lack of centralized input validation and inconsistent handling of sensitive data amplify the overall security posture.
+
+ranked_findings:
+  - rank: 1
+    title: `requests.get()` — An attacker could manipulate the `recipe.link` to point to an
+    severity: HIGH
+    rationale: SSRF allows internal network access and can pivot to other services, giving attackers broad reach.
+  - rank: 2
+    title: `searchkey` — The provided CVE-2014-125049, although marked as unsupported, desc
+    severity: HIGH
+    rationale: SQL injection can lead to data exfiltration, privilege escalation, and full database compromise.
+  - rank: 3
+    title: `jwt_token` — If an attacker can control the contents of `jwt_token`, they could
+    severity: HIGH
+    rationale: XSS via JWT manipulation can compromise user sessions and deface content.
+  - rank: 4
+    title: `it(t)` — If `t` can be manipulated by an attacker to contain malicious content,
+    severity: HIGH
+    rationale: XSS through test harness input can affect multiple users and is easy to trigger.
+  - rank: 5
+    title: `app.config[&quot;SESSION_COOKIE_NAME&quot;] = &quot;pyload_session&quot;` — By not setting this att
+    severity: MEDIUM
+    rationale: Lack of encryption for session cookies (CWE‑319) weakens confidentiality but is less exploitable than code injection.
+  - rank: 6
+    title: CWE-1333 finding  (CWE-1333, sev=MEDIUM, file=unknown_778.js, lang=javascript)
+    severity: MEDIUM
+    rationale: Implementation flaw with unclear impact; medium severity due to limited blast radius.
+
+systemic_observations:
+  - No central input‑validation layer, leading to repeated XSS across modules.
+  - Sensitive data (session cookie name, JWT) are handled inconsistently, exposing secrets.
+  - Inconsistent application of secure coding practices across the codebase.
+
+dedup_notes: findings 3 and 6 were clustered together as they share the same root cause (unsanitized user input leading to XSS).</pre></div>
+  </div>
+  <div class="q">#51 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#52</span><span class="shape">shape1_r2vul_ml</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+static int __pyx_pw_17clickhouse_driver_14bufferedwriter_14BufferedWriter_1__init__(PyObject *__pyx_v_self, PyObject *__pyx_args, PyObject *__pyx_kwds) {
+  Py_ssize_t __pyx_v_bufsize;
+  int __pyx_r;
+  __Pyx_RefNannyDeclarations
+  __Pyx_RefNannySetupContext(&quot;__init__ (wrapper)&quot;, 0);
+  {
+    static PyObject **__pyx_pyargnames[] = {&amp;__pyx_n_s_bufsize,0};
+    PyObject* values[1] = {0};
+    if (unlikely(__pyx_kwds)) {
+      Py_ssize_t kw_args;
+      const Py_ssize_t pos_args = PyTuple_GET_SIZE(__pyx_args);
+      switch (pos_args) {
+        case  1: values[0] = PyTuple_GET_ITEM(__pyx_args, 0);
+        CYTHON_FALLTHROUGH;
+        case  0: break;
+        default: goto __pyx_L5_argtuple_error;
+      }
+      kw_args = PyDict_Size(__pyx_kwds);
+      switch (pos_args) {
+        case  0:
+        if (likely((values[0] = __Pyx_PyDict_GetItemStr(__pyx_kwds, __pyx_n_s_bufsize)) != 0)) kw_args--;
+        else goto __pyx_L5_argtuple_error;
+      }
+      if (unlikely(kw_args &gt; 0)) {
+        if (unlikely(__Pyx_ParseOptionalKeywords(__pyx_kwds, __pyx_pyargnames, 0, values, pos_args, &quot;__init__&quot;) &lt; 0)) __PYX_ERR(0, 12, __pyx_L3_error)
+      }
+    } else if (PyTuple_GET_SIZE(__pyx_args) != 1) {
+      goto __pyx_L5_argtuple_error;
+    } else {
+      values[0] = PyTuple_GET_ITEM(__pyx_args, 0);
+    }
+    __pyx_v_bufsize = __Pyx_PyIndex_AsSsize_t(values[0]); if (unlikely((__pyx_v_bufsize == (Py_ssize_t)-1) &amp;&amp; PyErr_Occurred())) __PYX_ERR(0, 12, __pyx_L3_error)
+  }
+  goto __pyx_L4_argument_unpacking_done;
+  __pyx_L5_argtuple_error:;
+  __Pyx_RaiseArgtupleInvalid(&quot;__init__&quot;, 1, 1, 1, PyTuple_GET_SIZE(__pyx_args)); __PYX_ERR(0, 12, __pyx_L3_error)
+  __pyx_L3_error:;
+  __Pyx_AddTraceback(&quot;clickhouse_driver.bufferedwriter.BufferedWriter.__init__&quot;, __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_RefNannyFinishContext();
+  return -1;
+  __pyx_L4_argument_unpacking_done:;
+  __pyx_r = __pyx_pf_17clickhouse_driver_14bufferedwriter_14BufferedWriter___init__(((struct __pyx_obj_17clickhouse_driver_14bufferedwriter_BufferedWriter *)__pyx_v_self), __pyx_v_bufsize);
+
+  /* function exit code */
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Specific Code Constructs**: The vulnerability in the provided function is primarily related to the handling of the `bufsize` parameter. Specifically, the line `__pyx_v_bufsize = __Pyx_PyIndex_AsSsize_t(values[0]);` converts the Python object `values[0]`, which represents the `bufsize` argument passed to the `__init__` method, into a C `Py_ssize_t` type. This conversion does not include any explicit checks for the validity or safety of the value being converted. 2. **Mechanism of the Vulnerability**: The mechanism of the vulnerability lies in the lack of proper validation of the `bufsize` parameter. If a malicious server sends a crafted response that results in an extremely large or negative value for `bufsize`, this could lead to a buffer overflow when memory allocation or buffer operations are performed using this value. The function does not check if the `bufsize` is within a safe range before using it, which can lead to undefined behavior, including crashes or execution of arbitrary code. 3. **Potential Impact**: Exploiting this vulnerability could have severe consequences. An attacker could potentially cause the application to crash, leading to denial of service. More critically, if the buffer overflow can be controlled, it might allow the execution of arbitrary code with the privileges of the application, leading to unauthorized access or system compromise. 4. **Contextual Relevance**: This vulnerability aligns with CWE-120, which is related to buffer overflows. CWE-120 describes errors that occur when a program writes more data to a buffer than it can hold, potentially overwriting adjacent memory and causing unpredictable behavior. The CVE description mentions that this can lead to a crash or arbitrary code execution on the client side, which matches the potential impacts discussed above.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-120
+severity: MEDIUM
+line: none
+trace: Specific Code Constructs: The vulnerability in the provided function is primarily related to the handling of the `b...
+fix: remediate at the dangerous sink (see reasoning for details)</pre></div>
+  </div>
+  <div class="q">#52 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#53</span><span class="shape">shape4</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SYNTHESIZE&gt;
+PROJECT MAP
+  unknown_1099.py
+  unknown_1239.py
+  unknown_1255.py
+  unknown_1316.py
+  unknown_1795.py
+  unknown_1937.py
+  unknown_1986.py
+  unknown_698.js
+
+FINDINGS (8):
+  [1] `showTooltip` — If `formater(item)` returns a string that includes malicious HTM  (CWE-79, sev=HIGH, file=unknown_698.js, lang=javascript)
+  [2] `self.get_secret(path, render=render)` — If an attacker can control the content   (CWE-94, sev=HIGH, file=unknown_1239.py, lang=python)
+  [3] `self.execute` — Specific Code Constructs**: The specific code construct contrib  (CWE-88, sev=MEDIUM, file=unknown_1937.py, lang=python)
+  [4] `tpm_policy` — The code snippet shows the preparation and sending of data to the  (CWE-20, sev=MEDIUM, file=unknown_1255.py, lang=python)
+  [5] `blocksize` — If an attacker crafts an `icns` file with a very large or negative  (CWE-20, sev=MEDIUM, file=unknown_1099.py, lang=python)
+  [6] Vulnerability finding  (CWE-?, sev=MEDIUM, file=unknown_1795.py, lang=python)
+  [7] `commands.getoutput(&quot;ldd %s&quot; % exe)` — If the `exe` variable contains malicious   (CWE-77, sev=MEDIUM, file=unknown_1316.py, lang=python)
+  [8] CWE-74 in `_is_javascript_scheme`  (CWE-74, sev=MEDIUM, file=unknown_1986.py, lang=python)
+&lt;/SYNTHESIZE&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+We first identified two pairs of near‑duplicates. The XSS‑related findings (showTooltip and CWE‑74 in _is_javascript_scheme) both stem from unsanitized JavaScript input, so they belong to the same root cause cluster. The command‑execution issues (self.get_secret and commands.getoutput) both arise from unsanitized user data being passed to code‑execution primitives, forming another cluster. The remaining findings are unique: a buffer‑overflow via blocksize, a potential TPM policy flaw, a generic “self.execute” construct, and an unspecified medium‑severity issue.  
+Exploitability was judged by reachability and blast radius: the XSS in the tooltip is highly reachable and can compromise any user viewing the page, so it tops the list. Command injection via self.get_secret is equally severe because it allows arbitrary code execution. The buffer‑overflow is medium because it requires crafted file input but can crash or potentially escape. The other medium‑severity findings have narrower impact or lower likelihood of exploitation.  
+Systemic patterns emerge: 1) No central input‑validation layer, leading to multiple injection flaws. 2) Secrets are accessed through scattered helper functions rather than a secure vault or config, increasing exposure. 3) Bounds checking and defensive coding are inconsistent, evidenced by the blocksize overflow.  
+Thus the report will rank the two HIGH findings first, followed by the medium ones in order of decreasing exploitability. The dedup notes will reference the two clusters identified above.  
+&lt;/think&gt;
+
+executive_summary: The project exhibits several high‑severity injection flaws—both XSS and command injection—indicating a pervasive lack of input validation. Medium‑severity issues such as a buffer overflow and insecure secret handling further weaken overall security posture.
+
+ranked_findings:
+  - rank: 1
+    title: `showTooltip` — If `formater(item)` returns a string that includes malicious HTM
+    severity: HIGH
+    rationale: Direct XSS in a UI component with wide user exposure.
+  - rank: 2
+    title: `self.get_secret(path, render=render)` — If an attacker can control the content
+    severity: HIGH
+    rationale: Unsanitized input into a code‑execution context allows arbitrary code run.
+  - rank: 3
+    title: `blocksize` — If an attacker crafts an `icns` file with a very large or negative
+    severity: MEDIUM
+    rationale: Buffer overflow can crash or potentially lead to code execution with crafted files.
+  - rank: 4
+    title: `tpm_policy` — The code snippet shows the preparation and sending of data to the
+    severity: MEDIUM
+    rationale: Potential data leakage or improper handling of TPM data.
+  - rank: 5
+    title: `self.execute` — Specific Code Constructs**: The specific code construct contrib
+    severity: MEDIUM
+    rationale: Generic execution construct that may be abused if misused.
+  - rank: 6
+    title: Vulnerability finding
+    severity: MEDIUM
+    rationale: Medium‑severity issue with unspecified impact.
+  - rank: 7
+    title: `commands.getoutput(&quot;ldd %s&quot; % exe)` — If the `exe` variable contains malicious
+    severity: MEDIUM
+    rationale: Command injection via unsanitized variable.
+  - rank: 8
+    title: CWE-74 in `_is_javascript_scheme`
+    severity: MEDIUM
+    rationale: XSS via improper neutralization of JavaScript scheme input.
+
+systemic_observations:
+  - No centralized input validation layer, leading to multiple injection vulnerabilities.
+  - Secrets are accessed through scattered helper functions instead of a secure vault or configuration system.
+  - Inconsistent bounds checking and defensive coding practices increase the risk of buffer overflows and other memory errors.
+
+dedup_notes: Findings [1] and [8] were clustered as XSS; findings [2] and [7] were clustered as command injection.</pre></div>
+  </div>
+  <div class="q">#53 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#54</span><span class="shape">shape1_wave3_jsts</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+$(toast).addClass(this.options.classes);
+      }
+
+      // Set content
+      if (
+        typeof HTMLElement === &#x27;object&#x27;
+          ? this.message instanceof HTMLElement
+          : this.message &amp;&amp;
+            typeof this.message === &#x27;object&#x27; &amp;&amp;
+            this.message !== null &amp;&amp;
+            this.message.nodeType === 1 &amp;&amp;
+            typeof this.message.nodeName === &#x27;string&#x27;
+      ) {
+        toast.appendChild(this.message);
+
+        // Check if it is jQuery object
+      } else if (!!this.message.jquery) {
+        $(toast).append(this.message[0]);
+
+        // Insert as html;
+      } else {
+        toast.innerHTML = this.message;
+      }
+
+      // Append toasft
+      Toast._container.appendChild(toast);
+      return toast;
+    }
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `jQuery` is untrusted input entering this code (near line 22).
+2. It flows to `innerhtml`, which is rendered into the page/DOM without escaping.
+3. The fix adds a control the vulnerable code lacks: output is HTML-escaped / encoded before rendering.
+4. An attacker controlling `jQuery` can therefore exploit it — this is CWE-79.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-79
+severity: MEDIUM
+line: 22
+trace: jQuery -&gt; innerhtml
+fix: Output is HTML-escaped / encoded before rendering</pre></div>
+  </div>
+  <div class="q">#54 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#55</span><span class="shape">shape1_wave3_other</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+error_reporting(E_ALL ^ E_NOTICE);
+
+if(!Auth::LoggedIn() || !PilotGroups::group_has_perm(Auth::$usergroups, ACCESS_ADMIN))
+{
+	Debug::showCritical(&#x27;Unauthorized access!&#x27;);
+	die();
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. Untrusted input is present, but it does not reach a dangerous sink unguarded.
+2. The code applies a control: an explicit access-control / authentication check guards it.
+3. Because that control neutralizes the risk on the path to the sink, the code is safe.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: input is neutralized by an explicit access-control / authentication check guards it before any sink
+fix: none</pre></div>
+  </div>
+  <div class="q">#55 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#56</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# class/public.py (line 601)
+        return h
+    return h[0]
+
+def GetClientIp():
+    from flask import request
+    return request.remote_addr.replace(&#x27;::ffff:&#x27;, &#x27;&#x27;)
+
+def phpReload(version):
+    # 重载PHP配置
+
+# BTPanel/__init__.py (line 762)
+
+@app.route(&#x27;/soft&#x27;,methods=method_all)
+def soft(pdata = None):
+    comReturn = comm.local()
+    if comReturn: return comReturn
+    if request.method == method_get[0] and not pdata:
+        data={}
+        data[&#x27;lan&#x27;] = public.GetLan(&#x27;soft&#x27;)
+        return render_template( &#x27;soft.html&#x27;,data=data)
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `class/public.py` (line 601).
+2. The value flows across files: public.py:601 -&gt; public.py:601 -&gt; public.py:602 -&gt; common.py:193 -&gt; common.py:193 -&gt; common.py:195.
+3. It reaches a sink in `BTPanel/__init__.py` (line 762) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-79.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-79
+severity: HIGH
+line: 762
+trace: public.py:601 -&gt; public.py:601 -&gt; public.py:602 -&gt; common.py:193 -&gt; common.py:193 -&gt; common.py:195
+fix: Validate/neutralize the tainted value before it reaches the sink in __init__.py.</pre></div>
+  </div>
+  <div class="q">#56 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#57</span><span class="shape">shape1_verified</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+    constants: {},
+};
+
+const REGEXP_IGNORE_KEYS = /__proto__/;
+
+class Parser {
+    constructor(options = {}) {
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+The untrusted data originates from the `options` object passed into `Parser`’s constructor.  
+During construction, each key of `options` is examined to decide whether it should be copied onto the parser instance.  
+The check uses the regular expression `REGEXP_IGNORE_KEYS` defined on line 4: `const REGEXP_IGNORE_KEYS = /__proto__/;`.  
+If a key matches this regex, the code skips copying it, attempting to prevent prototype pollution.  
+Because the regex only matches the literal string `&quot;__proto__&quot;`, an attacker can supply keys that bypass the test (e.g., `&quot;__proto__&quot;` with different casing or encoded forms) and still pollute the prototype.  
+Thus the data flow is: `options[key]` (untrusted source) → `REGEXP_IGNORE_KEYS.test(key)` (dangerous sink on line 4).  
+The vulnerability was fixed by tightening the regex on line 4 to exclude all dangerous prototype-related keys.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-1321
+severity: HIGH
+line: 4
+trace: options → REGEXP_IGNORE_KEYS.test(key)
+fix: replace the regex on line 4 with a stricter pattern that blocks all prototype‑related keys (e.g., `/^(?:__proto__|constructor|prototype)$/i`).</pre></div>
+  </div>
+  <div class="q">#57 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#58</span><span class="shape">shape1_r2vul_valtest</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+void
+init_usm(void)
+{
+    struct snmp_secmod_def *def;
+    char *type;
+
+    DEBUGMSGTL((&quot;init_usm&quot;, &quot;unit_usm: %&quot; NETSNMP_PRIo &quot;u %&quot; NETSNMP_PRIo &quot;u\n&quot;,
+                usmNoPrivProtocol[0], usmNoPrivProtocol[1]));
+
+    sc_init();                  /* initalize scapi code */
+
+    /*
+     * register ourselves as a security service
+     */
+    def = SNMP_MALLOC_STRUCT(snmp_secmod_def);
+    if (def == NULL)
+        return;
+    /*
+     * XXX: def-&gt;init_sess_secmod move stuff from snmp_api.c
+     */
+    def-&gt;encode_reverse = usm_secmod_rgenerate_out_msg;
+    def-&gt;encode_forward = usm_secmod_generate_out_msg;
+    def-&gt;decode = usm_secmod_process_in_msg;
+    def-&gt;pdu_free_state_ref = usm_free_usmStateReference;
+    def-&gt;session_setup = usm_session_init;
+    def-&gt;handle_report = usm_handle_report;
+    def-&gt;probe_engineid = usm_discover_engineid;
+    def-&gt;post_probe_engineid = usm_create_user_from_session_hook;
+    if (register_sec_mod(USM_SEC_MODEL_NUMBER, &quot;usm&quot;, def) != SNMPERR_SUCCESS) {
+        SNMP_FREE(def);
+        snmp_log(LOG_ERR, &quot;could not register usm sec mod\n&quot;);
+        return;
+    }
+
+    snmp_register_callback(SNMP_CALLBACK_LIBRARY,
+                           SNMP_CALLBACK_POST_PREMIB_READ_CONFIG,
+                           init_usm_post_config, NULL);
+
+    snmp_register_callback(SNMP_CALLBACK_LIBRARY,
+                           SNMP_CALLBACK_SHUTDOWN,
+                           deinit_usm_post_config, NULL);
+
+    snmp_register_callback(SNMP_CALLBACK_LIBRARY,
+                           SNMP_CALLBACK_SHUTDOWN,
+                           free_engineID, NULL);
+
+    register_config_handler(&quot;snmp&quot;, &quot;defAuthType&quot;, snmpv3_authtype_conf,
+                            NULL, &quot;MD5|SHA|SHA-512|SHA-384|SHA-256|SHA-224&quot;);
+    register_config_handler(&quot;snmp&quot;, &quot;defPrivType&quot;, snmpv3_privtype_conf,
+                            NULL,
+                            &quot;DES&quot;
+#ifdef HAVE_AES
+                            &quot;|AES|AES-128&quot;
+#ifdef NETSNMP_DRAFT_BLUMENTHAL_AES_04
+                            &quot;|AES-192|AES-256&quot;
+#endif /* NETSNMP_DRAFT_BLUMENTHAL_AES_04 */
+#else
+                            &quot; (AES support not available)&quot;
+#endif
+                           );
+
+    /*
+     * Free stuff at shutdown time
+     */
+    snmp_register_callback(SNMP_CALLBACK_LIBRARY,
+                           SNMP_CALLBACK_SHUTDOWN,
+                           free_enginetime_on_shutdown, NULL);
+
+
+    type = netsnmp_ds_get_string(NETSNMP_DS_LIBRARY_ID, NETSNMP_DS_LIB_APPTYPE);
+
+    register_config_handler(type, &quot;userSetAuthPass&quot;, usm_set_password,
+                            NULL, NULL);
+    register_config_handler(type, &quot;userSetPrivPass&quot;, usm_set_password,
+                            NULL, NULL);
+    register_config_handler(type, &quot;userSetAuthKey&quot;, usm_set_password, NULL,
+                            NULL);
+    register_config_handler(type, &quot;userSetPrivKey&quot;, usm_set_password, NULL,
+                            NULL);
+    register_config_handler(type, &quot;userSetAuthLocalKey&quot;, usm_set_password,
+                            NULL, NULL);
+    register_config_handler(type, &quot;userSetPrivLocalKey&quot;, usm_set_password,
+                            NULL, NULL);
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Specific Code Constructs**: The vulnerability is specifically related to the `usm_free_usmStateReference` function, which is assigned to the `pdu_free_state_ref` field of the `snmp_secmod_def` structure. This assignment occurs in the following line of the provided code:
+   ```c
+   def-&gt;pdu_free_state_ref = usm_free_usmStateReference;
+   ```
+   While the exact implementation of `usm_free_usmStateReference` is not shown in the provided snippet, the vulnerability stems from improper handling of memory within this function. 2. **Mechanism of the Vulnerability**: The vulnerability arises from a double-free condition in the `usm_free_usmStateReference` function. A double-free occurs when a program attempts to free a block of memory that has already been freed. This can happen due to programming errors such as not properly managing state or flags that indicate whether a block of memory has been freed. In the context of SNMPv3 GetBulk requests, the sequence of operations might involve freeing a `usmStateReference` structure multiple times, leading to undefined behavior and potential security issues. 3. **Potential Impact**: Exploiting a double-free vulnerability can lead to several serious consequences, including:
+   - **Arbitrary Code Execution**: An attacker could exploit the double-free to overwrite memory and potentially execute arbitrary code with the privileges of the affected application. - **Denial of Service (DoS)**: Even without executing arbitrary code, a double-free can cause the application to crash, leading to a denial of service. - **Information Disclosure**: Depending on how the memory is overwritten, sensitive information might be exposed to unauthorized parties. 4. **Contextual Relevance**: This vulnerability is categorized under CWE-415, which is defined as &quot;Double Free&quot;. CWE-415 describes software flaws where a pointer is freed twice, leading to memory corruption. The vulnerability affects versions of net-snmp prior to 5.8.1.pre1, indicating that it was present in widely distributed versions of the software across multiple Linux distributions.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-415
+severity: MEDIUM
+line: none
+trace: Specific Code Constructs: The vulnerability is specifically related to the `usm_free_usmStateReference` function, w...
+fix: remediate at the dangerous sink (see reasoning for details)</pre></div>
+  </div>
+  <div class="q">#58 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#59</span><span class="shape">shape1_r2vul_ml</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+static belle_sip_channel_t* _belle_sip_provider_find_channel_using_routable(belle_sip_provider_t *p, const belle_sip_uri_t* routable_uri) {
+	const char *transport;
+	belle_sip_listening_point_t *lp;
+	belle_sip_list_t *elem;
+	belle_sip_channel_t *chan;
+	belle_sip_uri_t* chan_uri;
+
+	if (!routable_uri) return NULL;
+
+	transport = belle_sip_uri_is_secure(routable_uri) ? &quot;TLS&quot; : belle_sip_uri_get_transport_param(routable_uri);
+	lp = belle_sip_provider_get_listening_point(p, transport);
+	if (!lp) return NULL;
+
+
+	for(elem=lp-&gt;channels; elem ;elem=elem-&gt;next){
+		chan=(belle_sip_channel_t*)elem-&gt;data;
+		chan_uri = belle_sip_channel_create_routable_uri(chan);
+		if (belle_sip_uri_get_port(routable_uri) == belle_sip_uri_get_port(chan_uri) &amp;&amp;
+			0 == strcmp(belle_sip_uri_get_host(routable_uri), belle_sip_uri_get_host(chan_uri))) {
+			return chan;
+		}
+	}
+	return NULL;
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**:
+   - **Null Checks**: The function begins by checking if `routable_uri` is `NULL`. This prevents dereferencing a null pointer, which is a common source of crashes and undefined behavior.
+   - **Transport Parameter Handling**: The function safely determines the transport protocol using `belle_sip_uri_is_secure()` and `belle_sip_uri_get_transport_param()`. These functions are assumed to handle their inputs safely, avoiding buffer overflows or other memory-related issues.
+   - **Listening Point Retrieval**: The function retrieves a listening point using `belle_sip_provider_get_listening_point(p, transport)`. If no listening point is found (`lp` is `NULL`), it returns `NULL`, ensuring that subsequent operations do not proceed with invalid data.
+   - **Channel Iteration and Comparison**: The function iterates through the channels associated with the listening point. For each channel, it creates a routable URI and compares its host and port with those of the input URI. The comparison uses `strcmp` for string equality, which is appropriate given the context. The use of `belle_sip_uri_get_port()` ensures that integer comparisons are used for port numbers, avoiding issues related to string comparison of numeric values.
+
+2. **Absence of Common Vulnerabilities**:
+   - **Buffer Overflows**: The function does not perform any direct string manipulation that could lead to buffer overflows. All string operations are handled by library functions (`belle_sip_uri_get_host`) that are presumably designed to prevent such issues.
+   - **Use After Free**: There is no indication of memory allocation or deallocation within the function, reducing the risk of use-after-free errors.
+   - **Integer Overflows**: The function uses integer comparisons for port numbers, which are unlikely to cause overflow issues unless the underlying implementation of `belle_sip_uri_get_port()` has bugs.
+   - **Race Conditions**: The function does not appear to be thread-safe, but since it is static and operates on local variables and passed parameters, race conditions are not directly addressed here. However, the absence of shared state modifications reduces the risk.
+   - **SQL Injection**: Not applicable as the function does not interact with databases.
+   - **Cross-Site Scripting (XSS)**: Not applicable as the function does not generate any HTML content.
+   - **Command Injection**: Not applicable as the function does not execute any system commands.
+
+3. **Validation of the Non-Vulnerable Label**:
+   - The function&#x27;s logic is straightforward and focused on finding a matching channel based on URI parameters. It performs necessary checks and comparisons without introducing new vulnerabilities.
+   - The use of library functions for URI parsing and comparison suggests that these operations are handled securely by the underlying library.
+   - The function&#x27;s design avoids common pitfalls such as improper memory management, unsafe string handling, and lack of input validation.
+   - Given the absence of dynamic memory allocation, complex data structures, and external interactions (such as network calls or file I/O), the risk of introducing vulnerabilities is minimized.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: Analysis of Code Safety:
+fix: none</pre></div>
+  </div>
+  <div class="q">#59 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#60</span><span class="shape">shape1</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+def decode(self, frame):
+        &quot;&quot;&quot;
+        Decode an incoming frame.
+
+        Return a frame.
+
+        &quot;&quot;&quot;
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. However, the vulnerability is related to the handling of frames in a WebSocket implementation, specifically in the `aaugustin websockets` library version 4. The absence of explicit code for handling decompression or data validation in the given snippet suggests that the vulnerability might be due to the default behavior of the library rather than the specific code in this function. 2. **Mechanism of the Vulnerability**: The vulnerability arises from the improper handling of highly compressed data, leading to data amplification. In the context of WebSockets, if the server or client is configured to accept compressed frames without proper limits, an attacker can send a small, highly compressed frame that expands significantly upon decompression. This can lead to excessive memory usage on the server or client side, potentially causing a denial of service. The `aaugustin websockets` library version 4, when used with compression enabled, is susceptible to this issue because it does not impose strict limits on the size of decompressed data by default. 3. **Potential Impact**: Exploiting this vulnerability can result in significant memory exhaustion on the server or client side, leading to a denial of service condition. The system may become unresponsive or crash due to the excessive memory consumption. This can disrupt normal operations and affect the availability of services relying on the WebSocket connection. 4. **Contextual Relevance**: The vulnerability is categorized under CWE-409: Improper Handling of Highly Compressed Data (Data Amplification). The fix for this vulnerability involves configuring the library with `compression=None` or implementing proper limits on the size of decompressed data to prevent data amplification attacks.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-400
+severity: MEDIUM
+line: none
+trace: decode` — In the context of WebSockets, if the server or client is configured to accept compressed frames without proper limits, an attacker
+fix: The fix for this vulnerability involves configuring the library with `compression=None` or implementing proper limits on the size of decompressed data to prevent data amplification attacks.</pre></div>
+  </div>
+  <div class="q">#60 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#61</span><span class="shape">shape3_codeql</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+# apps/backend/chunked_upload/views.py (line 98)
+
+    def _post(self, request, *args, **kwargs):
+        raise NotImplementedError
+
+    def post(self, request, *args, **kwargs):
+        &quot;&quot;&quot;
+        Handle POST requests.
+        &quot;&quot;&quot;
+        try:
+
+# api/views/upload.py (line 82)
+        photo = uploaded_file
+        image_hash = calculate_hash_b64(user, io.BytesIO(photo.read()))
+        if not Photo.objects.filter(image_hash=image_hash).exists():
+            if not os.path.exists(
+                os.path.join(user.scan_directory, &quot;uploads&quot;, device, filename)
+            ):
+                photo_path = os.path.join(
+                    user.scan_directory, &quot;uploads&quot;, device, filename
+                )
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. CodeQL taint analysis traces untrusted input from `apps/backend/chunked_upload/views.py` (line 98).
+2. The value flows across files: views.py:98 -&gt; views.py:104 -&gt; views.py:287 -&gt; views.py:314 -&gt; upload.py:66 -&gt; upload.py:69.
+3. It reaches a sink in `api/views/upload.py` (line 82) without sanitization.
+4. This verified cross-file data flow is exploitable — CWE-22.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-22
+severity: HIGH
+line: 82
+trace: views.py:98 -&gt; views.py:104 -&gt; views.py:287 -&gt; views.py:314 -&gt; upload.py:66 -&gt; upload.py:69
+fix: Validate/neutralize the tainted value before it reaches the sink in upload.py.</pre></div>
+  </div>
+  <div class="q">#61 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#62</span><span class="shape">shape1_fixjs</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+function km_hideAlternativesCharMenu() {
+    this.menu = document.getElementById(&#x27;keyboard-accent-char-menu&#x27;);
+    this.menu.innerHTML = &#x27;&#x27;;
+    this.menu.className = &#x27;&#x27;;
+    this.menu.style.display = &#x27;none&#x27;;
+
+    if (_altContainer)
+      _altContainer.parentNode.replaceChild(_menuKey, _altContainer);
+  }
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `className` is untrusted input entering this code (near line 3).
+2. It flows to `innerhtml`, which is rendered into the page/DOM without escaping.
+3. The fix adds a control the vulnerable code lacks: output is HTML-escaped / encoded before rendering.
+4. An attacker controlling `className` can therefore exploit it — this is CWE-79.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-79
+severity: MEDIUM
+line: 3
+trace: className -&gt; innerhtml
+fix: Output is HTML-escaped / encoded before rendering</pre></div>
+  </div>
+  <div class="q">#62 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#63</span><span class="shape">shape1</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+constructor(cfg) {
+    super();
+
+    /**
+     * Configuration options.
+     *
+     * @property {number} keySize The key size in words to generate. Default: 4 (128 bits)
+     * @property {Hasher} hasher The hasher to use. Default: SHA1
+     * @property {number} iterations The number of iterations to perform. Default: 1
+     */
+    this.cfg = Object.assign(
+      new Base(),
+      {
+        keySize: 128 / 32,
+        hasher: SHA1Algo,
+        iterations: 1,
+      },
+      cfg,
+    );
+  }
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Specific Code Constructs**: 
+   - The vulnerability is primarily due to the default configuration settings within the `Object.assign` call. Specifically, the default values for `hasher` and `iterations` are set to `SHA1Algo` and `1`, respectively. - These defaults are explicitly defined in the code snippet: `keySize: 128 / 32, hasher: SHA1Algo, iterations: 1`. 2. **Mechanism of the Vulnerability**:
+   - The use of SHA1 as the hashing algorithm (`hasher: SHA1Algo`) is problematic because SHA1 is considered cryptographically broken and unsuitable for further use. It is vulnerable to collision attacks, meaning that two different inputs can produce the same output hash. - The low iteration count (`iterations: 1`) significantly weakens the security of the PBKDF2 function. PBKDF2 (Password-Based Key Derivation Function 2) is designed to be computationally intensive to resist brute-force attacks. A single iteration provides no such resistance, making the derived keys easily guessable or brute-forced. - Together, these settings mean that the function does not meet modern cryptographic standards for password hashing or key derivation, leading to potential security breaches. 3. **Potential Impact**:
+   - If this function is used to hash passwords, the low iteration count and use of SHA1 make it trivial for an attacker to crack the hashes using modern hardware and techniques. This could lead to unauthorized access to user accounts. - For generating cryptographic signatures, the use of SHA1 and insufficient iterations can result in forged signatures, allowing attackers to impersonate legitimate users or entities. - The impact is particularly severe given the widespread use of PBKDF2 for password storage and other security-sensitive applications. 4. **Contextual Relevance**:
+   - **CWE-328**: Insecure Hash Algorithms. This CWE directly applies because SHA1 is considered insecure for cryptographic purposes. - **CWE-916**: Use of a Password Hash with Insufficient Computational Effort. This CWE is relevant because the single iteration count does not provide sufficient computational effort to resist brute-force attacks. - **CWE-327**: Use of a Broken or Risky Cryptographic Algorithm. This CWE encompasses both the use of SHA1 and the insufficient iteration count, highlighting the overall risk of the cryptographic implementation.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-328
+severity: MEDIUM
+line: none
+trace: CWE-328 in `Object.assign` - The vulnerability is primarily due to the default configuration settings within the...
+fix: Validate/neutralize the untrusted input before it reaches the sink.</pre></div>
+  </div>
+  <div class="q">#63 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#64</span><span class="shape">shape1_wave3_jsts</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+loadingScreenFragment.appendChild(loadingScreen);
+        }
+        else if (loadingScreen != undefined) {
+          loadingScreenFragment.innerHTML = loadingScreen;
+        }
+      }
+    }
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. `untrusted input` is untrusted input entering this code (near line 4).
+2. It flows to `innerhtml`, which is rendered into the page/DOM without escaping.
+3. The fix adds a control the vulnerable code lacks: output is HTML-escaped / encoded before rendering.
+4. An attacker controlling `untrusted input` can therefore exploit it — this is CWE-79.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-79
+severity: MEDIUM
+line: 4
+trace: untrusted input -&gt; innerhtml
+fix: Output is HTML-escaped / encoded before rendering</pre></div>
+  </div>
+  <div class="q">#64 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#65</span><span class="shape">shape1_r2vul_ml</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+static void
+update_bar_address(struct vmctx *ctx, struct pci_vdev *dev, uint64_t addr,
+	int idx, int type, bool ignore_reg_unreg)
+{
+	bool decode = false;
+	uint64_t orig_addr = dev-&gt;bar[idx].addr;
+
+	if (!ignore_reg_unreg) {
+		if (dev-&gt;bar[idx].type == PCIBAR_IO)
+			decode = porten(dev);
+		else
+			decode = memen(dev);
+	}
+
+	if (decode)
+		unregister_bar(dev, idx);
+
+	switch (type) {
+	case PCIBAR_IO:
+	case PCIBAR_MEM32:
+		dev-&gt;bar[idx].addr = addr;
+		break;
+	case PCIBAR_MEM64:
+		dev-&gt;bar[idx].addr &amp;= ~0xffffffffUL;
+		dev-&gt;bar[idx].addr |= addr;
+		break;
+	case PCIBAR_MEMHI64:
+		dev-&gt;bar[idx].addr &amp;= 0xffffffff;
+		dev-&gt;bar[idx].addr |= addr;
+		break;
+	default:
+		assert(0);
+	}
+
+	if (decode)
+		register_bar(dev, idx);
+
+	/* update bar mapping */
+	if (dev-&gt;dev_ops-&gt;vdev_update_bar_map &amp;&amp; decode)
+		dev-&gt;dev_ops-&gt;vdev_update_bar_map(ctx, dev, idx, orig_addr);
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Specific Code Constructs**: The specific code construct contributing to the vulnerability is the `assert(0);` statement in the default case of the switch statement. This line is used to handle unexpected values of the `type` parameter. 2. **Mechanism of the Vulnerability**: The vulnerability arises from the use of `assert(0);` as a mechanism for handling unexpected or invalid input values. In C, `assert()` is typically used for debugging purposes to check for conditions that should never occur during normal operation. When an assertion fails, it terminates the program with an error message, which can lead to a denial of service (DoS). In this context, if an attacker can control the `type` parameter and provide a value that does not match any of the defined cases (PCIBAR_IO, PCIBAR_MEM32, PCIBAR_MEM64, PCIBAR_MEMHI64), the program will terminate due to the failed assertion. This lack of proper error handling and input validation allows an attacker to exploit the function by causing it to crash. 3. **Potential Impact**: The potential impact of this vulnerability is significant, as it can lead to a denial of service condition. If the function is part of a critical component of a system, such as a device model in a hypervisor like ACRN, the termination of the program could disrupt the entire virtualization environment, affecting all virtual machines running on the host. This could result in data loss, service interruption, and potential security risks due to the unpredictable state of the system after the crash. 4. **Contextual Relevance**: This vulnerability is directly related to CWE-617, Improper Restriction of Excessive Input Values. While CWE-617 typically refers to excessive input values leading to buffer overflows or similar issues, in this context, it can be interpreted as the improper handling of unexpected input values leading to a program crash. The provided CVE description mentions that this issue is fixed in version 1.2 of ACRN, with specific commits addressing the problem in earlier versions. These fixes likely involve replacing the `assert(0);` statement with more robust error handling mechanisms that do not terminate the program but instead return an error code or take corrective action.
+&lt;/think&gt;
+
+status: confirmed
+cwe: CWE-617
+severity: MEDIUM
+line: none
+trace: Specific Code Constructs: The specific code construct contributing to the vulnerability is the `assert(0);` stateme...
+fix: This line is used to handle unexpected values of the `type` parameter.</pre></div>
+  </div>
+  <div class="q">#65 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#66</span><span class="shape">shape1_r2vul_ml</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+static void disasm_until_optype(RCore *core, ut64 addr, char type_print, int optype, int limit) {
+	int p = 0;
+	const bool show_color = core-&gt;print-&gt;flags &amp; R_PRINT_FLAGS_COLOR;
+	int i;
+	for (i = 0; i &lt; limit; i++) {
+		RAnalOp *op = r_core_anal_op (core, addr, R_ARCH_OP_MASK_BASIC | R_ARCH_OP_MASK_DISASM);
+		if (op) {
+			char *mnem = op-&gt;mnemonic;
+			char *m = malloc ((strlen (mnem) * 2) + 32);
+			strcpy (m, mnem);
+			//r_parse_parse (core-&gt;parser, op-&gt;mnemonic, m);
+			if (type_print == &#x27;q&#x27;) {
+				r_cons_printf (&quot;%s\n&quot;, m);
+			} else {
+				if (show_color) {
+					const char *offsetColor = r_cons_singleton ()-&gt;context-&gt;pal.offset; // TODO etooslow. must cache
+					r_cons_printf (&quot;%s0x%08&quot;PFMT64x Color_RESET&quot;  %10s %s\n&quot;,
+							offsetColor, addr + p, &quot;&quot;, m);
+				} else {
+					r_cons_printf (&quot;0x%08&quot;PFMT64x&quot;  %10s %s\n&quot;, addr + p, &quot;&quot;, m);
+				}
+			}
+			if ((op-&gt;type &amp; 0xfffff) == optype) {
+				goto beach;
+			}
+			if (op-&gt;type == R_ANAL_OP_TYPE_JMP) {
+				addr = op-&gt;jump;
+			} else {
+				addr += op-&gt;size;
+			}
+		} else {
+			R_LOG_ERROR (&quot;[pdp] Cannot get op at 0x%08&quot;PFMT64x, addr + p);
+			r_anal_op_free (op);
+			break;
+		}
+		//r_io_read_at (core-&gt;io, n, rbuf, 512);
+		r_anal_op_free (op);
+	}
+beach:
+	return;
+}
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**:
+   - **Memory Management**: The function uses `malloc` to allocate memory for the string `m`, which is then freed using `free` after its use. This ensures that there are no memory leaks.
+   - **String Handling**: The function uses `strcpy` to copy the mnemonic into the allocated memory. Although `strcpy` is generally considered unsafe due to the risk of buffer overflow, in this case, the size of the allocated memory is calculated as `(strlen(mnem) * 2) + 32`, which should be sufficient to hold the copied string and additional space. However, it&#x27;s worth noting that `strncpy` would be safer to prevent buffer overflows if the length of `mnem` were not properly controlled.
+   - **Error Handling**: The function checks if `r_core_anal_op` returns `NULL` and logs an error message before breaking out of the loop. This prevents dereferencing a null pointer, which could lead to undefined behavior.
+
+2. **Absence of Common Vulnerabilities**:
+   - **Buffer Overflows**: As mentioned, while `strcpy` is used, the allocation seems to account for the length of the string, reducing the risk of buffer overflows. However, the use of `strncpy` with a proper length check would mitigate this risk entirely.
+   - **Null Pointer Dereferences**: The function includes a check to ensure that `op` is not `NULL` before accessing its members, thus avoiding null pointer dereferences.
+   - **Integer Overflows**: The function does not appear to perform operations that could lead to integer overflows, such as arithmetic on addresses or sizes without checks.
+   - **Format String Vulnerabilities**: The function uses `r_cons_printf` with format specifiers, and there are no user-controlled format strings, preventing format string vulnerabilities.
+
+3. **Validation of the Non-Vulnerable Label**:
+   - **Code Review**: The code has been reviewed by experts who have identified no immediate vulnerabilities. This review process is crucial in catching issues that automated tools might miss.
+   - **Use of Safe Functions**: While `strcpy` is used, the allocation logic suggests that it is safe in this context. However, replacing it with `strncpy` would further solidify the safety.
+   - **Proper Resource Management**: Memory allocated with `malloc` is properly freed with `free`, and resources like `RAnalOp` are freed with `r_anal_op_free`, indicating good resource management practices.
+   - **Error Checking**: The function includes checks for errors, such as when `r_core_anal_op` fails, which helps in maintaining robustness and prevents the program from entering an undefined state.
+
+In conclusion, based on the analysis of code safety, the absence of common vulnerabilities, and the validation provided by the code review, the function can be considered non-vulnerable. However, minor improvements such as replacing `strcpy` with `strncpy` could further enhance its security.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: Analysis of Code Safety:
+fix: none</pre></div>
+  </div>
+  <div class="q">#66 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>
+<section class="card">
+  <div class="hd"><span class="id">#67</span><span class="shape">shape1</span></div>
+  <div class="cols">
+    <div class="col"><h3>Code (what the model was shown)</h3><pre>&lt;SCAN&gt;
+def get_update_status():
+    if feature_support[&#x27;updater&#x27;]:
+        log.info(u&quot;Update status requested&quot;)
+        return updater_thread.get_available_updates(request.method, locale=get_locale())
+    else:
+        return &#x27;&#x27;
+&lt;/SCAN&gt;</pre></div>
+    <div class="col"><h3>Reasoning + verdict (judge THIS)</h3><pre>&lt;think&gt;
+1. **Analysis of Code Safety**:
+   - The function `get_update_status()` appears to be designed to check for available updates based on the presence of a feature (`feature_support[&#x27;updater&#x27;]`). This conditional check ensures that the update functionality is only accessed when it is supported, which is a good practice to prevent unnecessary operations or errors.
+   - The use of `log.info()` suggests that logging is implemented, which can help in monitoring and debugging. While logging itself does not directly enhance security, it can aid in detecting suspicious activities or errors that might indicate a security issue.
+   - The function calls `updater_thread.get_available_updates()` with parameters `request.method` and `locale=get_locale()`. Assuming that `get_locale()` is a function that safely retrieves the user&#x27;s locale, this indicates that the function is attempting to handle localization properly. However, the safety of this function call depends on how `updater_thread.get_available_updates()` handles its parameters.
+
+2. **Absence of Common Vulnerabilities**:
+   - **Injection Attacks**: There is no direct evidence of SQL, command, or other types of injection vulnerabilities in the provided code snippet. The function does not construct any dynamic queries or execute system commands based on user input.
+   - **Cross-Site Scripting (XSS)**: The function does not appear to generate any HTML content or output data directly to a web page, so XSS vulnerabilities are unlikely unless the returned data is improperly handled elsewhere.
+   - **Buffer Overflows**: Python generally protects against buffer overflows due to its memory management, but the function does not show any manual memory handling that could lead to such issues.
+   - **Improper Input Validation**: While the function uses `request.method`, it does not validate this input. However, since this is likely part of a web framework (given the context), it is assumed that the framework itself provides some level of input sanitization and validation.
+   - **Race Conditions**: The function interacts with `updater_thread`, which could potentially lead to race conditions if not managed correctly. However, without more context about how `updater_thread` is implemented and used, it&#x27;s difficult to definitively state that there are no race conditions. Given the current information, we assume that the thread management is handled safely elsewhere in the application.
+
+3. **Validation of the Non-Vulnerable Label**:
+   - The function does not handle any user input directly that could lead to immediate security issues like injection attacks or XSS.
+   - It relies on the existence of a feature flag (`feature_support[&#x27;updater&#x27;]`) to control access to the update functionality, which is a safe practice.
+   - The function logs its actions, which can help in identifying misuse or errors, although this is not a security measure per se.
+   - The function&#x27;s reliance on `updater_thread.get_available_updates()` and `get_locale()` suggests that any vulnerabilities would likely stem from these functions rather than `get_update_status()` itself. Without evidence of vulnerabilities in these functions, we cannot assume that `get_update_status()` introduces any new security risks.
+   - Based on the provided code snippet and the assumptions made about the surrounding context, the function appears to be securely implemented and free of exploitable flaws given the current information.
+&lt;/think&gt;
+
+status: safe
+cwe: none
+severity: none
+line: none
+trace: no untrusted-input-to-sink data flow involving `get_update_status()`;
+fix: none</pre></div>
+  </div>
+  <div class="q">#67 &mdash; Real source&rarr;sink flow, or theater? Label correct? &rarr; log in corpus_audit.csv</div>
+</section>

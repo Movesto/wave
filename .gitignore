@@ -45,3 +45,9 @@ code_gpt_exercise.md
 memory/
 tools/
 scanner/index/
+
+# runtime pid files
+*.pid
+
+# scratch notes / anything with credentials
+eval/newsome.txt

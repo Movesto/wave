@@ -123,6 +123,46 @@ class QwenLoraPredictor:
             self.model = base
         self.model.eval()
 
+    def confidence(self, user_prompt: str) -> float:
+        """P(vulnerable) as a calibratable score in [0,1], via one forward pass.
+
+        The model emits a BINARY verdict, so the only way to change its false-positive
+        rate has been to retrain — which is literally what v6/v7/v8 were: three full runs
+        to move one operating point. A score turns that into a threshold you set at
+        inference time, and it is what VD-S (FNR at a fixed low FPR) and any CI gate
+        ("fail the build above X") actually need.
+
+        Method: force the prefix up to `status:` and compare the next-token logits for
+        the verdict tokens. No generation — cheaper than predict(), not more expensive.
+        """
+        import torch
+        messages = [{"role": "user", "content": user_prompt}]
+        try:
+            prompt = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=ENABLE_THINKING)
+        except TypeError:
+            prompt = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True)
+        # Skip the <think> block: we want the verdict distribution, not the reasoning.
+        prompt += "<think>\n</think>\nstatus:"
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        with torch.no_grad():
+            logits = self.model(**inputs).logits[0, -1, :]
+
+        if not hasattr(self, "_verdict_ids"):
+            def first_id(text: str) -> int:
+                return self.tokenizer.encode(text, add_special_tokens=False)[0]
+            self._verdict_ids = (
+                [first_id(t) for t in (" confirmed", " vuln")],
+                [first_id(t) for t in (" safe",)],
+            )
+        vuln_ids, safe_ids = self._verdict_ids
+        probs = torch.softmax(logits.float(), dim=-1)
+        pv = float(sum(probs[i] for i in vuln_ids))
+        ps = float(sum(probs[i] for i in safe_ids))
+        return pv / (pv + ps) if (pv + ps) > 0 else 0.5
+
     def predict(self, user_prompt: str) -> str:
         import torch
         messages = [{"role": "user", "content": user_prompt}]

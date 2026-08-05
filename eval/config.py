@@ -29,7 +29,13 @@ JUDGE_VERSION = "v1"   # bump if the judge prompt changes — invalidates old ru
 # ---- Paths ----
 ROOT = Path(__file__).resolve().parent.parent
 COT_DIR = ROOT / "data" / "cot"
-EVAL_SET_DIR = COT_DIR / "eval"
+# `data/cot/eval` is the RETIRED 369-record bench: 42 of ~1,600 records carried any
+# provenance, so it could not tell an improved model from data that did not work, and
+# its shapes (shape1_ts, shape_react_syn, shape3_crossfile_pairs) are ones we have since
+# held as unverifiable. The trainer was repointed at eval_v2 when the bench was retired;
+# this scorer was not, so `eval_bench.py plan` was still drawing the retired set.
+# Env-overridable to score against an older set deliberately.
+EVAL_SET_DIR = Path(os.environ.get("WAVE_EVAL_SET_DIR", str(COT_DIR / "eval_v2")))
 PILOT_DIR = COT_DIR / "pilot"
 RUNS_DIR = ROOT / "data" / "eval_runs"
 PREDICTIONS_DIR = ROOT / "data" / "eval_predictions"

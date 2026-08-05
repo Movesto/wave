@@ -48,15 +48,29 @@ def _extract_status_raw(text: str) -> Optional[str]:
 
 
 def _extract_open_refs(text: str) -> list[str]:
-    m = re.search(r"open_refs\s*:\s*\n((?:\s*-\s*[^\n]+\n?)+)", text, re.IGNORECASE)
+    return _extract_dash_list("open_refs", text)
+
+
+def _extract_dash_list(field: str, text: str) -> list[str]:
+    """Read a `field:` whose value is a dash list.
+
+    Accepts BOTH layouts. The multi-line form is what the format specifies, but
+    postprocessing collapses whitespace, so every stored shape2 record is single-line
+    (`open_refs: - a (x.py) - b (y.py)`) — a newline-only regex parsed 0 of 80 of them
+    and silently returned no references at all. Handle both, or the field is decorative.
+    """
+    m = re.search(rf"{field}\s*:\s*\n((?:\s*-\s*[^\n]+\n?)+)", text, re.IGNORECASE)
+    if m:
+        return [ln.strip().lstrip("-").strip()
+                for ln in m.group(1).splitlines() if ln.strip().startswith("-")]
+
+    # Single-line: consume up to the next known field label.
+    m = re.search(rf"{field}\s*:\s*(.+?)(?=\b(?:status|partial_trace|open_refs|"
+                  rf"follow_up_refs|trace|fix|cwe|severity|line)\s*:|$)",
+                  text, re.IGNORECASE | re.DOTALL)
     if not m:
         return []
-    refs = []
-    for line in m.group(1).splitlines():
-        line = line.strip()
-        if line.startswith("-"):
-            refs.append(line.lstrip("-").strip())
-    return refs
+    return [part.strip() for part in m.group(1).split("-") if part.strip()]
 
 
 def _extract_follow_ups(text: str) -> list[str]:

@@ -38,7 +38,7 @@ HOW TO WRITE A GOOD ONE
 Aim for 30-40 probes. Twelve are seeded below as worked examples — extend the list.
 
     python smoke_probes.py --stub          # validate the harness, no GPU
-    WAVE_ADAPTER_PATH=data/qwen_cot_v12_best python smoke_probes.py
+    WAVE_ADAPTER_PATH=data/runs/v12/best/qwen_cot_v12_best python smoke_probes.py
 """
 
 PROBES = [

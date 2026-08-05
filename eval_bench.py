@@ -15,7 +15,7 @@ v10 78) sits inside the noise band. This bench fixes three things:
 Predictions cache per record, so a power cut costs one record, not a run.
 
   python eval_bench.py plan  --n 400
-  python eval_bench.py run   --label v12 --adapter data/qwen_cot_v12_best
+  python eval_bench.py run   --label v12 --adapter data/runs/v12/best/qwen_cot_v12_best
   python eval_bench.py score --label v12
   python eval_bench.py compare --a v10 --b v12
 """

@@ -28,7 +28,7 @@ those records are EXCLUDED here by content hash. The exclusion is recomputed on 
 against the live corpus, and the count is always printed — never assume it is zero.
 
   python bench_primevul.py --check                 # leakage + pairing report, no GPU
-  WAVE_ADAPTER_PATH=data/qwen_cot_v12_best python bench_primevul.py --label v12
+  WAVE_ADAPTER_PATH=data/runs/v12/best/qwen_cot_v12_best python bench_primevul.py --label v12
   python bench_primevul.py --score --label v12     # re-score a cached run, no GPU
 """
 import argparse

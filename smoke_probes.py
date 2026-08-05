@@ -14,7 +14,7 @@ question. The harness says so explicitly rather than leaving it to interpretatio
 
     python smoke_probes.py --stub                    # validate harness, no GPU
     python smoke_probes.py --stub-mode allvuln       # confirm the null model scores 0
-    WAVE_ADAPTER_PATH=data/qwen_cot_v12_best python smoke_probes.py
+    WAVE_ADAPTER_PATH=data/runs/v12/best/qwen_cot_v12_best python smoke_probes.py
     ... --json data/eval_runs/probes_v12.json        # save for comparison
 """
 import argparse

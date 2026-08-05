@@ -38,9 +38,9 @@ from trl import DPOConfig, DPOTrainer  # noqa: E402
 
 CONFIG = {
     "model_name": os.environ.get("WAVE_MODEL_NAME", "Qwen/Qwen3-8B"),
-    "init_adapter": os.environ.get("WAVE_DPO_INIT", "data/qwen_cot_v14_best"),
+    "init_adapter": os.environ.get("WAVE_DPO_INIT", "data/runs/v14/best/qwen_cot_v14_best"),
     "pairs": os.environ.get("WAVE_DPO_PAIRS", "data/cot/dpo/dpo_pairs.jsonl"),
-    "output_dir": Path(os.environ.get("WAVE_OUTPUT_DIR", "data/qwen_dpo_v15")),
+    "output_dir": Path(os.environ.get("WAVE_OUTPUT_DIR", "data/runs/v15_dpo/final/qwen_dpo_v15")),
     # beta controls how far the policy may drift from the reference. 0.1 is the usual
     # starting point; lower lets it move further and risks losing the SFT formatting.
     "beta": float(os.environ.get("WAVE_DPO_BETA", "0.1")),

@@ -16,7 +16,7 @@ A model that flags cross-file shape on sight gets recall 100 / FPR 100 /
 pair-acc 0 — indistinguishable from v11's headline under the old smoke, and
 obviously worthless here.
 
-  WAVE_ADAPTER_PATH=data/qwen_cot_v12_best python smoke_crossfile_pairs.py
+  WAVE_ADAPTER_PATH=data/runs/v12/best/qwen_cot_v12_best python smoke_crossfile_pairs.py
 """
 import json
 import os

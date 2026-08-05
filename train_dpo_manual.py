@@ -39,10 +39,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 CONFIG = {
     "model_name": os.environ.get("WAVE_MODEL_NAME", "Qwen/Qwen3-8B"),
-    "init_adapter": os.environ.get("WAVE_DPO_INIT", "data/qwen_cot_v14_best"),
+    "init_adapter": os.environ.get("WAVE_DPO_INIT", "data/runs/v14/best/qwen_cot_v14_best"),
     "pairs": os.environ.get("WAVE_DPO_PAIRS", "data/cot/dpo/dpo_pairs.jsonl"),
     "ref_cache": Path(os.environ.get("WAVE_DPO_REFCACHE", "data/cot/dpo/ref_logps.jsonl")),
-    "out_dir": Path(os.environ.get("WAVE_OUTPUT_DIR", "data/qwen_dpo_v15m")),
+    "out_dir": Path(os.environ.get("WAVE_OUTPUT_DIR", "data/runs/v15_dpo/final/qwen_dpo_v15m")),
     "beta": float(os.environ.get("WAVE_DPO_BETA", "0.1")),
     "lr": float(os.environ.get("WAVE_DPO_LR", "5e-6")),
     "epochs": int(os.environ.get("WAVE_DPO_EPOCHS", "2")),

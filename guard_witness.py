@@ -29,12 +29,14 @@ from dataclasses import dataclass, field
 # Witness inputs per weakness class: strings that a SUFFICIENT guard must reject and an
 # insufficient one lets through. Each has a note explaining why it is dangerous.
 WITNESSES = {
+    # Only RELIABLE, browser-universal bypasses belong here -- a witness has to be a proof,
+    # not a maybe. `/%2f%2fevil.com` (needs the app to decode %2f) and control-char strip
+    # tricks are parser/framework dependent, so they were removed: keeping them made the
+    # battery flag a backslash-hardened guard on a bypass it actually blocks.
     "redirect": [
         ("//evil.com", "protocol-relative -> another origin"),
         (r"/\evil.com", "backslash normalises to //evil.com in the authority"),
         ("https://evil.com", "absolute URL to another origin"),
-        ("/%2f%2fevil.com", "encoded //"),
-        ("/\thttps://evil.com", "leading control char, some parsers strip it"),
         ("javascript:alert(1)", "javascript: scheme"),
     ],
     "path": [
@@ -105,8 +107,18 @@ def _redirect_predicate(guard: str):
     # startsWith("/") && !startsWith("//")   (the signin.tsx shape)
     if re.search(r'startsWith\(\s*[\'"]/[\'"]\s*\)', g) and \
        re.search(r'!\s*\w+\.startsWith\(\s*[\'"]//[\'"]\s*\)', g):
+        # honour a refining clause that also rejects backslashes (!includes("\\") /
+        # indexOf("\\") / a regex), so we do NOT claim /\evil.com bypasses a guard that
+        # blocks it. Without this the witness makes a false claim on a hardened guard.
+        blocks_backslash = bool(re.search(
+            r'(includes|indexOf|test|match|search|replace|contains)\s*\([^)]*\\', g))
+
         def accept(v):
-            return v.startswith("/") and not v.startswith("//")
+            if not (v.startswith("/") and not v.startswith("//")):
+                return False
+            if blocks_backslash and "\\" in v:
+                return False
+            return True
         return accept
 
     # A proper `new URL(raw, base)` + origin/host check IS sufficient here; we do not

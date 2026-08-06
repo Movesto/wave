@@ -44,11 +44,23 @@ WITNESSES = {
         ("/etc/passwd", "absolute path escapes the base dir"),
         (r"..\..\windows\win.ini", "backslash traversal on Windows"),
     ],
+    "command": [
+        ("; id", "command separator"),
+        ("| cat /etc/passwd", "pipe to another command"),
+        ("$(whoami)", "command substitution"),
+        ("`id`", "backtick substitution"),
+        ("&& rm -rf /", "chained command"),
+        ("x\nid", "newline injects a second command"),
+        # argument injection: no shell metacharacters, so escapeshellcmd/metachar
+        # escaping lets it straight through -- it becomes a FLAG to the program.
+        ("--output=/etc/passwd", "argument injection: parsed as a flag, not data"),
+        ("-oProxyCommand=id", "argument injection via a short option"),
+    ],
 }
 
 # A safe redirect target / safe filename, to check the guard does not also reject valid
 # input (a guard that rejects everything is not 'sufficient', it is broken).
-BENIGN = {"redirect": "/library", "path": "chapter1.jpg"}
+BENIGN = {"redirect": "/library", "path": "chapter1.jpg", "command": "report.pdf"}
 
 
 @dataclass
@@ -109,7 +121,43 @@ def _path_predicate(guard: str):
     return None
 
 
-_PREDICATE = {"redirect": _redirect_predicate, "path": _path_predicate}
+# shell metacharacters that escapeshellcmd / a metachar-escaping guard neutralises
+_SHELL_META = set(";|&$`<>(){}[]*?~#\n\\!")
+
+
+def _command_predicate(guard: str):
+    g = " ".join(guard.split())
+
+    # escapeshellcmd(...) -- the classic INSUFFICIENT guard. It escapes shell
+    # metacharacters but does NOT stop a value that begins with `-` from being read as
+    # an OPTION, so argument injection walks straight through. This is exactly the
+    # "guard present but insufficient" completeness case.
+    if re.search(r"escapeshellcmd\s*\(", g):
+        def accept(v):
+            # accepted-as-safe == the value survives escapeshellcmd unchanged, i.e. it
+            # carries no metacharacter for escapeshellcmd to neutralise. The argument-
+            # injection witnesses (`--output=...`, `-o...`) have none, so they pass.
+            return not any(c in _SHELL_META for c in v)
+        return accept
+
+    # a STRICT allowlist -- only word chars / a fixed set -- is sufficient here.
+    m = re.search(r"(?:preg_match|match|fullmatch|test)\s*\(\s*['\"]?/?\^?"
+                  r"\[([^\]]+)\]\+?\$?", g)
+    if m and "-" not in m.group(1) and "." not in m.group(1).replace("\\.", ""):
+        allowed = m.group(1).replace("\\w", "A-Za-z0-9_")
+        pat = re.compile("^[" + allowed + "]+$")
+        def accept(v):
+            return bool(pat.match(v))
+        return accept
+
+    # escapeshellarg(...) and shlex.quote(...) are the CORRECT primitives (single-quote
+    # the whole value). Treated as UNKNOWN, never flagged -- reimplementing them crudely
+    # risks a false claim against correct code.
+    return None
+
+
+_PREDICATE = {"redirect": _redirect_predicate, "path": _path_predicate,
+              "command": _command_predicate}
 
 
 def assess_guard(guard: str, kind: str) -> GuardVerdict:
@@ -138,7 +186,8 @@ def assess_guard(guard: str, kind: str) -> GuardVerdict:
 
 
 _GUARD_LINE = re.compile(r"\b(if|includes|indexOf|startsWith|realpath|resolve"
-                         r"|normpath|match|test|filter)\b")
+                         r"|normpath|match|test|filter|preg_match|escapeshellcmd"
+                         r"|escapeshellarg|fullmatch|shlex)\b")
 
 
 def witness_scan(code: str, kind: str):

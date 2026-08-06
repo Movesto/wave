@@ -60,6 +60,9 @@ def _witness_kind(cwe: str, sink: str) -> str | None:
         return "path"
     if c in ("CWE-601", "CWE-807") or "redirect" in text:
         return "redirect"
+    if c in ("CWE-78", "CWE-77", "CWE-88") or any(x in text for x in
+            ("exec", "system", "popen", "shell", "spawn", "subprocess")):
+        return "command"
     return None
 
 

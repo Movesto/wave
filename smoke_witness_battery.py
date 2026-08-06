@@ -59,6 +59,18 @@ CASES = [
     ("redirect startsWith only", 'raw.startsWith("/") && !raw.startsWith("//")', "redirect", True),
     ("redirect proper hardened",
      'raw.startsWith("/") && !raw.startsWith("//") && !raw.includes("\\\\")', "redirect", False),
+
+    # ---- xss ----
+    ("YWH strip<> in JS ctx", code(f"{SNIP}/XSS/xss-ethical-hackers-day/vsnippet/"
+                                   f"xss-ethical-hackers-day.php"), "xss", True),
+    ("YWH xss no guard", code(f"{SNIP}/XSS/xss-script-tag/vsnippet/4-xss-script-tag.py"),
+     "xss", False),
+    ("YWH htmlspecialchars in JS (version-ambiguous -> silent)",
+     code(f"{SNIP}/XSS/xss-string-outbreak/vsnippet/xss-string-outbreak.php"), "xss", False),
+    ("script-only blocklist (html)", 'echo str_replace("<script>","",$_GET["x"]);', "xss", True),
+    ("proper htmlspecialchars body", 'echo htmlspecialchars($_GET["x"]);', "xss", False),
+    ("proper DOMPurify", 'el.innerHTML = DOMPurify.sanitize(dirty)', "xss", False),
+    ("proper escapeHTML body", 'el.innerHTML = escapeHTML(name)', "xss", False),
 ]
 
 

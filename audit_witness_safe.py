@@ -26,6 +26,7 @@ _CWE_KIND = {
     "CWE-78": "command", "CWE-77": "command", "CWE-88": "command",
     "CWE-918": "ssrf",
     "CWE-1321": "proto", "CWE-1327": "proto", "CWE-915": "proto",
+    "CWE-79": "xss", "CWE-80": "xss", "CWE-83": "xss",
 }
 
 

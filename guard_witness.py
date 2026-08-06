@@ -265,6 +265,57 @@ _PREDICATE = {"redirect": _redirect_predicate, "path": _path_predicate,
               "proto": _proto_predicate}
 
 
+# ---- XSS is context-dominated: the SAME encoder is right in one sink and wrong in
+# another, so this class only fires where the sink CONTEXT makes a guard provably useless.
+# htmlspecialchars in an HTML body, DOMPurify, React {value} -> UNKNOWN, never flagged. The
+# htmlspecialchars-in-JS-string breakout is deliberately NOT modelled: it turns on PHP's
+# ENT_QUOTES default (changed in 8.1), so claiming it would be a version-dependent guess.
+
+# a sanitiser that only removes ANGLE BRACKETS -- strip_tags, or a replace targeting <>
+_XSS_ANGLE_ONLY = re.compile(
+    r"strip_tags\s*\(|"
+    r"preg_replace\s*\(\s*['\"]/\s*\[?\s*<>?\s*\]?|"        # /[<>]/ or /</
+    r"preg_replace\s*\(\s*['\"]/\s*[<>]|"
+    r"str_replace\s*\(\s*\[?[^)]*['\"][<>]['\"]", re.I)
+# the sanitiser's output embedded INSIDE a JS string literal (PHP echo into <script>)
+_XSS_JS_EMBED = re.compile(
+    r"(?:new\s+\w+\s*\(|[\w.]+\s*=)\s*['\"][^'\"\n]*<\?", re.I)
+# a blocklist that targets ONLY the <script> tag
+_XSS_SCRIPT_ONLY = re.compile(
+    r"(?:str_replace|preg_replace|\.replace)\s*\([^)]*<\s*script", re.I)
+# an HTML sink that writes into the document body
+_XSS_HTML_SINK = re.compile(r"innerhtml|document\.write|\.html\s*\(|\becho\b|\bprint\b", re.I)
+# any HTML-entity encoder (correct for a BODY context)
+_XSS_ENTITY_ENC = re.compile(
+    r"htmlspecialchars\s*\(|htmlentities\s*\(|escapehtml|escape_html|_\.escape\(", re.I)
+
+
+def _xss_scan(code: str):
+    """Provably-insufficient XSS guard in `code`, as a finding dict, or None.
+
+    Only two context-tied shapes are judged; everything else (proper body encoding, a real
+    sanitiser, or a raw no-guard sink that belongs to the taint layer) returns None.
+    """
+    c = code or ""
+
+    # (A) a strip-<> / strip_tags sanitiser whose output lands INSIDE a JS string. Removing
+    # angle brackets does nothing to a quote breakout -- `";alert(1)//` closes the string.
+    if _XSS_ANGLE_ONLY.search(c) and _XSS_JS_EMBED.search(c):
+        return {"kind": "xss", "guard": "strips <> / strip_tags in a JS-string context",
+                "bypass": '";alert(1)//',
+                "why": "inside a JS string the payload breaks out with a quote; removing "
+                       "<> is irrelevant"}
+
+    # (B) a blocklist that removes only <script> in an HTML sink. Event-handler vectors
+    # need no <script> tag, so `<img src=x onerror=alert(1)>` fires anyway.
+    if _XSS_SCRIPT_ONLY.search(c) and _XSS_HTML_SINK.search(c) and not _XSS_ENTITY_ENC.search(c):
+        return {"kind": "xss", "guard": "blocklists <script> only",
+                "bypass": "<img src=x onerror=alert(1)>",
+                "why": "event-handler / non-script tags bypass a <script>-only blocklist"}
+
+    return None
+
+
 def assess_guard(guard: str, kind: str) -> GuardVerdict:
     """Run `guard`'s recognised semantics against the witness battery for `kind`."""
     v = GuardVerdict(kind=kind, recognised=False)
@@ -322,6 +373,9 @@ def witness_scan(code: str, kind: str):
             return {"kind": kind, "guard": f"key blocklist [{blocked}]"[:80],
                     "bypass": w, "why": why}
         return None
+
+    if kind == "xss":
+        return _xss_scan(code or "")
 
     for ln in (code or "").splitlines():
         if not _GUARD_LINE.search(ln):

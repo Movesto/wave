@@ -71,6 +71,10 @@ def _witness_kind(cwe: str, sink: str) -> str | None:
             ("merge", "deepmerge", "defaultsdeep", "extend", "_.set", "objectpath",
              "assignin")):
         return "proto"
+    if c in ("CWE-79", "CWE-80", "CWE-83") or any(x in text for x in
+            ("innerhtml", "document.write", "dangerouslysetinnerhtml", ".html(",
+             "render_template_string")):
+        return "xss"
     return None
 
 

@@ -124,7 +124,7 @@ def _status_from_prose(text: str) -> Optional[str]:
     # attack payload for code it thinks is safe.
     exploit = bool(re.search(
         r"\.\./|/etc/passwd|<script|;\s*rm\s|;\s*cat\s|union\s+select"
-        r"|or\s+1\s*=\s*1|127\.0\.0\.1|169\.254|attacker[- ]controlled", t))
+        r"|\bor\s+1\s*=\s*1|127\.0\.0\.1|169\.254|attacker[- ]controlled", t))
 
     vuln_hits = len(re.findall(
         r"is\s+vulnerable|vulnerabilit(?:y|ies)\s+aris|an?\s+attacker\s+(?:can|could|"
@@ -144,7 +144,7 @@ def _status_from_prose(text: str) -> Optional[str]:
             r"(?:security\s+)?(?:vulnerabilit|issue|flaw|risk)|is\s+not\s+"
             r"(?:vulnerable|exploitable)|uses?\s+(?:a\s+)?parameter)", t):
         pre = t[max(0, m.start() - 24):m.start()]
-        if not re.search(r"(not|n't|fails?\s+to|without|missing|lacks?|no)", pre):
+        if not re.search(r"\b(not|n't|fails?\s+to|without|missing|lacks?|no)\b", pre):
             safe_hits += 1
 
     if exploit and safe_hits == 0:

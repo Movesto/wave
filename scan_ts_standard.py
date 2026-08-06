@@ -64,11 +64,11 @@ BOILERPLATE = [
 # the ASSIGNMENT -- as the guard, instead of the `startsWith` check on the next line.
 #
 # A guard is a CONDITIONAL or a call to a recognised sanitiser/validator. Note the
-# sanitiser names carry no `` prefix on purpose: they are embedded inside
+# sanitiser names carry no word-boundary prefix on purpose: they are embedded inside
 # identifiers like `mysqli_real_escape_string` and `getCanonicalPath`, where a word
 # boundary never matches and the rule would reject real controls.
 _GUARD_COND = re.compile(
-    r"^\s*(if|elif|unless|assert|raise|throw|while|return\s+[^;]*[<>=!])", re.I)
+    r"^\s*(if|elif|unless|assert|raise|throw|while|return\s+[^;]*[<>=!])\b", re.I)
 _GUARD_SANI = re.compile(
     r"(validate|sanitiz|sanitis|escape|quote|encode|htmlspecial|canonical|realpath"
     r"|normpath|abspath|startsWith|endsWith|fullmatch|isinstance|allowlist|whitelist"

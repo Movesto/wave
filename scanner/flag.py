@@ -212,6 +212,19 @@ PATTERNS = [
     (re.compile(r"(?:res|response)\.redirect\s*\(\s*"
                 r"(?!['\"][^'\"]*['\"]\s*\))[\w.]"),
      "CWE-601", "redirect to a non-literal target (check the guard)", "js", False),
+
+    # Prototype pollution: a recursive descent `merge(target[k], source[k])` (two
+    # bracket-indexed args is the deep-merge idiom, rare elsewhere) or a deep merge/set
+    # library call. These copy a user object by dynamic key, so a key of __proto__/
+    # constructor reaches Object.prototype -- the witness then checks the key blocklist.
+    # SAME index var on both args (backref) and a multi-char name -- so a merge over object
+    # keys (`merge(target[key], source[key])`) matches, but array ops with 1-char counters
+    # (`Math.max(a[i], b[i])`) or differing indices (`swap(arr[i], arr[j])`) do not.
+    (re.compile(r"[\w$]+\s*\(\s*[\w$]+\[([a-zA-Z_$][\w$]+)\]\s*,\s*[\w$]+\[\1\]\s*\)"),
+     "CWE-1321", "recursive merge by dynamic key (prototype pollution risk)", "any", False),
+    (re.compile(r"_\.(?:merge|mergeWith|defaultsDeep|set|setWith)\s*\(|"
+                r"\bdeepmerge\s*(?:\.all)?\s*\(|\$\.extend\s*\(\s*true\b"),
+     "CWE-1321", "deep merge / set library call (prototype pollution risk)", "js", False),
 ]
 _SEC_CTX = re.compile(r"password|passwd|token|secret|sign|hmac|hash_|cert|credential|auth|"
                       r"user_id|owner|current_user|permission", re.I)

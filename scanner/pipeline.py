@@ -24,7 +24,11 @@ from guard_witness import assess_guard, witness_scan   # Station 2c: witness ver
 
 _JS_FN_START = re.compile(
     r"function\s+[\w$]+\s*\(|(?:const|let|var)\s+[\w$]+\s*=\s*(?:async\s*)?\([^)]*\)\s*=>|"
-    r"[\w$]+\s*\([^)]*\)\s*\{|(?:async\s+)?[\w$]+\s*=\s*(?:async\s*)?function")
+    # a method/function definition `name(args) {` -- but NOT a control-flow header
+    # (`if (...) {`, `for (...) {`), which would otherwise be mistaken for the enclosing
+    # function and truncate the source to a nested block.
+    r"\b(?!(?:if|for|while|switch|catch|with|return|else|do)\b)[\w$]+\s*\([^)]*\)\s*\{|"
+    r"(?:async\s+)?[\w$]+\s*=\s*(?:async\s*)?function")
 
 
 
@@ -187,6 +191,31 @@ def function_source(path, unit, line):
     return _js_function_source(code, line)
 
 
+def module_scope(path, body):
+    """Module-level definitions the function `body` REFERENCES -- e.g. a denylist/allowlist
+    constant like `BLOCKED = ['localhost', '127.0.0.1']` defined at file scope.
+
+    A function-scoped witness sees only the body, so guard DATA held in a shared constant is
+    invisible (the SSRF denylist miss found in the end-to-end check). This pulls back exactly
+    the top-level assignments whose name the body uses -- precise, so unrelated constants in
+    the same file cannot contaminate the witness.
+    """
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    used = set(re.findall(r"[A-Za-z_$][\w$]*", body or ""))
+    out = []
+    for ln in lines:
+        if ln[:1] in (" ", "\t"):                    # indented -> inside a function/class
+            continue
+        m = re.match(r"(?:export\s+)?(?:const|let|var)\s+([\w$]+)\s*=|"
+                     r"([A-Za-z_$][\w$]*)\s*=", ln.strip())
+        if m and (m.group(1) or m.group(2)) in used:
+            out.append(ln)
+    return "\n".join(out)
+
+
 def apply_fixes(results):
     """Non-destructive --fix: insert a security review comment above each CONFIRMED
     finding's line. Backs up each file to <file>.bak first. Does NOT rewrite code
@@ -332,7 +361,11 @@ def main():
                              or (taint_cwes[0] if taint_cwes else ""),
                              results[-1].get("taint_sink", ""))
         if kind:
-            w = witness_scan(code, kind)
+            # give the witness the guard DATA that lives at module scope (a shared denylist
+            # constant), not just the function body -- else a file-level BLOCKED = [...] is
+            # invisible and the guard reads as unrecognised (end-to-end SSRF miss).
+            scope = module_scope(file, code)
+            w = witness_scan(f"{scope}\n{code}" if scope else code, kind)
             if w:
                 results[-1]["witness"] = w
                 if not results[-1]["confidence"].startswith(("HIGH", "MEDIUM")):

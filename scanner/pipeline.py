@@ -67,6 +67,10 @@ def _witness_kind(cwe: str, sink: str) -> str | None:
             ("requests.get", "urlopen", "curl", "file_get_contents", "http.get",
              "axios", "fetch(")):
         return "ssrf"
+    if c in ("CWE-1321", "CWE-1327", "CWE-915") or any(x in text for x in
+            ("merge", "deepmerge", "defaultsdeep", "extend", "_.set", "objectpath",
+             "assignin")):
+        return "proto"
     return None
 
 

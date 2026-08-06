@@ -53,6 +53,11 @@ WITNESSES = {
         ("http://169.254.169.254/latest/meta-data/",
          "cloud metadata endpoint -- the real SSRF prize"),
     ],
+    "proto": [
+        ("__proto__", "the direct prototype accessor"),
+        ("constructor", "reaches Object.prototype via constructor.prototype"),
+        ("prototype", "the prototype object itself"),
+    ],
     "command": [
         ("; id", "command separator"),
         ("| cat /etc/passwd", "pipe to another command"),
@@ -70,7 +75,7 @@ WITNESSES = {
 # A safe redirect target / safe filename, to check the guard does not also reject valid
 # input (a guard that rejects everything is not 'sufficient', it is broken).
 BENIGN = {"redirect": "/library", "path": "chapter1.jpg", "command": "report.pdf",
-          "ssrf": "https://images.example.com/cat.jpg"}
+          "ssrf": "https://images.example.com/cat.jpg", "proto": "username"}
 
 
 @dataclass
@@ -201,8 +206,30 @@ def _ssrf_predicate(guard: str):
     return None
 
 
+# a dangerous key named as a STRING LITERAL in a guard -- quoted, so a JS `constructor(){}`
+# method definition or a `.prototype` property access is NOT mistaken for a blocklist entry
+_PP_KEY = re.compile(r"""['"](__proto__|constructor|prototype)['"]""")
+
+
+def _proto_predicate(guard: str):
+    # Only a quoted dangerous-key literal counts as a blocklist entry. This is what keeps
+    # `constructor(owner, apikey)` (a class method) from being read as a guard.
+    blocked = {m.lower() for m in _PP_KEY.findall(guard)}
+    if not blocked:
+        # No key blocklist here. Object.create(null), a Map, hasOwnProperty, or
+        # Object.freeze(Object.prototype) all land here: UNKNOWN, never flagged.
+        return None
+
+    def accept(v):
+        # admitted == this dangerous key is not in the blocklist. A guard that blocks
+        # only "__proto__" admits "constructor", the standard bypass.
+        return v.lower() not in blocked
+    return accept
+
+
 _PREDICATE = {"redirect": _redirect_predicate, "path": _path_predicate,
-              "command": _command_predicate, "ssrf": _ssrf_predicate}
+              "command": _command_predicate, "ssrf": _ssrf_predicate,
+              "proto": _proto_predicate}
 
 
 def assess_guard(guard: str, kind: str) -> GuardVerdict:
@@ -232,7 +259,8 @@ def assess_guard(guard: str, kind: str) -> GuardVerdict:
 
 _GUARD_LINE = re.compile(r"\b(if|includes|indexOf|startsWith|realpath|resolve"
                          r"|normpath|match|test|filter|preg_match|escapeshellcmd"
-                         r"|escapeshellarg|fullmatch|shlex)\b")
+                         r"|escapeshellarg|fullmatch|shlex|__proto__|constructor"
+                         r"|prototype)\b")
 
 
 def witness_scan(code: str, kind: str):

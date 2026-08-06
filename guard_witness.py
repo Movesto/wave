@@ -53,10 +53,14 @@ WITNESSES = {
         ("http://169.254.169.254/latest/meta-data/",
          "cloud metadata endpoint -- the real SSRF prize"),
     ],
+    # Two ways to reach Object.prototype: the direct `__proto__` key (one hop), or the
+    # `constructor` -> `prototype` chain (two hops). A per-level key check is sufficient
+    # iff it blocks `__proto__` AND at least one of {constructor, prototype} -- blocking
+    # EITHER breaks the two-hop chain. So `prototype` is not an independent witness.
     "proto": [
         ("__proto__", "the direct prototype accessor"),
-        ("constructor", "reaches Object.prototype via constructor.prototype"),
-        ("prototype", "the prototype object itself"),
+        ("constructor", "constructor.prototype chain, open unless constructor OR "
+                        "prototype is blocked"),
     ],
     "command": [
         ("; id", "command separator"),
@@ -171,39 +175,47 @@ def _command_predicate(guard: str):
     return None
 
 
-# loopback / link-local literals a denylist tends to enumerate
-_SSRF_DENY_LITERALS = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "169.254.169.254",
-                       "10.", "192.168", "172.16")
+# loopback / link-local hosts a denylist tends to enumerate, as BARE host strings
+_SSRF_DENY_LITERALS = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "169.254.169.254")
 # tokens that mean the guard RESOLVES the host to an IP first -- a fundamentally
 # different (and defensible) design we must not second-guess
 _SSRF_RESOLVE = ("gethostby", "getaddrinfo", "ip_address", "ipaddress", "socket.",
                  "resolve", "dns.", "is_private", "is_loopback", "inet_")
+# a quoted string whose whole value is a host (optionally with a port), so a URL literal
+# like 'http://127.0.0.1:8099/x' does NOT count -- that is a hardcoded sink, not a denylist
+_SSRF_QUOTED = re.compile(r"""['"]([^'"/\s]+)['"]""")
+# the literals must actually be COMPARED against something (membership / equality), else
+# they are config or a request target, not a guard
+_SSRF_CMP = re.compile(r"\bin\b|in_array|\.includes|\.indexof|===?|!==?|\bnot in\b", re.I)
+
+
+def _ssrf_denylist(guard: str):
+    """Bare loopback hosts used as a denylist in `guard`, or [] if this is not that shape."""
+    g = "\n".join(ln for ln in guard.lower().splitlines()
+                  if not re.search(r"\.(run|listen|bind)\s*\(|host\s*=\s*['\"]0\.0\.0\.0", ln))
+    if any(t in g for t in _SSRF_RESOLVE):
+        return []                                  # resolves the host first -> not this shape
+    quoted = {q.strip().rstrip(".") for q in _SSRF_QUOTED.findall(g)}
+    # keep only quoted tokens whose whole value is a denied host (drops URL/config strings)
+    literals = sorted(h for h in _SSRF_DENY_LITERALS
+                      if any(q == h or q.split(":")[0] == h for q in quoted))
+    if not literals or not _SSRF_CMP.search(g):
+        return []                                  # not compared -> a sink/config, not a guard
+    return literals
 
 
 def _ssrf_predicate(guard: str):
-    # Drop server-bind lines (`app.run(host='0.0.0.0')`, `.listen(...)`) -- a bind address
-    # is not a denylist entry, and harvesting it would misname the guard.
-    g = "\n".join(ln for ln in guard.lower().splitlines()
-                  if not re.search(r"\.(run|listen|bind)\s*\(|host\s*=\s*['\"]0\.0\.0\.0", ln))
-
-    # If the guard resolves the host before deciding, it is not the literal-denylist
-    # shape this battery proves against -- leave it UNKNOWN, never flag it.
-    if any(t in g for t in _SSRF_RESOLVE):
+    # A DENYLIST of literal loopback hosts blocks the exact strings it names and NOTHING
+    # else, so every alternate encoding of the same address is admitted -- the provably
+    # insufficient SSRF shape. An allowlist / resolve-then-check design yields no bare-host
+    # denylist and lands as UNKNOWN, never flagged.
+    literals = _ssrf_denylist(guard)
+    if not literals:
         return None
 
-    # A DENYLIST of literal loopback/private hosts. It blocks the exact strings it names
-    # and NOTHING ELSE, so every alternate encoding of the same address is admitted. This
-    # is the provably-insufficient SSRF shape.
-    literals = [lit for lit in _SSRF_DENY_LITERALS if lit in g]
-    if literals:
-        def accept(v):
-            # admitted == the URL carries none of the denied literals verbatim
-            return not any(lit in v.lower() for lit in literals)
-        return accept
-
-    # An allowlist of external hosts (the correct design) carries no loopback literals,
-    # so it lands here: UNKNOWN, not flagged.
-    return None
+    def accept(v):
+        return not any(lit in v.lower() for lit in literals)
+    return accept
 
 
 # a dangerous key named as a STRING LITERAL in a guard -- quoted, so a JS `constructor(){}`
@@ -220,10 +232,19 @@ def _proto_predicate(guard: str):
         # Object.freeze(Object.prototype) all land here: UNKNOWN, never flagged.
         return None
 
+    chain_open = "constructor" not in blocked and "prototype" not in blocked
+
     def accept(v):
-        # admitted == this dangerous key is not in the blocklist. A guard that blocks
-        # only "__proto__" admits "constructor", the standard bypass.
-        return v.lower() not in blocked
+        # A witness is admitted iff the capability it exercises is still open:
+        #   __proto__    -> the direct key is not blocked
+        #   constructor  -> the two-hop chain is open (neither constructor nor prototype
+        #                   is blocked; blocking either one is enough to stop it)
+        v = v.lower()
+        if v == "__proto__":
+            return "__proto__" not in blocked
+        if v == "constructor":
+            return chain_open
+        return v not in blocked
     return accept
 
 
@@ -269,17 +290,24 @@ def witness_scan(code: str, kind: str):
     A single call the scanner can make: scans every guard-shaped line, runs the witness
     battery, returns the first proven-insufficient guard with its concrete bypass.
     """
-    # SSRF denylists split the blocked-host list and the check across lines, so this
-    # class is assessed against the whole block rather than one guard-shaped line.
+    # SSRF and prototype-pollution guards span multiple lines (a denied-host list and its
+    # membership test; a key check and a recursive walk), so both classes are assessed
+    # against the whole block rather than one guard-shaped line.
     if kind == "ssrf":
         v = assess_guard(code or "", kind)
         if v.recognised and not v.sufficient and v.admits:
             w, why = v.admits[0]
-            _g = "\n".join(ln for ln in (code or "").lower().splitlines()
-                           if not re.search(r"\.(run|listen|bind)\s*\(|"
-                                             r"host\s*=\s*['\"]0\.0\.0\.0", ln))
-            deny = ", ".join(lit for lit in _SSRF_DENY_LITERALS if lit in _g)
+            deny = ", ".join(_ssrf_denylist(code or ""))
             return {"kind": kind, "guard": f"denylist of literal hosts [{deny}]"[:80],
+                    "bypass": w, "why": why}
+        return None
+
+    if kind == "proto":
+        v = assess_guard(code or "", kind)
+        if v.recognised and not v.sufficient and v.admits:
+            w, why = v.admits[0]
+            blocked = ", ".join(sorted({m for m in _PP_KEY.findall(code or "")}))
+            return {"kind": kind, "guard": f"key blocklist [{blocked}]"[:80],
                     "bypass": w, "why": why}
         return None
 

@@ -44,6 +44,15 @@ WITNESSES = {
         ("/etc/passwd", "absolute path escapes the base dir"),
         (r"..\..\windows\win.ini", "backslash traversal on Windows"),
     ],
+    "ssrf": [
+        ("http://127.1/", "127.1 is a valid short form of 127.0.0.1"),
+        ("http://2130706433/", "decimal form of 127.0.0.1"),
+        ("http://0x7f000001/", "hex form of 127.0.0.1"),
+        ("http://[::1]/", "IPv6 loopback, not the IPv4 literal"),
+        ("http://0.0.0.0/", "0.0.0.0 routes to localhost on Linux"),
+        ("http://169.254.169.254/latest/meta-data/",
+         "cloud metadata endpoint -- the real SSRF prize"),
+    ],
     "command": [
         ("; id", "command separator"),
         ("| cat /etc/passwd", "pipe to another command"),
@@ -60,7 +69,8 @@ WITNESSES = {
 
 # A safe redirect target / safe filename, to check the guard does not also reject valid
 # input (a guard that rejects everything is not 'sufficient', it is broken).
-BENIGN = {"redirect": "/library", "path": "chapter1.jpg", "command": "report.pdf"}
+BENIGN = {"redirect": "/library", "path": "chapter1.jpg", "command": "report.pdf",
+          "ssrf": "https://images.example.com/cat.jpg"}
 
 
 @dataclass
@@ -156,8 +166,43 @@ def _command_predicate(guard: str):
     return None
 
 
+# loopback / link-local literals a denylist tends to enumerate
+_SSRF_DENY_LITERALS = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "169.254.169.254",
+                       "10.", "192.168", "172.16")
+# tokens that mean the guard RESOLVES the host to an IP first -- a fundamentally
+# different (and defensible) design we must not second-guess
+_SSRF_RESOLVE = ("gethostby", "getaddrinfo", "ip_address", "ipaddress", "socket.",
+                 "resolve", "dns.", "is_private", "is_loopback", "inet_")
+
+
+def _ssrf_predicate(guard: str):
+    # Drop server-bind lines (`app.run(host='0.0.0.0')`, `.listen(...)`) -- a bind address
+    # is not a denylist entry, and harvesting it would misname the guard.
+    g = "\n".join(ln for ln in guard.lower().splitlines()
+                  if not re.search(r"\.(run|listen|bind)\s*\(|host\s*=\s*['\"]0\.0\.0\.0", ln))
+
+    # If the guard resolves the host before deciding, it is not the literal-denylist
+    # shape this battery proves against -- leave it UNKNOWN, never flag it.
+    if any(t in g for t in _SSRF_RESOLVE):
+        return None
+
+    # A DENYLIST of literal loopback/private hosts. It blocks the exact strings it names
+    # and NOTHING ELSE, so every alternate encoding of the same address is admitted. This
+    # is the provably-insufficient SSRF shape.
+    literals = [lit for lit in _SSRF_DENY_LITERALS if lit in g]
+    if literals:
+        def accept(v):
+            # admitted == the URL carries none of the denied literals verbatim
+            return not any(lit in v.lower() for lit in literals)
+        return accept
+
+    # An allowlist of external hosts (the correct design) carries no loopback literals,
+    # so it lands here: UNKNOWN, not flagged.
+    return None
+
+
 _PREDICATE = {"redirect": _redirect_predicate, "path": _path_predicate,
-              "command": _command_predicate}
+              "command": _command_predicate, "ssrf": _ssrf_predicate}
 
 
 def assess_guard(guard: str, kind: str) -> GuardVerdict:
@@ -196,6 +241,20 @@ def witness_scan(code: str, kind: str):
     A single call the scanner can make: scans every guard-shaped line, runs the witness
     battery, returns the first proven-insufficient guard with its concrete bypass.
     """
+    # SSRF denylists split the blocked-host list and the check across lines, so this
+    # class is assessed against the whole block rather than one guard-shaped line.
+    if kind == "ssrf":
+        v = assess_guard(code or "", kind)
+        if v.recognised and not v.sufficient and v.admits:
+            w, why = v.admits[0]
+            _g = "\n".join(ln for ln in (code or "").lower().splitlines()
+                           if not re.search(r"\.(run|listen|bind)\s*\(|"
+                                             r"host\s*=\s*['\"]0\.0\.0\.0", ln))
+            deny = ", ".join(lit for lit in _SSRF_DENY_LITERALS if lit in _g)
+            return {"kind": kind, "guard": f"denylist of literal hosts [{deny}]"[:80],
+                    "bypass": w, "why": why}
+        return None
+
     for ln in (code or "").splitlines():
         if not _GUARD_LINE.search(ln):
             continue

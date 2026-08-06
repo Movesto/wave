@@ -63,6 +63,10 @@ def _witness_kind(cwe: str, sink: str) -> str | None:
     if c in ("CWE-78", "CWE-77", "CWE-88") or any(x in text for x in
             ("exec", "system", "popen", "shell", "spawn", "subprocess")):
         return "command"
+    if c == "CWE-918" or any(x in text for x in
+            ("requests.get", "urlopen", "curl", "file_get_contents", "http.get",
+             "axios", "fetch(")):
+        return "ssrf"
     return None
 
 

@@ -131,6 +131,45 @@ This is the part of the project that most exceeded expectations, and it is worth
 plainly: **its success comes from constraining the model's role, not from the model's
 quality.**
 
+### 2.5 The guard-witness verifier (Station 2c)
+
+The model's most persistent failure (§6.4) is the **completeness gap**: it declares a guard
+sufficient without checking what the guard actually admits. It reads `if (!file.includes("/"))`
+and calls the code safe, never testing that `..%2f..%2f` walks straight through.
+
+Station 2c (`guard_witness.py`) is a deterministic answer that needs no model and no retrain.
+For six guard classes it reimplements the guard's *actual logic* and runs it against a battery
+of known bypass inputs. If the guard admits one, the code is a finding **even when the model
+said safe** — and the report names the concrete bypass.
+
+| Class | CWE | Insufficient shape it proves | Bypass witness |
+|---|---|---|---|
+| redirect | 601 | `startsWith("/") && !startsWith("//")` | `/\evil.com` |
+| path | 22 | `'..'` substring / `!includes("/")` | `..%2f..%2f`, `/etc/passwd` |
+| command | 78 | `escapeshellcmd` (argument injection) | `--output=/etc/passwd` |
+| ssrf | 918 | literal-host denylist | `127.1`, `169.254.169.254` |
+| proto | 1321 | key blocklist missing `constructor` | `constructor` |
+| xss | 79 | `<script>`-strip / strip-`<>` in JS-string | `<img onerror>`, `";alert(1)//` |
+
+The **contract is the load-bearing part**: the witness speaks *only when it can prove
+insufficiency*. Every defensible design — a `new URL().origin` allowlist, `realpath`+prefix,
+`escapeshellarg`, `shlex.quote`, a resolve-then-check SSRF guard, DOMPurify — returns UNKNOWN
+and is never flagged. Building this required removing four separate false-positive shapes
+(redirect-backslash, ssrf-hardcoded-URL, proto-sufficiency, path-absolute) that each accused
+correct code; the discipline is that a false "this guard is broken" is worse than a miss.
+
+**Verified end-to-end** with the GPU model stubbed to a worst-case SAFE verdict: on real test
+files the ssrf/proto/xss witnesses promote a model-"safe" function to a finding, and a raw
+no-guard sink is left to the taint layer. Wiring it required three integration fixes —
+module-scope for guard data held in file-level constants, a proto/merge taint sink, and a JS
+function-extractor that had been truncating nested sinks.
+
+**What it is not.** The same battery was measured as a *training-data* generator and rejected:
+it is a high-precision but narrow oracle (~6 modelled shapes), so harvesting witness-verified
+pairs yields single digits at every real source — 8 distinct guards in the 63K-scan corpus,
+3 verified completeness pairs across 18K real CVE fixes. Real insufficient guards are far more
+varied than the shapes it models. Its value is the runtime layer above, not a data source.
+
 ---
 
 ## 3. Model iterations
@@ -330,13 +369,21 @@ throughout.
 
 **Operational rule: after any change to a trace builder, read ten of its outputs.**
 
+The runtime counterpart of this weakness — the model calling a *bypassable* guard sufficient —
+is now addressed deterministically by the guard-witness verifier (§2.5), which the same rule
+built: four false-positive shapes in the witness itself were caught only by reading its output
+against real snippets, never by its own passing unit tests.
+
 ---
 
 ## 7. Current limitations
 
 1. **The model is a strong classifier and a weak reasoner.** It has learned what
    vulnerable code looks like, not how to verify whether a flow is guarded. §5 is the
-   evidence. Whether v12 changes this is an open question, not a settled one.
+   evidence. Whether v12 changes this is an open question, not a settled one. For six guard
+   classes this is now *side-stepped* rather than solved: the witness verifier (§2.5) checks
+   completeness deterministically at runtime, so the model's misjudgement is overridden — but
+   only for those classes, and the underlying reasoning weakness is unchanged.
 2. **Real-world false positives remain the practical failure mode.** On real application
    code the model alone produced 10 false positives; only the surrounding deterministic
    pipeline made the system usable.

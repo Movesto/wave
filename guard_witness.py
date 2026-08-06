@@ -134,10 +134,22 @@ def _path_predicate(guard: str):
     # blocks '..' by substring only  ('..' in name / includes('..') / indexOf)
     if re.search(r'(includes|indexOf|__contains__|\bin\b|find|strpos|search)\s*'
                  r'[\(\s][\'"]\.\.[\'"]', g) or re.search(r'[\'"]\.\.[\'"]\s+in\b', g):
+        # honour a co-present absolute-path reject (startsWith('/'), isabs, ^/ ...): with
+        # it, /etc/passwd is already blocked, so we must NOT claim it as a bypass. Without
+        # this the witness makes a false claim on `startswith('/') or '..' in name`.
+        blocks_abs = bool(re.search(
+            r"startswith\(\s*[\'\"]/|isabs|isAbsolute|indexOf\(\s*[\'\"]/[\'\"]\s*\)\s*===?\s*0"
+            r"|charAt\(\s*0\s*\)\s*===?\s*[\'\"]/|^\s*\^/|\[\s*0\s*\]\s*===?\s*[\'\"]/", g))
+
         def accept(v):
-            # the guard REJECTS when '..' present -> accepts otherwise. It never checks
-            # absolute paths, encoding, or backslashes -- which is the whole point.
-            return ".." not in v
+            # the guard REJECTS when '..' present -> accepts otherwise. On its own it never
+            # checks encoding or backslashes -- which is the whole point. If it ALSO rejects
+            # absolute paths, an absolute witness is no longer admitted.
+            if ".." in v:
+                return False
+            if blocks_abs and v.startswith("/"):
+                return False
+            return True
         return accept
 
     # rejects any '/' in the name  (the Juice Shop fileServer shape)

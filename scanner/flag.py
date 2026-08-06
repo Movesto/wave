@@ -289,6 +289,40 @@ def _js_taint(code, filename, unit_lookup):
     return out
 
 
+# a value produced by a HAND-ROLLED sanitiser -- a string .replace() (blocklist) or
+# strip_tags. Not DOMPurify / a proper encoder: those are correct and must not be flagged.
+_JS_HANDROLL = re.compile(r"\.replace\s*\(\s*/|\.replace\s*\(\s*['\"]|strip_tags\s*\(", re.I)
+_JS_HTML_SINK = re.compile(
+    r"\.innerHTML\s*=\s*([^;\n]+)|\.outerHTML\s*=\s*([^;\n]+)|"
+    r"document\.write\(\s*([^)]+)|\.html\(\s*([^)]+)|"
+    r"insertAdjacentHTML\s*\([^,]+,\s*([^)]+)")
+
+
+def _js_dom_xss(code, filename, unit_lookup):
+    """Flow-free DOM-XSS: a hand-rolled sanitiser (a .replace() blocklist) reaching an HTML
+    sink -- the completeness case the taint pass misses when the input arrives as a function
+    PARAMETER (no recognised source). Scoped to a hand-rolled sanitiser so a raw innerHTML or
+    a proper encoder (DOMPurify) is NOT flagged; the witness then judges the blocklist.
+    """
+    # vars assigned from a hand-rolled sanitiser
+    sanitized = set()
+    for m in re.finditer(r"(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)", code):
+        if _JS_HANDROLL.search(m.group(2)):
+            sanitized.add(m.group(1))
+    out = []
+    for m in _JS_HTML_SINK.finditer(code):
+        rhs = next((g for g in m.groups() if g), "")
+        # the sink is fed by a sanitised var, or sanitises inline on the sink line
+        fed = _JS_HANDROLL.search(rhs) or any(
+            re.search(rf"\b{re.escape(v)}\b", rhs) for v in sanitized)
+        if fed:
+            line = code[:m.start()].count("\n") + 1
+            out.append(Candidate(filename, unit_lookup(line), line, "CWE-79",
+                                 "hand-rolled sanitiser reaches an HTML sink (check completeness)",
+                                 "pattern", m.group(0).strip().replace("\n", " ")[:120]))
+    return out
+
+
 # ================= dispatch =================
 def _py_unit_lookup(tree):
     fns = [(f.lineno, getattr(f, "end_lineno", f.lineno), f.name)
@@ -334,6 +368,7 @@ def scan_file(path):
     else:
         look = _js_unit_lookup(code)
         out += _js_taint(code, str(path), look)
+        out += _js_dom_xss(code, str(path), look)
         out += _pattern_scan(code, "js", str(path), look)
     return out
 

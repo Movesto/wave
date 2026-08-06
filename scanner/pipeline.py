@@ -264,6 +264,9 @@ def main():
     ap.add_argument("--fix", action="store_true",
                     help="annotate files with security review comments above confirmed findings "
                          "(non-destructive; backs up each file to .bak)")
+    ap.add_argument("--no-model", action="store_true",
+                    help="skip the GPU model (Station 2). Runs taint + guard-witness + patches "
+                         "only -- instant, CPU-only. Witness findings still surface.")
     args = ap.parse_args()
 
     files = gather(args.target)
@@ -297,8 +300,10 @@ def main():
     if total == 0:
         print("Station 1: no taint candidates and no CVE-resemblance hits. Nothing to triage.")
         return
+    _next = ("guard-witness + patches only (--no-model)" if args.no_model
+             else "Loading model for triage...")
     print(f"Station 1: {len(by_fn)} taint + {len(recall_hits)} CVE-resemblance candidate(s) "
-          f"in {total} function(s). Loading model for triage...\n")
+          f"in {total} function(s). {_next}\n")
 
     # merge recall hits into by_fn so the model triages them too
     for key, hit in recall_hits.items():
@@ -306,17 +311,23 @@ def main():
     _recall = recall_hits
 
     # --- Station 2/3: model triage + fix (GPU, only on candidates) ---
-    from eval.inference import QwenLoraPredictor
-    from eval.parsers import parse_shape1
-    model = QwenLoraPredictor()
+    # --no-model skips the GPU entirely: taint + guard-witness + patches only. The witness
+    # (Station 2c) is model-independent, so guard-completeness findings still surface.
+    model = None
+    if not args.no_model:
+        from eval.inference import QwenLoraPredictor
+        from eval.parsers import parse_shape1
+        model = QwenLoraPredictor()
 
     results = []
     for (file, unit, line), cs in by_fn.items():
         code = function_source(file, unit, line)
         if not code:
             continue
-        out = model.predict(f"<SCAN>\n{code}\n</SCAN>")
-        p = parse_shape1(out)
+        if model is not None:
+            p = parse_shape1(model.predict(f"<SCAN>\n{code}\n</SCAN>"))
+        else:
+            p = {}
         model_vuln = p.get("status") in ("vuln", "confirmed")
         taint_cwes = sorted({c.cwe for c in cs})
         rhit = _recall.get((file, unit, line))
@@ -326,7 +337,8 @@ def main():
         elif rhit and model_vuln:
             confidence = "MEDIUM (CVE-resemblance + model agree)"
         elif cs:
-            confidence = "REVIEW (taint flags, model unsure)"
+            confidence = ("REVIEW (taint flags)" if model is None
+                          else "REVIEW (taint flags, model unsure)")
         else:
             confidence = "REVIEW (CVE-resemblance only)"
         detectors = (["taint"] if cs else []) + (["retrieval"] if rhit else [])
@@ -405,8 +417,9 @@ def main():
                 print(f"             bypass input: {w['bypass']!r}  ({w['why']})")
             if r.get("patch"):
                 print(format_patch(r["patch"]))
+    _ran = ("witness ran" if args.no_model else "model ran")
     print(f"\n{len(high)} confirmed, {len(review)} for review "
-          f"(model ran on {len(by_fn)} functions, not the whole repo).")
+          f"({_ran} on {len(by_fn)} functions, not the whole repo).")
 
     if args.fix and high:
         print("\n--- Applying --fix (security review annotations) ---")

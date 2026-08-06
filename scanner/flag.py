@@ -199,6 +199,19 @@ PATTERNS = [
     (re.compile(r"(?:requests\.(?:get|post|put|head|delete)|urlopen|httpx\.(?:get|post))"
                 r"\s*\(\s*(?!['\"]https?://[\w.-]+['\"]\s*[,)])[\w.]+\s*[,)]"),
      "CWE-918", "outbound request to a non-literal URL", "py", False),
+
+    # File-serving and redirect sinks fed by a VARIABLE (not a bare string literal).
+    # These often HAVE a guard -- `if (!file.includes("/"))` -- so they are exactly where
+    # the witness verifier earns its keep. The taint engine misses them because the value
+    # arrives as a function parameter, not a request object in the same scope.
+    (re.compile(r"(?:res|response)\.(?:sendFile|download)\s*\(\s*"
+                r"(?!['\"][^'\"]*['\"]\s*\))[\w.]"),
+     "CWE-22", "file served from a non-literal path (check the guard)", "js", False),
+    (re.compile(r"send_file\s*\(\s*(?!['\"][^'\"]*['\"]\s*\))[\w.]"),
+     "CWE-22", "file served from a non-literal path (check the guard)", "py", False),
+    (re.compile(r"(?:res|response)\.redirect\s*\(\s*"
+                r"(?!['\"][^'\"]*['\"]\s*\))[\w.]"),
+     "CWE-601", "redirect to a non-literal target (check the guard)", "js", False),
 ]
 _SEC_CTX = re.compile(r"password|passwd|token|secret|sign|hmac|hash_|cert|credential|auth|"
                       r"user_id|owner|current_user|permission", re.I)

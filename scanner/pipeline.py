@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))                    # sibling flag.py
 from flag import gather, scan_file, EXT_LANG      # Station 1 (reused)
 from patches import suggest, format_patch         # Station 3
+from guard_witness import assess_guard, witness_scan   # Station 2c: witness verifier
 
 _JS_FN_START = re.compile(
     r"function\s+[\w$]+\s*\(|(?:const|let|var)\s+[\w$]+\s*=\s*(?:async\s*)?\([^)]*\)\s*=>|"
@@ -46,6 +47,20 @@ from scan_ts_standard import guard_claim, guard_is_a_control, _GUARD_COND, _GUAR
 
 def _is_control_line(line: str) -> bool:
     return bool(_GUARD_COND.search(line) or _GUARD_SANI.search(line))
+
+
+
+
+# Map a finding to a guard-witness class. Only path traversal and open redirect have a
+# witness battery today; everything else returns None and the witness step is skipped.
+def _witness_kind(cwe: str, sink: str) -> str | None:
+    c = (cwe or "").upper()
+    text = (sink or "").lower()
+    if c in ("CWE-22", "CWE-23", "CWE-98", "CWE-73") or "readfile" in text or "sendfile" in text:
+        return "path"
+    if c in ("CWE-601", "CWE-807") or "redirect" in text:
+        return "redirect"
+    return None
 
 
 def localise_guard(file_path: str, trace: str, fn_line: int):
@@ -293,6 +308,23 @@ def main():
                 results[-1]["confidence"].startswith(("HIGH", "MEDIUM")):
             results[-1]["confidence"] += "  [guard claim failed R18]"
 
+        # Station 2c: witness verification (deterministic, model-independent). For a
+        # path/redirect sink, run each guard-shaped line's ACTUAL logic against known
+        # bypass inputs. A guard that admits a bypass is a finding EVEN IF THE MODEL SAID
+        # SAFE -- the deterministic cure for the completeness miss (Juice Shop fileServer
+        # trusted `!file.includes("/")`).
+        kind = _witness_kind(results[-1].get("model_cwe")
+                             or (taint_cwes[0] if taint_cwes else ""),
+                             results[-1].get("taint_sink", ""))
+        if kind:
+            w = witness_scan(code, kind)
+            if w:
+                results[-1]["witness"] = w
+                if not results[-1]["confidence"].startswith(("HIGH", "MEDIUM")):
+                    results[-1]["confidence"] = "MEDIUM (witness: guard proven insufficient)"
+                elif "[witness" not in results[-1]["confidence"]:
+                    results[-1]["confidence"] += "  [witness: guard insufficient]"
+
     if args.json:
         print(json.dumps(results, indent=2))
         return
@@ -319,6 +351,10 @@ def main():
                        "unlocated": "guard (UNVERIFIED)"}[r["guard_check"]]
                 print(f"    {tag}: {loc}"
                       + (f"  {r['guard'][:70]}" if r.get("guard") else ""))
+            w = r.get("witness")
+            if w:
+                print(f"    WITNESS: guard `{w['guard']}` is INSUFFICIENT")
+                print(f"             bypass input: {w['bypass']!r}  ({w['why']})")
             if r.get("patch"):
                 print(format_patch(r["patch"]))
     print(f"\n{len(high)} confirmed, {len(review)} for review "

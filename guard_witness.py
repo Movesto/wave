@@ -1,0 +1,168 @@
+"""Guard-witness evaluator: does a proposed guard actually stop the attack?
+
+The core defect this project keeps hitting is COMPLETENESS -- the model (and the old
+data) declares a guard sufficient without checking what it admits. On signin.tsx the
+guard was `raw.startsWith("/") && !raw.startsWith("//")`; it looks like it blocks open
+redirect and does not -- a backslash form starts with `/`, is not `//`, and browsers
+normalises a backslash to a forward slash, so it resolves to `//evil.com`.
+
+A claim like "this guard is sufficient" is only worth anything if it can be checked. This
+checks it the one way that cannot be fooled: run the guard's logic against a battery of
+known bypass inputs and report which get through.
+
+SAFETY: we do NOT execute scanned code. We recognise a small set of guard SHAPES and
+reimplement THEIR SEMANTICS in Python, then evaluate our reimplementation against the
+witnesses. Unknown shapes return `unknown`, never a false "safe".
+
+This is deliberately small and verifiable. It is the seed of three things: a runtime
+check for the scanner (no retrain), a verifier for witness-based training pairs, and a
+reward signal for any later RL.
+
+    from guard_witness import assess_guard
+    assess_guard('raw.startsWith("/") && !raw.startsWith("//")', kind="redirect")
+"""
+import re
+import urllib.parse
+from dataclasses import dataclass, field
+
+
+# Witness inputs per weakness class: strings that a SUFFICIENT guard must reject and an
+# insufficient one lets through. Each has a note explaining why it is dangerous.
+WITNESSES = {
+    "redirect": [
+        ("//evil.com", "protocol-relative -> another origin"),
+        (r"/\evil.com", "backslash normalises to //evil.com in the authority"),
+        ("https://evil.com", "absolute URL to another origin"),
+        ("/%2f%2fevil.com", "encoded //"),
+        ("/\thttps://evil.com", "leading control char, some parsers strip it"),
+        ("javascript:alert(1)", "javascript: scheme"),
+    ],
+    "path": [
+        ("../../etc/passwd", "classic traversal"),
+        ("..%2f..%2fetc%2fpasswd", "url-encoded traversal"),
+        ("....//....//etc/passwd", "doubled dots survive a single '..' strip"),
+        ("/etc/passwd", "absolute path escapes the base dir"),
+        (r"..\..\windows\win.ini", "backslash traversal on Windows"),
+    ],
+}
+
+# A safe redirect target / safe filename, to check the guard does not also reject valid
+# input (a guard that rejects everything is not 'sufficient', it is broken).
+BENIGN = {"redirect": "/library", "path": "chapter1.jpg"}
+
+
+@dataclass
+class GuardVerdict:
+    kind: str
+    recognised: bool
+    admits: list = field(default_factory=list)     # (witness, why) that get through
+    blocks_benign: bool = False
+    note: str = ""
+
+    @property
+    def sufficient(self):
+        return self.recognised and not self.admits and not self.blocks_benign
+
+
+# ---- semantic reimplementations of recognised guard shapes ------------------
+
+def _redirect_predicate(guard: str):
+    """Return a function value->bool ('is this value ACCEPTED as safe by the guard'),
+    or None if the guard shape is not recognised."""
+    g = " ".join(guard.split())
+
+    # startsWith("/") && !startsWith("//")   (the signin.tsx shape)
+    if re.search(r'startsWith\(\s*[\'"]/[\'"]\s*\)', g) and \
+       re.search(r'!\s*\w+\.startsWith\(\s*[\'"]//[\'"]\s*\)', g):
+        def accept(v):
+            return v.startswith("/") and not v.startswith("//")
+        return accept
+
+    # A proper `new URL(raw, base)` + origin/host check IS sufficient here; we do not
+    # reimplement it, because a crude stand-in over-flagged correct code (a false
+    # claim). Anything not on the known-bad list below returns None == UNKNOWN, and the
+    # witness stays silent rather than accuse a good guard.
+    return None
+
+
+def _path_predicate(guard: str):
+    g = " ".join(guard.split())
+
+    # blocks '..' by substring only  ('..' in name / includes('..') / indexOf)
+    if re.search(r'(includes|indexOf|__contains__|\bin\b|find|strpos|search)\s*'
+                 r'[\(\s][\'"]\.\.[\'"]', g) or re.search(r'[\'"]\.\.[\'"]\s+in\b', g):
+        def accept(v):
+            # the guard REJECTS when '..' present -> accepts otherwise. It never checks
+            # absolute paths, encoding, or backslashes -- which is the whole point.
+            return ".." not in v
+        return accept
+
+    # rejects any '/' in the name  (the Juice Shop fileServer shape)
+    if re.search(r'(includes|indexOf|__contains__)\s*[\(\s][\'"]/[\'"]', g):
+        def accept(v):
+            return "/" not in v    # misses %2f and backslash
+        return accept
+
+    # A proper canonicalise-then-contains guard (realpath/resolve + prefix) is treated
+    # as UNKNOWN, not verified -- reimplementing it crudely flagged correct code. Only
+    # the two provably-insufficient substring checks above are judged.
+    return None
+
+
+_PREDICATE = {"redirect": _redirect_predicate, "path": _path_predicate}
+
+
+def assess_guard(guard: str, kind: str) -> GuardVerdict:
+    """Run `guard`'s recognised semantics against the witness battery for `kind`."""
+    v = GuardVerdict(kind=kind, recognised=False)
+    build = _PREDICATE.get(kind)
+    if not build:
+        v.note = f"no witness battery for kind={kind}"
+        return v
+    accept = build(guard)
+    if accept is None:
+        v.note = "guard shape not recognised -- cannot verify, treat as UNKNOWN"
+        return v
+    v.recognised = True
+    for w, why in WITNESSES[kind]:
+        try:
+            if accept(w):          # guard accepts a malicious input == it admits it
+                v.admits.append((w, why))
+        except Exception:
+            pass
+    try:
+        v.blocks_benign = not accept(BENIGN[kind])
+    except Exception:
+        v.blocks_benign = True
+    return v
+
+
+_GUARD_LINE = re.compile(r"\b(if|includes|indexOf|startsWith|realpath|resolve"
+                         r"|normpath|match|test|filter)\b")
+
+
+def witness_scan(code: str, kind: str):
+    """First insufficient guard in `code` for `kind`, as a dict, or None.
+
+    A single call the scanner can make: scans every guard-shaped line, runs the witness
+    battery, returns the first proven-insufficient guard with its concrete bypass.
+    """
+    for ln in (code or "").splitlines():
+        if not _GUARD_LINE.search(ln):
+            continue
+        v = assess_guard(ln.strip(), kind)
+        if v.recognised and not v.sufficient and v.admits:
+            w, why = v.admits[0]
+            return {"kind": kind, "guard": ln.strip()[:80], "bypass": w, "why": why}
+    return None
+
+
+if __name__ == "__main__":
+    # the signin.tsx guard, and a corrected version
+    for g in ('raw.startsWith("/") && !raw.startsWith("//")',
+              'raw.startsWith("/") && !raw.startsWith("//") && !raw.includes("\\\\")'):
+        r = assess_guard(g, "redirect")
+        print(f"\nguard: {g}")
+        print(f"  recognised={r.recognised}  sufficient={r.sufficient}")
+        for w, why in r.admits:
+            print(f"  ADMITS {w!r:24s} -- {why}")

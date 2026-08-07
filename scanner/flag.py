@@ -217,10 +217,12 @@ PATTERNS = [
     # bracket-indexed args is the deep-merge idiom, rare elsewhere) or a deep merge/set
     # library call. These copy a user object by dynamic key, so a key of __proto__/
     # constructor reaches Object.prototype -- the witness then checks the key blocklist.
-    # SAME index var on both args (backref) and a multi-char name -- so a merge over object
-    # keys (`merge(target[key], source[key])`) matches, but array ops with 1-char counters
-    # (`Math.max(a[i], b[i])`) or differing indices (`swap(arr[i], arr[j])`) do not.
-    (re.compile(r"[\w$]+\s*\(\s*[\w$]+\[([a-zA-Z_$][\w$]+)\]\s*,\s*[\w$]+\[\1\]\s*\)"),
+    # A recursive descent into two objects by the SAME key. The call name must be MERGE-ish
+    # (merge/extend/assign/deep/clone/copy/defaults/mixin) so `merge(target[key],
+    # source[key])` matches but a coordinate op like `max(a[placement], b[placement])` or an
+    # array copy `swap(arr[i], arr[j])` does not.
+    (re.compile(r"\b\w*(?:merge|extend|assign|deep|clone|copy|defaults|mixin)\w*\s*\(\s*"
+                r"[\w$]+\[([a-zA-Z_$][\w$]+)\]\s*,\s*[\w$]+\[\1\]\s*\)", re.I),
      "CWE-1321", "recursive merge by dynamic key (prototype pollution risk)", "any", False),
     (re.compile(r"_\.(?:merge|mergeWith|defaultsDeep|set|setWith)\s*\(|"
                 r"\bdeepmerge\s*(?:\.all)?\s*\(|\$\.extend\s*\(\s*true\b"),

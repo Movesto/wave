@@ -368,8 +368,14 @@ def main():
         else:
             confidence = "REVIEW (CVE-resemblance only)"
         detectors = (["taint"] if cs else []) + (["retrieval"] if rhit else [])
-        primary_cwe = (p.get("cwe") or (taint_cwes[0] if taint_cwes else None)
-                       or (rhit["cwe"] if rhit else "CWE-20")).upper()
+        # CWE for the PATCH: the taint CWE is derived from the actual sink (createHash('md5')
+        # -> 327, readFileSync(concat) -> 22) and is reliable; the model's CWE is frequently
+        # wrong (it labelled md5 as SQLi). So taint wins when it fired; the model's CWE is
+        # only used for retrieval-only findings, where there is no sink pattern to trust.
+        primary_cwe = ((taint_cwes[0] if taint_cwes else None)
+                       or p.get("cwe")
+                       or (rhit["cwe"] if rhit else None)
+                       or "CWE-20").upper()
         patch = suggest(primary_cwe, cs[0].sink if cs else "")
         results.append({
             "file": file, "function": unit, "line": line,

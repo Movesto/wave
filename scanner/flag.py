@@ -382,8 +382,12 @@ def gather(target):
     return [f for f in p.rglob("*")
             if f.suffix.lower() in EXT_LANG
             and "/.git/" not in str(f).replace("\\", "/")
-            and not any(x in str(f) for x in ("venv", "site-packages", "node_modules",
-                                              "__pycache__", "/tests/", "\\tests\\", ".min."))]
+            # skip third-party / generated code: dependencies, vendored bundles, build output.
+            # These are not the project's own code and only add noise on a real repo.
+            and not any(x in str(f).replace("\\", "/").lower() for x in (
+                "venv", "site-packages", "node_modules", "__pycache__",
+                "/tests/", "/test/", "/vendor/", "/assets/vendor/", "/dist/", "/build/",
+                ".min.", ".bundle.", "-bundle.", ".chunk."))]
 
 
 def main():

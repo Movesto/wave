@@ -324,8 +324,10 @@ def main():
         code = function_source(file, unit, line)
         if not code:
             continue
+        model_raw = ""
         if model is not None:
-            p = parse_shape1(model.predict(f"<SCAN>\n{code}\n</SCAN>"))
+            model_raw = model.predict(f"<SCAN>\n{code}\n</SCAN>")
+            p = parse_shape1(model_raw)
         else:
             p = {}
         model_vuln = p.get("status") in ("vuln", "confirmed")
@@ -354,6 +356,7 @@ def main():
             "model_status": p.get("status"), "model_cwe": p.get("cwe"),
             "confidence": confidence,
             "trace": p.get("trace", ""), "fix": p.get("fix", ""),
+            "model_raw": model_raw.strip(),
             "patch": patch,
         })
         # localise + validate the guard claim (no model involved)
@@ -403,8 +406,15 @@ def main():
             if r["retrieval"]:
                 print(f"    resembles known CVE:  {r['retrieval']}")
             print(f"    model:  {r['model_status']} / {r['model_cwe']}")
-            if r["trace"]:
+            if r.get("trace"):
                 print(f"    trace:  {r['trace']}")
+            # the model's full response (chain-of-thought + verdict). This is the point of
+            # the CoT model; show it whenever the structured `trace:` did not capture it.
+            raw = r.get("model_raw", "")
+            if raw and not r.get("trace"):
+                print("    model response:")
+                for rl in raw.splitlines():
+                    print(f"      {rl}")
             if r.get("guard_check") and r["guard_check"] != "no_claim":
                 loc = f"line {r['guard_line']}" if r.get("guard_line") else "not found in file"
                 tag = {"located": "guard", "relocated": "guard (RELOCATED - model cited a non-control)",

@@ -22,6 +22,22 @@ from flag import gather, scan_file, EXT_LANG      # Station 1 (reused)
 from patches import suggest, format_patch         # Station 3
 from guard_witness import assess_guard, witness_scan   # Station 2c: witness verifier
 
+# The scanner's default model is the CURRENT best trained adapter (v12.1b). Loaded
+# automatically so `python scanner/pipeline.py <dir>` uses the real wave model, not base
+# Qwen. Override order: --adapter flag > WAVE_ADAPTER_PATH env > this default.
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_ADAPTER = ROOT / "data" / "runs" / "v12_1" / "best" / "qwen_cot_v12_1b_best"
+
+
+def resolve_adapter(cli_adapter=None):
+    """(adapter_path_or_None, human message) for the model the scanner should load."""
+    chosen = cli_adapter or os.environ.get("WAVE_ADAPTER_PATH")
+    if chosen:
+        return chosen, f"Qwen3-8B + adapter {chosen}"
+    if DEFAULT_ADAPTER.exists():
+        return str(DEFAULT_ADAPTER), f"Qwen3-8B + adapter {DEFAULT_ADAPTER.name} (default)"
+    return None, "BASE Qwen3-8B  [WARNING: no trained adapter found — verdicts will be poor]"
+
 _JS_FN_START = re.compile(
     r"function\s+[\w$]+\s*\(|(?:const|let|var)\s+[\w$]+\s*=\s*(?:async\s*)?\([^)]*\)\s*=>|"
     # a method/function definition `name(args) {` -- but NOT a control-flow header
@@ -267,6 +283,9 @@ def main():
     ap.add_argument("--no-model", action="store_true",
                     help="skip the GPU model (Station 2). Runs taint + guard-witness + patches "
                          "only -- instant, CPU-only. Witness findings still surface.")
+    ap.add_argument("--adapter", metavar="PATH",
+                    help="LoRA adapter to load (overrides WAVE_ADAPTER_PATH and the v12.1b "
+                         "default). Use 'base' to force the untrained base model.")
     args = ap.parse_args()
 
     files = gather(args.target)
@@ -317,7 +336,12 @@ def main():
     if not args.no_model:
         from eval.inference import QwenLoraPredictor
         from eval.parsers import parse_shape1
-        model = QwenLoraPredictor()
+        if args.adapter == "base":
+            adapter, desc = None, "BASE Qwen3-8B (forced by --adapter base)"
+        else:
+            adapter, desc = resolve_adapter(args.adapter)
+        print(f"Loading model: {desc}\n", flush=True)
+        model = QwenLoraPredictor(adapter_path=adapter)
 
     results = []
     for (file, unit, line), cs in by_fn.items():

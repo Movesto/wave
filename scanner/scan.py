@@ -197,7 +197,10 @@ def main():
 
     from eval.inference import QwenLoraPredictor       # lazy: loads the model (GPU)
     from eval.parsers import parse_shape1
-    predictor = QwenLoraPredictor()
+    from pipeline import resolve_adapter               # same default as the full pipeline
+    adapter, desc = resolve_adapter()
+    print(f"Loading model: {desc}", file=sys.stderr, flush=True)
+    predictor = QwenLoraPredictor(adapter_path=adapter)
 
     inputs = gather_files(args.target)
     findings = []

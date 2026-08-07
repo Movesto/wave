@@ -22,11 +22,11 @@ from flag import gather, scan_file, EXT_LANG      # Station 1 (reused)
 from patches import suggest, format_patch         # Station 3
 from guard_witness import assess_guard, witness_scan   # Station 2c: witness verifier
 
-# The scanner's default model is the CURRENT best trained adapter (v12.1b). Loaded
+# The scanner's default model is the CURRENT (latest-trained) adapter, v14. Loaded
 # automatically so `python scanner/pipeline.py <dir>` uses the real wave model, not base
 # Qwen. Override order: --adapter flag > WAVE_ADAPTER_PATH env > this default.
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_ADAPTER = ROOT / "data" / "runs" / "v12_1" / "best" / "qwen_cot_v12_1b_best"
+DEFAULT_ADAPTER = ROOT / "data" / "runs" / "v14" / "best" / "qwen_cot_v14_best"
 
 
 def resolve_adapter(cli_adapter=None):

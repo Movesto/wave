@@ -1,0 +1,222 @@
+
+================================================================================
+CASE 0  CWE=CWE-22  ground-truth=vuln
+CODE:
+  1| function read(name){
+  2|   if (name.includes('..')) throw new Error('bad');
+  3|   const p = decodeURIComponent(name);
+  4|   return fs.readFileSync(path.join(BASE, p));
+  5| }
+
+--- TURN 1 (model reasons) ---
+The user wants me to analyze this code snippet for a security vulnerability. Let me examine it step by step.
+
+The code is a function `read(name)` that:
+1. Takes a `name` parameter (appears to be user-controlled)
+2. Checks if `name` contains `..` (directory traversal pattern)
+3. Decodes the URI component of `name`
+4. Reads a file from `path.join(BASE, p)`
+
+This looks like a path traversal vulnerability. The function is reading files from a BASE directory based on user input.
+
+Let me think about the guard:
+- Line 2 checks if `name.includes('..')` throws an error
+
+But wait - this is a classic path traversal bypass scenario. The check for `..` in the raw input doesn't prevent bypasses because:
+1. After `decodeURIComponent(name)` on line 3, the `..` could be encoded
+2. For example, `%2e%2e` is the URL-encoded version of `..`
+3. The check happens BEFORE decoding, so `%2e%2e` would pass the guard but become `..` after decoding
+
+Let me use the tool to verify this bypass possibility.
+
+Actually, looking more carefully:
+- Line 2 checks for `..` in the raw `name` parameter
+- Line 3 decodes the URI component
+- So if someone passes `%2e%2e` (URL-encoded `..`), it would pass the guard on line 2 but become `..` after decoding on line 3
+
+This is a classic bypass. The guard checks the raw input, but the actual path traversal happens after decoding.
+
+Let me call the tool to confirm this vulnerability.
+</think>
+
+This code has a path traversal vulnerability. Let me analyze:
+
+**Analysis:**
+1. **Untrusted input:** `name` parameter (line 1)
+2. **Guard:** Line 2 checks if `name.includes('..')` throws an error
+3. **Sink:** Line 4 reads files using `path.join(BASE, p)` where `p` is the decoded name
+
+**The vulnerability:** The guard checks for `..` in the raw input, but the actual path is constructed AFTER `decodeURIComponent()`. This means URL-encoded directory traversal sequences like `%2e%2e` (which decodes to `..`) would pass the guard but become dangerous after decoding.
+
+Let me verify this bypass:
+
+TOOL: witness(path)
+
+
+--- TOOL RUN --> witness(path) result: INSUFFICIENT -- bypass input '/etc/passwd' defeats guard `if (name.includes('..')) throw new Error('bad');` (absolute path escapes the base dir) ---
+
+--- TURN 2 (after tool) ---
+The tool result shows that the guard is insufficient because an absolute path like '/etc/passwd' can bypass the `..` check. This is a path traversal vulnerability.
+
+The issue is that the guard only checks for `..` in the raw input, but doesn't check for other path traversal techniques like:
+1. Absolute paths (e.g., `/etc/passwd`)
+2. URL-encoded sequences like `%2e%2e` (which becomes `..` after decode)
+3. Other traversal patterns
+
+The fix should validate the resolved path to ensure it stays within the BASE directory, rather than just checking for `..` in the input.
+
+Let me provide the final answer.
+</think>
+
+VERDICT: vulnerable
+VULN_LINE: 4
+FIX:
+```javascript
+function read(name){
+  const p = decodeURIComponent(name);
+  const resolved = path.resolve(BASE, p);
+  if (!resolved.startsWith(path.resolve(BASE))) throw new Error('bad');
+  return fs.readFileSync(resolved);
+}
+```
+WHY: This fix validates the resolved absolute path to ensure it stays within the BASE directory, preventing both `..` traversal and absolute path escapes.
+
+
+================================================================================
+CASE 10  CWE=CWE-1321  ground-truth=vuln
+CODE:
+  1| function merge(t, s){
+  2|   for (const k in s){
+  3|     if (k === '__proto__') continue;
+  4|     if (typeof s[k] === 'object') merge(t[k], s[k]); else t[k] = s[k];
+  5|   }
+  6| }
+
+--- TURN 1 (model reasons) ---
+The user wants me to analyze this code snippet for a security vulnerability. Let me examine it step by step.
+
+The code is a JavaScript function `merge(t, s)` that merges object `s` into object `t`.
+
+Looking at the code:
+1. Line 1: Function definition
+2. Line 2: Loop through keys of object `s`
+3. Line 3: Skip if key is `__proto__`
+4. Line 4: If value is object, recursively merge; otherwise assign directly
+
+This looks like a prototype pollution vulnerability. The function is designed to merge objects, but there's a guard on line 3 that skips `__proto__` keys.
+
+However, I need to think about whether this guard is sufficient. The vulnerability here is that if an attacker can control the keys being merged, they could potentially pollute the prototype chain.
+
+The guard on line 3 checks `if (k === '__proto__') continue;` - this should prevent direct assignment to `__proto__`.
+
+But wait - there's a potential bypass. What if someone uses `constructor` property? Or what if the key comparison is bypassed through other means?
+
+Actually, let me think more carefully. The guard only checks for `__proto__`. But there are other prototype pollution vectors:
+1. `__proto__` - blocked by line 3
+2. `constructor.prototype` - NOT blocked! This is a common bypass
+3. Other prototype-related properties
+
+Let me use the tool to verify if there's a bypass. The kind would be `proto` since this is about prototype pollution.
+
+Actually, looking at the code more carefully:
+- Line 3 only blocks `__proto__`
+- But `constructor.prototype` is NOT blocked
+- An attacker could pass an object with `constructor: { prototype: { maliciousKey: 'value' } }` and this would pollute the prototype
+
+Let me call the witness tool to verify this.
+</think>
+
+Looking at this code, I need to analyze the prototype pollution vulnerability.
+
+**Analysis:**
+1. **Untrusted input:** Object `s` is the source being merged into target `t`
+2. **Sink:** The `merge` function modifies the prototype chain through object property assignment
+3. **Guard:** Line 3 checks `if (k === '__proto__') continue;`
+
+The guard only blocks `__proto__` directly, but there's a well-known bypass: `constructor.prototype`. An attacker could pass an object with `constructor: { prototype: { maliciousKey: 'value' } }` and this would pollute the prototype chain since `constructor.prototype` is not blocked.
+
+Let me verify this with the tool:
+
+TOOL: witness(proto)
+
+
+--- TOOL RUN --> witness(proto) result: INSUFFICIENT -- bypass input 'constructor' defeats guard `key blocklist [__proto__]` (constructor.prototype chain, open unless constructor OR prototype is blocked) ---
+
+--- TURN 2 (after tool) ---
+The tool has confirmed that the guard is insufficient. The vulnerability is a prototype pollution attack where an attacker can use `constructor.prototype` to bypass the `__proto__` check.
+
+Let me analyze:
+- Line 3 only blocks `__proto__` directly
+- But `constructor.prototype` can be used to pollute the prototype chain
+- The tool confirms this bypass works
+
+Now I need to provide the final verdict with the fix.
+
+The fix should block both `__proto__` AND `constructor` (and potentially `prototype` as well to be thorough).
+
+Let me write the final answer.
+</think>
+
+VERDICT: vulnerable
+VULN_LINE: 3|     if (k === '__proto__') continue;
+FIX: if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+WHY: blocking both __proto__ and constructor/prototype prevents the constructor.prototype bypass chain that defeats the original guard
+
+
+================================================================================
+CASE 4  CWE=CWE-89  ground-truth=vuln
+CODE:
+  1| function find(userId, userName){
+  2|   if (!/^[0-9]+$/.test(userId)) throw new Error('bad');
+  3|   return db.query("SELECT * FROM users WHERE name = '" + userName + "'");
+  4| }
+
+--- TURN 1 (model reasons) ---
+The user wants me to analyze this code snippet for ONE vulnerability.
+
+Looking at the code:
+```javascript
+function find(userId, userName){
+  if (!/^[0-9]+$/.test(userId)) throw new Error('bad');
+  return db.query("SELECT * FROM users WHERE name = '" + userName + "'");
+}
+```
+
+Let me analyze:
+
+1. **Untrusted input**: `userId` and `userName` are both untrusted inputs from the caller.
+
+2. **Guard**: There's a guard on `userId` - it must match `^[0-9]+$` (only digits).
+
+3. **Sink**: The `db.query()` function is executing a SQL query with string concatenation.
+
+4. **Vulnerability analysis**:
+   - The `userId` is validated to be numeric only
+   - However, `userName` is NOT validated at all
+   - The `userName` is directly concatenated into the SQL query string
+   - This is a classic SQL injection vulnerability
+
+5. **Should I use the tool?**
+   - The tool `witness(kind)` is for testing guards against bypass inputs
+   - The guard is on `userId`, not on `userName`
+   - The vulnerability is in the `userName` parameter, not `userId`
+   - Since there's no guard on `userName`, I don't need to test it with the tool
+   - The tool is specifically for testing guards - there's no guard to test on `userName`
+
+6. **Conclusion**: This is a SQL injection vulnerability on line 3 where `userName` is not sanitized.
+
+Let me verify my reasoning:
+- Line 2 validates `userId` to be numeric only
+- Line 3 uses `userName` directly in SQL without any validation/sanitization
+- An attacker could pass `userName = "'; DROP TABLE users; --"` to execute arbitrary SQL
+
+This is definitely vulnerable to SQL injection.
+
+The fix would be to use parameterized queries instead of string concatenation.
+</think>
+
+VERDICT: vulnerable
+VULN_LINE: 3| return db.query("SELECT * FROM users WHERE name = '" + userName + "'");
+FIX: return db.query("SELECT * FROM users WHERE name = ?", [userName]);
+WHY: Using a parameterized query prevents SQL injection by treating userName as data rather than executable SQL code
+

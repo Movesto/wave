@@ -121,6 +121,14 @@ def _redirect_predicate(guard: str):
             return True
         return accept
 
+    # startsWith("/") ALONE, with no !startsWith("//") clause -- STRICTLY WEAKER than the
+    # shape above, so it admits //evil.com directly. Recognise it so the weaker guard is
+    # also proven insufficient (it was silently unrecognised before).
+    if re.search(r'startsWith\(\s*[\'"]/[\'"]\s*\)', g):
+        def accept(v):
+            return v.startswith("/")     # //evil.com and /\evil.com both pass
+        return accept
+
     # A proper `new URL(raw, base)` + origin/host check IS sufficient here; we do not
     # reimplement it, because a crude stand-in over-flagged correct code (a false
     # claim). Anything not on the known-bad list below returns None == UNKNOWN, and the

@@ -23,6 +23,7 @@ import torch
 from transformers import BitsAndBytesConfig
 
 from guard_witness import witness_scan
+from safe_veto import prove_safe
 from run_local_model import load_model_and_tok
 from agent_prototype import SYSTEM, numbered, gen, _WK
 
@@ -63,26 +64,32 @@ def run_case(model, tok, decoder, eos, code, cwe, out):
     m_verdict, m_line, m_fix = parse_final(final_txt)
     model_verdict = m_verdict
 
-    # ---- AEGIS AUDIT: independent witness veto of a false 'safe' ----
-    audit = witness_scan(code, wkind) if wkind else None
-    vetoed = False
-    if audit and m_verdict in ("safe", "?"):
-        vetoed = True
+    # ---- AEGIS AUDIT: two-directional deterministic veto ----
+    audit_vuln = witness_scan(code, wkind) if wkind else None       # proves INSUFFICIENT
+    audit_safe = prove_safe(code, wkind) if wkind else None         # proves SUFFICIENT/neutralised
+    veto = None
+    if audit_vuln and m_verdict in ("safe", "?"):
+        veto = "vuln"
         proof = (f"AUDIT: an independent check PROVES this guard is bypassable -- input "
-                 f"{audit['bypass']!r} defeats `{audit['guard']}` ({audit['why']}). Your "
-                 f"'safe' verdict is wrong. Give the corrected FINAL answer (VERDICT must be "
-                 f"vulnerable) with the vuln line and a fix that blocks this exact bypass.")
+                 f"{audit_vuln['bypass']!r} defeats `{audit_vuln['guard']}` "
+                 f"({audit_vuln['why']}). Your verdict is wrong. Give the corrected FINAL "
+                 f"answer (VERDICT: vulnerable) with the vuln line and a fix that blocks this "
+                 f"exact bypass.")
         msgs2 = [{"role": "system", "content": SYSTEM},
                  {"role": "user", "content": "```\n" + numbered(code) + "\n```"},
                  {"role": "assistant", "content": final_txt},
                  {"role": "user", "content": proof}]
         corr = gen(model, tok, decoder, eos, msgs2, max_new=1400)
-        out.write(f"\n--- AUDIT VETO --> forcing reconsideration ---\n{corr}\n")
-        m_verdict, m_line, m_fix = parse_final(corr)
-        m_verdict = "vuln"    # audit is deterministic ground truth here
+        out.write(f"\n--- VETO->VULN (witness) ---\n{corr}\n")
+        _, m_line, m_fix = parse_final(corr)
+        m_verdict = "vuln"
+    elif audit_safe and m_verdict in ("vuln", "?"):
+        veto = "safe"
+        out.write(f"\n--- VETO->SAFE ({audit_safe}) -- over-flag overturned ---\n")
+        m_verdict, m_line, m_fix = "safe", "none", "none"
 
     return {"model_verdict": model_verdict, "final_verdict": m_verdict,
-            "line": m_line, "fix": m_fix, "tool": bool(tool), "vetoed": vetoed}
+            "line": m_line, "fix": m_fix, "tool": bool(tool), "vetoed": veto}
 
 
 def main():
@@ -111,9 +118,10 @@ def main():
         rows.append(r)
         base_ok = r["model_verdict"] == c["label"]
         veto_ok = r["final_verdict"] == c["label"]
+        vtag = f"[VETO->{r['vetoed']}]" if r["vetoed"] else ""
         print(f"  [{i:2d}] {c['cwe']:8s} truth={c['label']:5s} model={r['model_verdict']:5s}"
               f"{'OK' if base_ok else 'XX'} +veto={r['final_verdict']:5s}"
-              f"{'OK' if veto_ok else 'XX'} {'[VETO]' if r['vetoed'] else '':6s} "
+              f"{'OK' if veto_ok else 'XX'} {vtag:13s} "
               f"tool={'Y' if r['tool'] else 'n'} ({time.time()-t0:.0f}s)", flush=True)
     out.close()
 

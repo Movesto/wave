@@ -160,6 +160,14 @@ def _path_predicate(guard: str):
             return True
         return accept
 
+    # STRIPS '../' by replacement (str_replace / .replace / preg_replace) -- a single pass,
+    # so a doubled sequence '....//' leaves '../' behind after the inner one is removed.
+    if re.search(r'(str_replace|preg_replace|\.replace)\s*\(\s*[\'"/]?\.\.', g):
+        def accept(v):
+            stripped = v.replace("../", "")      # str_replace semantics: one non-overlapping pass
+            return ".." in stripped               # traversal survives the strip -> admitted
+        return accept
+
     # rejects any '/' in the name  (the Juice Shop fileServer shape)
     if re.search(r'(includes|indexOf|__contains__)\s*[\(\s][\'"]/[\'"]', g):
         def accept(v):
@@ -363,7 +371,7 @@ def assess_guard(guard: str, kind: str) -> GuardVerdict:
 
 _GUARD_LINE = re.compile(r"\b(if|includes|indexOf|startsWith|realpath|resolve"
                          r"|normpath|match|test|filter|preg_match|escapeshellcmd"
-                         r"|escapeshellarg|fullmatch|shlex|__proto__|constructor"
+                         r"|escapeshellarg|fullmatch|shlex|str_replace|preg_replace|replace|__proto__|constructor"
                          r"|prototype)\b")
 
 

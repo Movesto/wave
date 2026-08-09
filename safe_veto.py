@@ -43,6 +43,11 @@ def prove_safe(code, kind):
     for label, rx in _NEUT.get(kind, []):
         if re.search(rx, code):
             return f"neutraliser applied: {label}"
+    # 3. path: canonicalise-then-prefix-check (resolve/realpath + startsWith(base)) is the
+    #    canonical SUFFICIENT path guard -- a control-flow guard taint analysis can't see.
+    if kind == "path" and re.search(r"\b(resolve|realpath)\s*\(", code) \
+            and re.search(r"\.startsWith\s*\(", code):
+        return "path guard: canonicalise + prefix check"
     return None
 
 

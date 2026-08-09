@@ -87,3 +87,36 @@ gives real dataflow with far less setup, at the cost of completeness.
 2. Commit to the **Phase-0 gate first** (1 day) before the full ~2-week build — recommended.
 3. **Joern vs Semgrep-taint** as the dataflow engine (scope both; gate decides).
 4. Scope **JS/TS only** first (our domain), not general multi-language.
+
+---
+
+## Phase 0 RESULT (2026-08-08) — GATE PASSED, via Semgrep (the hedge won)
+
+Environment: no JDK on box; Docker 29.3.1 available (daemon started); WSL Ubuntu present but
+no passwordless sudo / no pip. Chose **Docker** as the runtime (no JVM/Windows friction).
+
+Hedged the gate: tried the LIGHTER engine (Semgrep taint) first. It **passed cleanly**, so the
+heavy Joern install was not needed for Phase 0.
+
+Test: two real `.ts` files (phase0_cpg/) — a path-traversal SOURCE→SINK where the only
+difference is what sits on the path (decodeURIComponent-after-check vs path.basename). A
+custom Semgrep taint rule (source `req.query.$X`, sink `fs.readFileSync(...)`, sanitizer
+`path.basename(...)`):
+    vuln_path.ts (basename NOT on path) -> FLAGGED         (want flagged)  ✓
+    safe_path.ts (basename ON path)     -> not flagged      (want cleared)  ✓
+    trace: reports SOURCE line 6, SINK line 9, "intermediate variables" on the path ✓
+
+This is exactly the gate: the engine expresses source / sink / **neutraliser-on-the-path**
+and correctly discriminates the case where whole-function regex over-flags. `pattern-
+sanitizers` == our `prove_safe` neutraliser, evaluated on the real dataflow path.
+
+**DECISION: use Semgrep taint as the dataflow engine.** It answers the gate with far less
+weight than Joern (Docker image, CLI/JSON, no JVM/Scala), and maps cleanly onto our seams:
+Semgrep sources/sinks/sanitizers -> the slice that `witness_scan` / `prove_safe` judge.
+
+**Joern DEFERRED to Phase 4**, only if cross-file / deep inter-procedural CPG queries exceed
+Semgrep taint's reach (Semgrep is strong intra-proc + limited inter-proc; Joern is a full CPG).
+
+Phase-1 starting point: phase0_cpg/taint_rule.yaml + the Docker invocation in
+run_semgrep.sh. Open detail: get the dataflow trace into JSON (flag/version), for AEGIS-style
+grounding — the text output already contains it.

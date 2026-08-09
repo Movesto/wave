@@ -1,0 +1,12 @@
+rules:
+  - id: path-traversal-taint
+    mode: taint
+    pattern-sources:
+      - pattern: req.query.$X
+    pattern-sinks:
+      - pattern: fs.readFileSync(...)
+    pattern-sanitizers:
+      - pattern: path.basename(...)
+    message: untrusted input reaches fs.readFileSync (path traversal)
+    languages: [typescript]
+    severity: WARNING

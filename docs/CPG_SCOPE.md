@@ -120,3 +120,38 @@ Semgrep taint's reach (Semgrep is strong intra-proc + limited inter-proc; Joern 
 Phase-1 starting point: phase0_cpg/taint_rule.yaml + the Docker invocation in
 run_semgrep.sh. Open detail: get the dataflow trace into JSON (flag/version), for AEGIS-style
 grounding — the text output already contains it.
+
+---
+
+## Cross-file test across all repos (2026-08-08) — JOERN IS JUSTIFIED (flips the DVNA call)
+
+Tested the dataflow audit on every repo we've used, specifically for CROSS-FILE flows
+(free/OSS Semgrep taint is INTRA-FILE only; interfile needs Semgrep Pro or a CPG like Joern).
+
+| Repo | Architecture | Intra-file Semgrep | Finding |
+|---|---|---|---|
+| DVNA | Express, one controller | 6/6 caught | intra-file; no gap |
+| brokencrystals | NestJS controller->service | **0 across 324 files** | ALL flows cross-file -> MISSED |
+| juice-shop | Express, mixed | 11 (mostly self-contained codefix snippets) | real route->model flows likely missed |
+| Manga_Ryu | FastAPI (Python) + React | 0 | language mismatch (JS rules) -- not measured |
+
+**A/B PROOF (phase3_xfile/ab_*):** the SAME NestJS command-injection flow (@Body -> spawn):
+    inlined in ONE file  -> Semgrep FINDS it   (1)
+    split controller.ts + service.ts -> Semgrep MISSES it (0)
+Same source, same sink; the only variable is the file boundary. Isolates cross-file as the
+cause, not source patterns.
+
+**brokencrystals real flow:** `@Body() data` (app.controller.ts) -> `this.appService
+.launchCommand(data.command)` -> `spawn(exec, args)` (app.service.ts, DIFFERENT FILE).
+Intra-file taint cannot connect them; 0 findings on the whole repo despite it being
+deliberately vulnerable.
+
+**VERDICT — this FLIPS the DVNA conclusion.** DVNA said "Joern not needed" because DVNA is a
+toy with source+sink in one function. Real production frameworks (NestJS, and any
+controller/service or route/model split) put source and sink in DIFFERENT files -> free
+intra-file Semgrep is blind to them. So: Joern (or Semgrep Pro interfile) IS justified, and
+the repo class that needs it is exactly the realistic one. DVNA/juice-codefixes were the
+easy intra-file case; brokencrystals is the real one.
+
+Next: Phase-0-style gate for Joern's JS/TS INTERFILE dataflow on the brokencrystals
+controller->service flow (the phase3_xfile/ab_split A/B is the ready-made test case).

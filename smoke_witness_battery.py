@@ -63,8 +63,12 @@ CASES = [
     # ---- xss ----
     ("YWH strip<> in JS ctx", code(f"{SNIP}/XSS/xss-ethical-hackers-day/vsnippet/"
                                    f"xss-ethical-hackers-day.php"), "xss", True),
-    ("YWH xss no guard", code(f"{SNIP}/XSS/xss-script-tag/vsnippet/4-xss-script-tag.py"),
-     "xss", False),
+    # script-tag: value in a <script> string with a quote-only strip -- vulnerable via
+    # </script> close-tag (context shape D). Was 'expect none' before D existed.
+    ("YWH xss script-context close-tag",
+     code(f"{SNIP}/XSS/xss-script-tag/vsnippet/4-xss-script-tag.py"), "xss", True),
+    ("YWH xss attribute context (csp-bypass)",
+     code(f"{SNIP}/XSS/xss-csp-bypass/vsnippet/25-xss-csp-bypass.php"), "xss", True),
     ("YWH htmlspecialchars in JS (version-ambiguous -> silent)",
      code(f"{SNIP}/XSS/xss-string-outbreak/vsnippet/xss-string-outbreak.php"), "xss", False),
     ("script-only blocklist (html)", 'echo str_replace("<script>","",$_GET["x"]);', "xss", True),

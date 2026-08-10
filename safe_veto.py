@@ -48,6 +48,14 @@ def prove_safe(code, kind):
     if kind == "path" and re.search(r"\b(resolve|realpath)\s*\(", code) \
             and re.search(r"\.startsWith\s*\(", code):
         return "path guard: canonicalise + prefix check"
+    # 4. xss: an HTML-entity encoder is SUFFICIENT -- but ONLY in HTML-body context. In an
+    #    attribute or inside a <script> string the same encoder is wrong, so we only affirm
+    #    safe when neither context shape is present (that is the whole point of XSS context).
+    if kind == "xss" and re.search(
+            r"htmlspecialchars\s*\(|htmlentities\s*\(|escapeHTML|escape_html", code, re.I):
+        from guard_witness import _XSS_ATTR_ECHO, _XSS_IN_SCRIPT
+        if not _XSS_ATTR_ECHO.search(code) and not _XSS_IN_SCRIPT.search(code):
+            return "html-entity encoder in body context"
     return None
 
 

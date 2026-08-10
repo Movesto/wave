@@ -316,6 +316,22 @@ _XSS_HTML_SINK = re.compile(r"innerhtml|document\.write|\.html\s*\(|\becho\b|\bp
 # any HTML-entity encoder (correct for a BODY context)
 _XSS_ENTITY_ENC = re.compile(
     r"htmlspecialchars\s*\(|htmlentities\s*\(|escapehtml|escape_html|_\.escape\(", re.I)
+# (C) user input echoed into a QUOTED HTML attribute: attr="...<?= ... ?>..." (php short-echo,
+# ERB/EJS <%=, mustache {{, template ${). The template expr sits inside the attribute quote.
+_XSS_ATTR_ECHO = re.compile(
+    r"""\b[\w-]+\s*=\s*"[^"<>]*(?:<\?=?|<%=?|\{\{|\$\{)"""
+    r"""|\b[\w-]+\s*=\s*'[^'<>]*(?:<\?=?|<%=?|\{\{|\$\{)""")
+# (D) a <script> block is present, and a quoted value assignment sits inside it
+_XSS_IN_SCRIPT = re.compile(r"<script[\s>][\s\S]*?[\w.]+\s*=\s*['\"]", re.I)
+# a guard that strips ONLY quotes: .replace("'","") / str_replace("'","") / .replace('"','')
+_XSS_QUOTE_STRIP = re.compile(
+    r"""(?:\.replace|str_replace|preg_replace)\s*\(\s*['"/]?\\?['"]""")
+# a reference to untrusted input -- ties the attribute-echo shape to tainted data so it does
+# not flag a safe constant like value="<?= $page_title ?>"
+_XSS_USER_INPUT = re.compile(
+    r"\$_(?:GET|POST|REQUEST|SERVER|COOKIE)\b|request\.(?:args|form|values|GET|POST)"
+    r"|req\.(?:body|query|params)|location\.|window\.name|document\.(?:URL|referrer)"
+    r"|event\.data|\.getParameter", re.I)
 
 
 def _xss_scan(code: str):
@@ -340,6 +356,23 @@ def _xss_scan(code: str):
         return {"kind": "xss", "guard": "blocklists <script> only",
                 "bypass": "<img src=x onerror=alert(1)>",
                 "why": "event-handler / non-script tags bypass a <script>-only blocklist"}
+
+    # (C) user input echoed into a QUOTED HTML ATTRIBUTE with no entity encoder. The value
+    # breaks out of the attribute with a matching quote -- and a BODY encoder (if any) does
+    # not cover attribute context. Only fires when no entity encoder is present at all.
+    if _XSS_ATTR_ECHO.search(c) and _XSS_USER_INPUT.search(c) and not _XSS_ENTITY_ENC.search(c):
+        return {"kind": "xss", "guard": "user input in a quoted HTML attribute, unencoded",
+                "bypass": '"><svg onload=alert(1)>',
+                "why": "the value breaks out of the quoted attribute; body encoding does not "
+                       "cover attribute context"}
+
+    # (D) user input placed inside a <script> block string, guarded ONLY by stripping quotes.
+    # Closing the script tag escapes JS entirely -- the quote strip does nothing to </script>.
+    if _XSS_IN_SCRIPT.search(c) and _XSS_QUOTE_STRIP.search(c) and not _XSS_ANGLE_ONLY.search(c) \
+            and not _XSS_SCRIPT_ONLY.search(c):
+        return {"kind": "xss", "guard": "strips quotes only, value inside a <script> string",
+                "bypass": "</script><img src=x onerror=alert(1)>",
+                "why": "stripping quotes does not stop </script> from closing the script block"}
 
     return None
 

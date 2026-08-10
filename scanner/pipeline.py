@@ -286,6 +286,9 @@ def main():
     ap.add_argument("--adapter", metavar="PATH",
                     help="LoRA adapter to load (overrides WAVE_ADAPTER_PATH and the v12.1b "
                          "default). Use 'base' to force the untrained base model.")
+    ap.add_argument("--codeql", action="store_true",
+                    help="Station 1c: add CodeQL cross-file / interprocedural findings (slower; "
+                         "builds a DB). Needs CODEQL_PATH set to the codeql binary.")
     args = ap.parse_args()
 
     files = gather(args.target)
@@ -294,6 +297,16 @@ def main():
     candidates = []
     for f in files:
         candidates.extend(scan_file(f))
+
+    # --- Station 1c: CodeQL cross-file find (opt-in; catches route->service flows that the
+    #     intra-file taint pass is structurally blind to) ---
+    if args.codeql:
+        try:
+            from codeql_scan import codeql_candidates
+            candidates.extend(codeql_candidates(str(args.target)))
+        except Exception as e:
+            print(f"(Station 1c CodeQL skipped: {e})")
+
     by_fn = defaultdict(list)
     for c in candidates:
         by_fn[(c.file, c.unit, c.line)].append(c)
@@ -321,8 +334,9 @@ def main():
         return
     _next = ("guard-witness + patches only (--no-model)" if args.no_model
              else "Loading model for triage...")
-    print(f"Station 1: {len(by_fn)} taint + {len(recall_hits)} CVE-resemblance candidate(s) "
-          f"in {total} function(s). {_next}\n")
+    n_codeql = len({(c.file, c.unit, c.line) for c in candidates if c.detector == "codeql"})
+    print(f"Station 1: {len(by_fn)} taint/codeql ({n_codeql} codeql) + {len(recall_hits)} "
+          f"CVE-resemblance candidate(s) in {total} function(s). {_next}\n")
 
     # merge recall hits into by_fn so the model triages them too
     for key, hit in recall_hits.items():
@@ -357,17 +371,25 @@ def main():
         model_vuln = p.get("status") in ("vuln", "confirmed")
         taint_cwes = sorted({c.cwe for c in cs})
         rhit = _recall.get((file, unit, line))
-        # confidence: taint+model = strongest; retrieval+model = medium; single signal = review
-        if cs and model_vuln:
+        has_codeql = any(c.detector == "codeql" for c in cs)      # cross-file, sound dataflow
+        has_taint = any(c.detector in ("taint", "pattern") for c in cs)
+        # confidence: a CodeQL interprocedural flow is a strong signal on its own; taint+model
+        # agreeing is strongest; a single signal is review.
+        if has_codeql and model_vuln:
+            confidence = "HIGH (CodeQL flow + model agree)"
+        elif has_taint and model_vuln:
             confidence = "HIGH (taint + model agree)"
         elif rhit and model_vuln:
             confidence = "MEDIUM (CVE-resemblance + model agree)"
+        elif has_codeql:
+            confidence = "MEDIUM (CodeQL cross-file dataflow)"
         elif cs:
             confidence = ("REVIEW (taint flags)" if model is None
                           else "REVIEW (taint flags, model unsure)")
         else:
             confidence = "REVIEW (CVE-resemblance only)"
-        detectors = (["taint"] if cs else []) + (["retrieval"] if rhit else [])
+        detectors = ((["codeql"] if has_codeql else []) + (["taint"] if has_taint else [])
+                     + (["retrieval"] if rhit else []))
         # CWE for the PATCH: the taint CWE is derived from the actual sink (createHash('md5')
         # -> 327, readFileSync(concat) -> 22) and is reliable; the model's CWE is frequently
         # wrong (it labelled md5 as SQLi). So taint wins when it fired; the model's CWE is

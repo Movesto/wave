@@ -155,3 +155,31 @@ easy intra-file case; brokencrystals is the real one.
 
 Next: Phase-0-style gate for Joern's JS/TS INTERFILE dataflow on the brokencrystals
 controller->service flow (the phase3_xfile/ab_split A/B is the ready-made test case).
+
+---
+
+## Python precision measurement (2026-08-09) -- the concern was WRONG; recall is the real gap
+
+Set out to measure the broad PHP/Python rules' precision (false-positive rate) on real safe
+Python, using mined corpus data + the data/clones repos.
+
+What happened:
+- **Clones unusable**: data/clones/* are BARE git repos (only .git packfiles, no working
+  tree; `git -C` even falls back to our repo). No files to scan without repair.
+- **Corpus safe snippets (76 with a request source)**: 0 flagged -- but only 6 had a
+  dangerous sink, so 0 FP is near-trivial.
+- **Contrastive Python pairs with request-source AND sink (16 vuln + 16 safe)**: with a
+  Python SQL sink added, recall was **1/16 vuln**, 0/16 safe.
+
+**FINDING (honest, and it flips the concern):** on real corpus Python the rules barely fire
+(recall ~1/16), so precision (over-flagging) is NOT the binding constraint -- 0 FP everywhere
+is a symptom of UNDER-firing, not accuracy. Root causes: (1) real flows go request -> var ->
+`"...{}".format(var)`/f-string -> `cursor.execute` and Semgrep intra-file taint doesn't track
+the string-building reliably; (2) diverse/indirect sinks; (3) 7/32 corpus records are function
+FRAGMENTS (start mid-function) that break taint scope.
+
+Same shape as the cross-file result: Semgrep taint works on SIMPLE/DIRECT flows (YWH snippets
+14 flagged, DVNA 6/6) but under-fires on realistic Python with indirection. The lever for real
+Python is stronger dataflow (Semgrep Pro interfile, or format-string-aware sink patterns), not
+precision tuning. Sanitizer mechanism itself is sound (prior 5/5 escapeshellarg/basename/
+shlex.quote test). Added py-sql rule (cursor.execute) to rules.yaml regardless.

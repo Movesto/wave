@@ -205,3 +205,18 @@ rules:
     message: JS XSS
     languages: [javascript, typescript]
     severity: ERROR
+  - id: py-sql
+    mode: taint
+    pattern-sources:
+      - pattern: "request.args.get(...)"
+      - pattern: "request.args[...]"
+      - pattern: "request.form.get(...)"
+      - pattern: "request.form[...]"
+      - pattern: "request.values.get(...)"
+    pattern-sinks:
+      - pattern: "$CUR.execute(...)"
+      - pattern: "$CUR.executemany(...)"
+      - pattern: "$CUR.executescript(...)"
+    message: Python SQL injection
+    languages: [python]
+    severity: ERROR

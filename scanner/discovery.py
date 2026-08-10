@@ -25,7 +25,8 @@ logic:
   - Authentication logic flaws (predictable/reusable tokens, auth that can be skipped).
   - Business-logic flaws (a workflow abused: negative amounts, price/quantity tampering, replay).
   - Insecure design / trust-boundary mistakes (trusting a client-supplied role/flag).
-Trace the logic ACROSS files. For each real issue output EXACTLY:
+Trace the logic ACROSS files. Output ONLY the finding blocks -- do NOT restate the task or
+narrate your analysis; go straight to the first FINDING. For each real issue output EXACTLY:
 
 FINDING: <one-line title>
 FILE: <file:line>
@@ -42,6 +43,8 @@ def parse_findings(text):
         f = re.search(r"FINDING:\s*(.+)", blk)
         if not f:
             continue
+        if f.group(1).lstrip().startswith("<") or "one-line title" in f.group(1):
+            continue                   # a template placeholder echoed back, not a real finding
         fl = re.search(r"FILE:\s*(.+)", blk)
         fn = re.search(r"FUNCTION:\s*(.+)", blk)
         why = re.search(r"WHY:\s*([\s\S]+?)(?:\n[A-Z]+:|\Z)", blk)
@@ -140,10 +143,16 @@ def build_project_map(files):
 
 
 # ---- orchestration ------------------------------------------------------------------
+def _is_source(f):
+    s = str(f).replace("\\", "/").lower()
+    return not any(x in s for x in ("node_modules", "/vendor/", "/assets/", ".min.",
+                                    ".bundle.", "/dist/", "/build/"))
+
+
 def _build_corpus(files, budget):
     total = 0
     parts = []
-    for f in sorted(files):
+    for f in sorted(f for f in files if _is_source(f)):
         try:
             code = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -159,6 +168,7 @@ def run_discovery(files, predict, repo_root, budget=CHAR_BUDGET):
     mode 'full' = whole project fed at once; mode 'map' = project too big, fed a structural
     MAP (routes/handlers/auth) so the model can still reason about the WHOLE project's design.
     Each finding's line is snapped to the real definition."""
+    files = [f for f in files if _is_source(f)]
     corpus, total = _build_corpus(files, budget)
     if total <= budget:
         user, mode = corpus, "full"

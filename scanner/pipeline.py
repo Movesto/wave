@@ -292,6 +292,9 @@ def main():
     ap.add_argument("--discover", action="store_true",
                     help="Station 4: model reads the WHOLE project for logic/auth/design flaws "
                          "tools can't find (IDOR, missing authz). REVIEW-tier. Needs the model.")
+    ap.add_argument("--model-id", metavar="HF_ID",
+                    help="Use a full standalone reasoner (e.g. Qwen/Qwen3.5-9B) for triage + "
+                         "discovery instead of the fine-tuned LoRA adapter.")
     args = ap.parse_args()
 
     files = gather(args.target)
@@ -349,16 +352,22 @@ def main():
     # --- Station 2/3: model triage + fix (GPU, only on candidates) ---
     # --no-model skips the GPU entirely: taint + guard-witness + patches only. The witness
     # (Station 2c) is model-independent, so guard-completeness findings still surface.
-    model = None
+    model, is_full = None, False
     if not args.no_model:
-        from eval.inference import QwenLoraPredictor
         from eval.parsers import parse_shape1
-        if args.adapter == "base":
-            adapter, desc = None, "BASE Qwen3-8B (forced by --adapter base)"
+        if args.model_id:
+            from full_model import FullModelPredictor
+            print(f"Loading model: {args.model_id} (full reasoner)\n", flush=True)
+            model = FullModelPredictor(args.model_id)
+            is_full = True
         else:
-            adapter, desc = resolve_adapter(args.adapter)
-        print(f"Loading model: {desc}\n", flush=True)
-        model = QwenLoraPredictor(adapter_path=adapter)
+            from eval.inference import QwenLoraPredictor
+            if args.adapter == "base":
+                adapter, desc = None, "BASE Qwen3-8B (forced by --adapter base)"
+            else:
+                adapter, desc = resolve_adapter(args.adapter)
+            print(f"Loading model: {desc}\n", flush=True)
+            model = QwenLoraPredictor(adapter_path=adapter)
 
     results = []
     for (file, unit, line), cs in by_fn.items():
@@ -367,7 +376,15 @@ def main():
             continue
         model_raw = ""
         if model is not None:
-            model_raw = model.predict(f"<SCAN>\n{code}\n</SCAN>")
+            if is_full:      # a general reasoner needs the task + output format spelled out
+                prompt = (
+                    "You are a security code reviewer. Decide whether this function has a "
+                    "vulnerability. Reason briefly about untrusted input, the sink, and any "
+                    "guard, then end with exactly one line:\nstatus: vuln   (or)   status: safe"
+                    f"\n\n<SCAN>\n{code}\n</SCAN>")
+            else:
+                prompt = f"<SCAN>\n{code}\n</SCAN>"
+            model_raw = model.predict(prompt)
             p = parse_shape1(model_raw)
         else:
             p = {}
@@ -495,7 +512,10 @@ def main():
               f"({len(src)} files) for logic/auth flaws tools can't find...", flush=True)
 
         def _predict(system, user):
-            return model.predict(system + "\n\n" + user)
+            try:                       # full model: proper system role + room to finish
+                return model.predict(user, system=system, max_new=3500)
+            except TypeError:          # LoRA/trained predictor: single-prompt interface
+                return model.predict(system + "\n\n" + user)
 
         dfinds, mode = run_discovery(src, _predict, str(args.target))
         print(f"===== DISCOVERY (REVIEW / human-check -- unverifiable by a tool; {mode} mode) =====")

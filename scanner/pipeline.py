@@ -289,6 +289,9 @@ def main():
     ap.add_argument("--codeql", action="store_true",
                     help="Station 1c: add CodeQL cross-file / interprocedural findings (slower; "
                          "builds a DB). Needs CODEQL_PATH set to the codeql binary.")
+    ap.add_argument("--discover", action="store_true",
+                    help="Station 4: model reads the WHOLE project for logic/auth/design flaws "
+                         "tools can't find (IDOR, missing authz). REVIEW-tier. Needs the model.")
     args = ap.parse_args()
 
     files = gather(args.target)
@@ -482,6 +485,27 @@ def main():
     _ran = ("witness ran" if args.no_model else "model ran")
     print(f"\n{len(high)} confirmed, {len(review)} for review "
           f"({_ran} on {len(by_fn)} functions, not the whole repo).")
+
+    # --- Station 4: discovery pass -- the model reads the WHOLE project for logic/auth/design
+    #     flaws the dataflow tools cannot pattern-match (IDOR, missing authz). REVIEW-tier. ---
+    if args.discover and model is not None:
+        from discovery import run_discovery
+        src = [f for f in files if f.suffix.lower() in (".js", ".ts", ".jsx", ".tsx")]
+        print(f"\nStation 4: discovery -- model reading the whole project "
+              f"({len(src)} files) for logic/auth flaws tools can't find...", flush=True)
+
+        def _predict(system, user):
+            return model.predict(system + "\n\n" + user)
+
+        dfinds, mode = run_discovery(src, _predict, str(args.target))
+        print(f"===== DISCOVERY (REVIEW / human-check -- unverifiable by a tool; {mode} mode) =====")
+        if not dfinds:
+            print("  (no logic/auth/design issues surfaced)")
+        for d in dfinds:
+            loc = f"{d['file']}:{d['line']}" + ("" if d.get("snapped") else "  (line approx)")
+            print(f"\n  {d['title']}")
+            print(f"    where: {loc}   fn: {d.get('function', '?')}")
+            print(f"    why:   {d['why'][:300]}")
 
     if args.fix and high:
         print("\n--- Applying --fix (security review annotations) ---")

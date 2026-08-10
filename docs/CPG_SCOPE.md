@@ -183,3 +183,32 @@ Same shape as the cross-file result: Semgrep taint works on SIMPLE/DIRECT flows 
 Python is stronger dataflow (Semgrep Pro interfile, or format-string-aware sink patterns), not
 precision tuning. Sanitizer mechanism itself is sound (prior 5/5 escapeshellarg/basename/
 shlex.quote test). Added py-sql rule (cursor.execute) to rules.yaml regardless.
+
+---
+
+## CodeQL on the REAL repos (2026-08-09) -- benchmark result HOLDS on production code
+
+Ran CodeQL (javascript-security-extended) on the actual repos, vs Semgrep OSS:
+
+| Repo | Semgrep OSS | CodeQL total | CodeQL real-injection | CodeQL cross-file |
+|---|---|---|---|---|
+| brokencrystals (NestJS) | **0** | 30 | 23 | **18** |
+| DVNA (Node, toy) | 6/6 | 33 | 6 | 1 |
+| juice-shop (mixed) | 11 | 91 | 26 | 9 |
+
+**Headline: brokencrystals 0 -> 30 (18 cross-file).** CodeQL traced controller->service flows
+(email.controller.ts:57 -> email.service.ts:74, file.controller.ts:86 -> file.service.ts:17,
+etc.) that intra-file Semgrep is structurally blind to -- and it recognised NestJS @Body/
+@Controller sources. DVNA has only 1 cross-file finding -> confirms it's a TOY (same-file
+flows), which is why Semgrep did fine on it. juice-shop has 9 real cross-file flows Semgrep
+missed.
+
+**Honest caveat:** the security-EXTENDED suite adds quality-check NOISE (missing-rate-limiting,
+stack-trace-exposure, polynomial-redos): 6/30 on bc, 25/33 on DVNA, 40/91 on juice. Use the
+standard `javascript-security.qls` suite (not -extended) to cut it, or filter to injection
+classes. The real injection signal (23 / 6 / 26) is what matters.
+
+CONCLUSION: the interfile ceiling is resolved on real code, not just the synthetic benchmark.
+CodeQL is the cross-file engine; keep Semgrep for fast intra-file and witness/prove_safe for
+guard reasoning. Wiring CodeQL into scanner/pipeline.py as Station 1c (cross-file find) is the
+concrete next build.

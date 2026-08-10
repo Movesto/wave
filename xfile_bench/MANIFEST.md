@@ -22,3 +22,22 @@ and clear the SAFE ones; free/intra-file Semgrep catches **none** of them (valid
 
 An ideal cross-file scanner scores 4/4 recall + 0 false positives on the SAFE flows.
 Intra-file Semgrep scores 0/4 — it never connects a route source to a service sink.
+
+---
+
+## Engine results (2026-08-09)
+
+| Engine | Type | Recall (of 4 vuln) | False positives (of 3 safe) |
+|---|---|---|---|
+| **CodeQL** (javascript-security-extended) | interprocedural / interfile | **4/4** | **0** |
+| Semgrep OSS (intra-file taint) | intra-file only | 0/4 | 0 |
+
+CodeQL traced every source (handlers.js) across the file boundary to its sink in the
+service file, and correctly cleared the sanitised safe flows (execFile, parameterised
+query, basename). Semgrep OSS caught none — it never crosses a file. **CodeQL is a FREE
+interfile engine that resolves the cross-file ceiling** (no Semgrep Pro / Joern needed).
+
+Reproduce: `codeql database create <db> --language=javascript --source-root=xfile_bench/app`
+then `codeql database analyze <db> codeql/javascript-queries:codeql-suites/javascript-security-extended.qls`.
+Needs the Express wiring in app/index.js so CodeQL recognises req.* as remote sources, and a
+real SQL library (mysql) so a modelled SQL sink exists.

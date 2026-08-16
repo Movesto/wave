@@ -25,6 +25,7 @@ from patch_extract import views_both, changed, alignment
 from star_ts import grounded
 from safe_veto import prove_safe
 from guard_witness import witness_scan
+import resolve as R
 
 _TID = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 ALIGN_MIN = 0.5
@@ -376,15 +377,92 @@ def verifier_check(code, kind, side_label):
     return "inconclusive", None
 
 
+_BT = re.compile(r"`([A-Za-z_][A-Za-z0-9_]{3,})`")
+
+
+def _needed_symbols(trace):
+    """Backticked identifiers the model referenced -- candidates for cross-file retrieval."""
+    return list(dict.fromkeys(_BT.findall(trace or "")))[:12]
+
+
+def _strip_status(t):
+    return re.sub(r"\n?status:\s*(?:vuln|safe|unsure)\s*$", "", (t or "").strip(), flags=re.I)
+
+
+def retrieve_and_finish(item, code, pass1_trace, key, fs, max_hops=3, max_syms=6):
+    """Iterative cross-file retrieval. The model went 'unsure' because a helper is out of view;
+    fetch the symbols it named (usually in a patch-touched file) and let it continue. Repeat up to
+    max_hops, since a resolved helper often calls the NEXT out-of-view helper -- following the chain
+    is exactly the agentic behaviour. The saved trace keeps the reason->retrieve->continue shape."""
+    r = item["r"]
+    user0 = build_user(code, item["cwe"], item["stance"], item["gen_angle"])
+    conv = [{"role": "user", "content": user0}, {"role": "assistant", "content": pass1_trace}]
+    segments = [_strip_status(pass1_trace)]
+    resolved, last, total_usage = {}, pass1_trace, {}
+    verdict = None
+    for _hop in range(max_hops):
+        want = [s for s in _needed_symbols(last) if s not in resolved]
+        try:
+            defs = R.resolve_symbols(r["patch"], r.get("sha"), want, max_syms=max_syms - len(resolved))
+        except Exception:
+            defs = {}
+        defs = {s: d for s, d in defs.items() if s not in resolved}
+        if not defs:
+            break
+        resolved.update(defs)
+        block = "\n\n".join(f"// {s}  (from {p})\n{snip}" for s, (p, snip) in defs.items())
+        segments.append("I can't settle this from the excerpt alone, so I pull in the code that's "
+                        "out of view:\n\n" + block)
+        followup = ("Here are the definitions you referenced, fetched from the repo at that commit:"
+                    "\n\n" + block + "\n\nContinue the SAME analysis: trace the flow into this code "
+                    "and decide. If it now resolves, end with 'status: vuln' or 'status: safe'; if a "
+                    "further helper is still decisive and unseen, name it and end 'status: unsure'. "
+                    "Do not repeat what you already established.")
+        msgs = [{"role": "system", "content": SYSTEM}] + fs + conv \
+            + [{"role": "user", "content": followup}]
+        txt, usage = call(msgs, key)
+        for k, val in (usage or {}).items():
+            if isinstance(val, (int, float)):
+                total_usage[k] = total_usage.get(k, 0) + val
+        p2 = trim_to_verdict(txt)
+        if not p2 or verdict_of(p2) is None:
+            break
+        verdict = verdict_of(p2)
+        conv += [{"role": "user", "content": followup}, {"role": "assistant", "content": p2}]
+        segments.append(p2 if verdict in ("vuln", "safe") else _strip_status(p2))
+        last = p2
+        if verdict in ("vuln", "safe") or len(resolved) >= max_syms:
+            break
+    if not resolved:
+        return None
+    final = "\n\n".join(s for s in segments if s.strip())
+    if verdict_of(final) is None:
+        final += "\nstatus: unsure"
+    aug_code = code + "\n" + "\n".join(snip for _, (_, snip) in resolved.items())
+    return {"trace": final, "usage": total_usage,
+            "retrieved": {s: p for s, (p, _) in resolved.items()}, "aug_code": aug_code}
+
+
 def _gen_item(item, key, fs):
     """Thread worker: generate ONE side's trace and compute all gates. No shared mutable state,
-    so it is safe to run many of these concurrently (the calls are I/O-bound on the API)."""
+    so it is safe to run many of these concurrently (the calls are I/O-bound on the API). When
+    pass 1 is 'unsure', a cross-file retrieval pass tries to resolve the missing code and finish."""
     code = item["code"]
     trace, usage = one_side(code, item["cwe"], key, fs, item["stance"], item["gen_angle"])
-    return {**item, "trace": trace, "usage": usage or {},
-            "v": verdict_of(trace), "g": grounded(trace, code),
-            "d": cites_change(trace, item["cidents"]), "leak": grounding_leak(trace, code),
-            "verif": verifier_check(code, item["kind"], item["label"])}
+    v = verdict_of(trace)
+    aug, retrieved, toks = code, None, dict(usage or {})
+    if v == "unsure":
+        r2 = retrieve_and_finish(item, code, trace, key, fs)
+        if r2:
+            trace, aug, retrieved = r2["trace"], r2["aug_code"], r2["retrieved"]
+            v = verdict_of(trace)
+            for k, val in (r2["usage"] or {}).items():
+                if isinstance(val, (int, float)):
+                    toks[k] = toks.get(k, 0) + val
+    return {**item, "trace": trace, "usage": toks, "retrieved": retrieved,
+            "v": v, "g": grounded(trace, aug),
+            "d": cites_change(trace, item["cidents"]), "leak": grounding_leak(trace, aug),
+            "verif": verifier_check(aug, item["kind"], item["label"])}
 
 
 def main():
@@ -490,6 +568,7 @@ def main():
                     "pair_id": cve, "contrastive": True, "patch": r["patch"],
                     "n_files": r["n_files"], "multi_file": r["multi_file"],
                     "model_verdict": v, "verifier": vtag, "verifier_detail": vdetail,
+                    "retrieved": res.get("retrieved"), "two_pass": bool(res.get("retrieved")),
                     "gates": {"grounded": g, "diff": d, "leak": leak}}
             row = {"messages": [{"role": "user", "content": f"<SCAN>\n{code}\n</SCAN>"},
                                 {"role": "assistant", "content": res["trace"]}], "_meta": meta}
@@ -509,9 +588,10 @@ def main():
             else:
                 bucket = "DROP"                    # right verdict but ungrounded / no diff cite
             side_bucket[label] = bucket; side_v[label] = v
+            tp = "2p" if res.get("retrieved") else "  "
             print(f"  {cve} {label:4s} {res['cwe']:8s} {r['primary_lang']:10s} "
                   f"verdict={str(v):6s} grounded={g} diff={d} leak={str(leak):8s} "
-                  f"verif={vtag:14s} -> {bucket}")
+                  f"verif={vtag:12s} {tp} -> {bucket}")
             if args.show:
                 print("     " + res["trace"].replace("\n", "\n     "))
         if len(rec) == 2:                          # both sides clean -> contrastive PAIR
@@ -549,6 +629,11 @@ def main():
         dump(LEAK, leaks); dump(SINGLES, singles)
         n_safe_single = sum(1 for r in singles if r["_meta"]["label"] == "safe")
         n_strong = sum(1 for r in singles if r["_meta"].get("single_strength") == "strong")
+        allrows = kept_pairs + suspects + unsures + leaks + singles
+        n_2p = sum(1 for r in allrows if r["_meta"].get("two_pass"))
+        n_2p_solved = sum(1 for r in allrows if r["_meta"].get("two_pass")
+                          and r["_meta"].get("model_verdict") in ("vuln", "safe"))
+        print(f"two-pass retrieval: {n_2p} records used it, {n_2p_solved} reached a vuln/safe verdict")
         print(f"\nMISALIGNED {misaligned} | NO-SINK {nosink} | TRIED {tries} -> KEPT {kept} pairs "
               f"({len(kept_pairs)} rec) | SINGLES {len(singles)} ({n_safe_single} safe, "
               f"{n_strong} strong) | SUSPECT {len(suspects)} | UNSURE {len(unsures)} "

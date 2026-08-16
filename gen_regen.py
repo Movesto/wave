@@ -102,9 +102,16 @@ _SINK_FAMILIES = {
                  r"\bsystem\(|popen|\bexec[lv]?\(|execFile|\bspawn|subprocess|shell_exec|"
                  r"passthru|proc_open|Runtime\.getRuntime|os\.system|child_process|\beval\(|`"),
     "xss":      (["CWE-79", "CWE-80", "CWE-83", "CWE-116"],
+                 # XSS sinks are hugely varied (raw DOM, framework templates, HTML string-building),
+                 # so this is deliberately broad: any HTML output, template interpolation, or attribute
+                 # binding where user data could land counts as a plausible sink. Narrow patterns
+                 # false-dropped real template XSS (Vue :src=, JSP <c:out ${}, Ruby #{} into <div>).
                  r"innerHTML|outerHTML|document\.write|dangerouslySetInnerHTML|insertAdjacentHTML|"
-                 r"\.html\(|render|echo\s|print|escapetool|htmlspecialchars|htmlentities|<script|"
-                 r"response\.write|\.send\("),
+                 r"\.html\(|render|echo|print|escapetool|htmlspecialchars|htmlentities|"
+                 r"response\.write|\.send\(|\.text\(|\.append\(|setAttribute|"
+                 r"<[a-zA-Z][a-zA-Z0-9]*[\s/>]|</[a-zA-Z]|"          # any HTML tag
+                 r"\{\{|v-html|v-bind|:[a-z][a-z-]*=\"|<%=?|\$\{|#\{|"  # template interpolation
+                 r"escapeXml|<c:out|<f:|\{%|handlebars|mustache"),
     "path":     (["CWE-22", "CWE-23", "CWE-36", "CWE-59", "CWE-73"],
                  r"\bopen\(|fopen|readFile|writeFile|File\(|Paths\.get|os\.path|\binclude|"
                  r"require\(|\bfs\.|readdir|sendFile|realpath|basename|unlink|__dirname|file_get"),

@@ -51,3 +51,8 @@ scanner/index/
 
 # scratch notes / anything with credentials
 eval/newsome.txt
+
+# API keys / secrets (never commit)
+.env
+.env.local
+*.key

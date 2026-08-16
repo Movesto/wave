@@ -59,6 +59,55 @@ def prove_safe(code, kind):
     return None
 
 
+def _line_containing(code, rx):
+    for ln in code.splitlines():
+        if rx.search(ln):
+            return ln.strip()
+    return None
+
+
+# per-class signature to locate the line a RECOGNISED-sufficient guard lives on
+_GUARD_SIG = {
+    "proto": re.compile(r"""['"](?:__proto__|constructor|prototype)['"]"""),
+    "redirect": re.compile(r"""startsWith\(\s*['"]/"""),
+    "ssrf": re.compile(r"127\.0\.0\.1|localhost|169\.254|0\.0\.0\.0|::1"),
+    "path": re.compile(r"""(?:includes|indexOf|strpos|\breplace)[^\n]*\.\."""),
+    "command": re.compile(r"escapeshellcmd|preg_match|fullmatch"),
+    "xss": re.compile(r"htmlspecialchars|htmlentities|escapeHTML", re.I),
+}
+
+
+def prove_safe_ev(code, kind):
+    """Like prove_safe, but also returns the EXACT code span the proof rests on.
+
+    Returns (reason, evidence) or None. `evidence` is the real call/line prove_safe fired
+    on -- so a composed trace quotes what actually made it safe, not the first random hit.
+    """
+    reason = prove_safe(code, kind)
+    if not reason:
+        return None
+    ev = None
+    if reason.startswith("neutraliser applied"):
+        for _label, rx in _NEUT.get(kind, []):
+            m = re.search(rx, code)
+            if m:
+                # quote the whole source line the call sits on (in-context, not a bare `foo(`)
+                start = code.rfind("\n", 0, m.start()) + 1
+                end = code.find("\n", m.end())
+                ev = code[start:(end if end != -1 else len(code))].strip()
+                break
+    elif reason.startswith("path guard"):
+        ev = _line_containing(code, re.compile(r"\b(?:resolve|realpath)\s*\("))
+    elif reason.startswith("html-entity"):
+        m = re.search(r"htmlspecialchars\s*\([^)]*\)|htmlentities\s*\([^)]*\)"
+                      r"|escapeHTML\s*\([^)]*\)", code, re.I)
+        ev = m.group(0).strip() if m else None
+    elif reason.startswith("guard recognised"):
+        sig = _GUARD_SIG.get(kind)
+        ev = _line_containing(code, sig) if sig else None
+    return reason, ev
+
+
 # ---------- soundness self-test against the real harder cases ----------
 def _selftest():
     import json

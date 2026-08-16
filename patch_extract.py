@@ -76,23 +76,32 @@ def views(patch_file, max_chars=1600):
     return ("\n\n".join(vuln)[:max_chars], "\n".join(fix)[:900])
 
 
-def views_both(patch_file, max_chars=1600):
-    """Return (vuln_code, safe_code): pre-image (vulnerable) and post-image (fixed) of the same
-    security-relevant hunks -- the two sides of a contrastive pair."""
-    vuln, safe, seen = [], [], set()
+def views_both(patch_file, max_chars=4500, max_hunks=12):
+    """Return (vuln_code, safe_code): pre-image (vulnerable) and post-image (fixed) of the
+    security-relevant hunks -- the two sides of a contrastive pair.
+
+    WIDE by default: a real patch often has many hunks (one SQLi fix here had 23), and showing
+    only the single top-ranked hunk left the sink/guard out of view -> the model returned 'unsure'
+    on ~43% of sides. We now include up to `max_hunks` both-present hunks in security-relevance
+    order (up to `max_chars`), grouped by file, so the surrounding code and sibling changed regions
+    are visible. Only regions present on BOTH sides are used, so vuln/safe stay aligned (a pure-
+    addition hunk would leak the fix into the vuln view)."""
+    vuln, safe, last_file, n = [], [], None, 0
     for h in _ranked_hunks(patch_file):
-        if not h["file"] or (h["file"] in seen and len(vuln) > 2):
+        if not h["file"]:
             continue
-        # only regions present on BOTH sides -> vuln and safe describe the SAME code, not a
-        # pure-addition hunk elsewhere in the file (which made pairs semantically misaligned).
         if not (h["pre"].strip() and h["post"].strip()):
             continue
-        seen.add(h["file"])
-        vuln.append(f"// {h['file']}\n{h['pre']}")
-        safe.append(f"// {h['file']}\n{h['post']}")
-        if sum(len(v) for v in vuln) > max_chars:
+        if h["file"] != last_file:                 # file header once; gap marker between regions
+            vuln.append(f"// {h['file']}"); safe.append(f"// {h['file']}")
+            last_file = h["file"]
+        else:
+            vuln.append("// ..."); safe.append("// ...")
+        vuln.append(h["pre"]); safe.append(h["post"])
+        n += 1
+        if sum(len(v) for v in vuln) > max_chars or n >= max_hunks:
             break
-    return ("\n\n".join(vuln)[:max_chars], "\n\n".join(safe)[:max_chars])
+    return ("\n".join(vuln)[:max_chars], "\n".join(safe)[:max_chars])
 
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")

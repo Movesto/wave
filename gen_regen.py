@@ -19,6 +19,7 @@ into a mechanism that surfaces mislabelled records instead of memorising them.
 Reads OPENROUTER_API_KEY from env or .env. Model: deepseek/deepseek-v4-flash-0731.
 """
 import argparse, hashlib, json, os, re, sys, time, urllib.request, urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, "."); sys.path.insert(0, "scanner")
 from patch_extract import views_both, changed, alignment
 from star_ts import grounded
@@ -267,9 +268,22 @@ def verifier_check(code, kind, side_label):
     return "inconclusive", None
 
 
+def _gen_item(item, key, fs):
+    """Thread worker: generate ONE side's trace and compute all gates. No shared mutable state,
+    so it is safe to run many of these concurrently (the calls are I/O-bound on the API)."""
+    code = item["code"]
+    trace, usage = one_side(code, item["cwe"], key, fs, item["stance"], item["gen_angle"])
+    return {**item, "trace": trace, "usage": usage or {},
+            "v": verdict_of(trace), "g": grounded(trace, code),
+            "d": cites_change(trace, item["cidents"]), "leak": grounding_leak(trace, code),
+            "verif": verifier_check(code, item["kind"], item["label"])}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=2)
+    ap.add_argument("--offset", type=int, default=0, help="skip the first OFFSET worklist CVEs (test NEW ones)")
+    ap.add_argument("--workers", type=int, default=6, help="concurrent API calls")
     ap.add_argument("--show", action="store_true", help="print each trace")
     ap.add_argument("--dry", action="store_true", help="print the assembled prompts, NO API calls")
     args = ap.parse_args()
@@ -284,52 +298,79 @@ def main():
     if os.path.exists(GOLD):
         done = {json.loads(l)["_meta"].get("cve") for l in open(GOLD, encoding="utf-8")}
     rows = [json.loads(l) for l in open(WORKLIST, encoding="utf-8")]
-    rows = [r for r in rows if r.get("cve") not in done]
+    rows = [r for r in rows if r.get("cve") not in done][args.offset:]
 
-    kept_pairs, suspects, unsures, leaks = [], [], [], []
-    tries, kept, misaligned = 0, 0, 0
+    # ---- pass 1 (sequential, cheap-local): build the work items past the misalignment filter ----
+    items, misaligned, tries = [], 0, 0
     for r in rows:
         if tries >= args.n:
             break
-        vcode, scode = views_both(r["patch"])
+        vcode, scode = views_both(r["patch"])            # WIDE view -> fed to the model
         if not vcode.strip() or not scode.strip():
             continue
-        al = alignment(vcode, scode)
+        # pair-coherence gate on the NARROW top-hunk view: the wide view legitimately has many
+        # changed lines (low overlap), so alignment must be judged on the core hunk, not the whole
+        # context, or every rich patch gets wrongly skipped.
+        nv, ns = views_both(r["patch"], max_chars=1600, max_hunks=2)
+        al = alignment(nv, ns)
         if al < ALIGN_MIN:
             misaligned += 1
             print(f"  {r['cve']} MISALIGNED (overlap {al:.2f}) -> skip")
             continue
         cidents, _anchor = changed(r["patch"])
         tries += 1
-        cwe = r["cwes"][0]
-        kind = kind_of(r["cwes"])
-        rec = []                                   # the two keep-quality sides (need both)
+        cwe, kind = r["cwes"][0], kind_of(r["cwes"])
         for label, code in (("vuln", vcode), ("safe", scode)):
-            stance = _pick(STANCES, r["cve"], label)
-            gen_angle = _pick(GEN_ANGLES, r["cve"], label, "g")
-            if args.dry:
-                print(f"\n=== {r['cve']} {label} {cwe} {r['primary_lang']} ===")
-                print(build_user(code, cwe, stance, gen_angle))
-                continue
+            items.append({"r": r, "label": label, "code": code, "cwe": cwe, "kind": kind,
+                          "cidents": cidents, "stance": _pick(STANCES, r["cve"], label),
+                          "gen_angle": _pick(GEN_ANGLES, r["cve"], label, "g")})
+
+    if args.dry:
+        for it in items:
+            print(f"\n=== {it['r']['cve']} {it['label']} {it['cwe']} {it['r']['primary_lang']} ===")
+            print(build_user(it["code"], it["cwe"], it["stance"], it["gen_angle"]))
+        return
+
+    # ---- pass 2 (parallel): generate every side concurrently ----
+    print(f"generating {len(items)} sides with {args.workers} workers...")
+    results = {}
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = {ex.submit(_gen_item, it, key, fs): it for it in items}
+        for fu in as_completed(futs):
+            it = futs[fu]
             try:
-                trace, usage = one_side(code, cwe, key, fs, stance, gen_angle)
-            except SystemExit as e:
-                print(e); return
-            v = verdict_of(trace)
-            g = grounded(trace, code)
-            d = cites_change(trace, cidents)
-            leak = grounding_leak(trace, code)     # reasoned from the CVE/advisory, not the code?
-            vtag, vdetail = verifier_check(code, kind, label)
-            meta = {"label": label, "cwe": cwe, "cwes": r["cwes"], "cve": r["cve"],
+                res = fu.result()
+            except Exception as e:
+                print(f"  {it['r']['cve']} {it['label']} ERROR: {e}")
+                continue
+            results[(it["r"]["cve"], it["label"])] = res
+
+    # ---- pass 3 (sequential): route in stable CVE order, pair up KEEP sides ----
+    kept_pairs, suspects, unsures, leaks = [], [], [], []
+    kept, toks = 0, 0
+    seen_cve = []
+    for it in items:
+        if it["r"]["cve"] not in seen_cve:
+            seen_cve.append(it["r"]["cve"])
+    for cve in seen_cve:
+        rec = []
+        for label in ("vuln", "safe"):
+            res = results.get((cve, label))
+            if not res:
+                continue
+            r, code = res["r"], res["code"]
+            v, g, d, leak = res["v"], res["g"], res["d"], res["leak"]
+            vtag, vdetail = res["verif"]
+            toks += (res["usage"] or {}).get("total_tokens", 0)
+            meta = {"label": label, "cwe": res["cwe"], "cwes": r["cwes"], "cve": cve,
                     "language": r["primary_lang"], "source": "regen_deepseek",
-                    "pair_id": r["cve"], "contrastive": True, "patch": r["patch"],
+                    "pair_id": cve, "contrastive": True, "patch": r["patch"],
                     "n_files": r["n_files"], "multi_file": r["multi_file"],
                     "model_verdict": v, "verifier": vtag, "verifier_detail": vdetail,
                     "gates": {"grounded": g, "diff": d, "leak": leak}}
             row = {"messages": [{"role": "user", "content": f"<SCAN>\n{code}\n</SCAN>"},
-                                {"role": "assistant", "content": trace}], "_meta": meta}
+                                {"role": "assistant", "content": res["trace"]}], "_meta": meta}
 
-            # ---- routing ----
             disagree = v is not None and v != "unsure" and v != label
             witness_kills_safe = (label == "safe" and vtag == "witness-bypass")
             if v == "unsure":
@@ -338,18 +379,17 @@ def main():
                 bucket = "SUSPECT"; suspects.append(row)
             elif leak:
                 # right verdict but reached from memorised CVE knowledge, not the code -> reject.
-                # This is the silent poison: it would otherwise pass agree+grounded straight to KEEP.
+                # The silent poison: it would otherwise pass agree+grounded straight to KEEP.
                 bucket = "LEAK"; leaks.append(row)
             elif v == label and g and d:
                 bucket = "KEEP"; rec.append(row)
             else:
                 bucket = "DROP"                    # right verdict but ungrounded / no diff cite
-            print(f"  {r['cve']} {label:4s} {cwe:8s} {r['primary_lang']:10s} "
+            print(f"  {cve} {label:4s} {res['cwe']:8s} {r['primary_lang']:10s} "
                   f"verdict={str(v):6s} grounded={g} diff={d} leak={str(leak):8s} "
                   f"verif={vtag:14s} -> {bucket}")
             if args.show:
-                print("     " + trace.replace("\n", "\n     "))
-
+                print("     " + res["trace"].replace("\n", "\n     "))
         if len(rec) == 2:                          # keep only complete, agreeing pairs
             kept_pairs.extend(rec); kept += 1
 
@@ -365,7 +405,7 @@ def main():
         dump(OUT, kept_pairs); dump(SUSPECT, suspects); dump(UNSURE, unsures); dump(LEAK, leaks)
         print(f"\nMISALIGNED {misaligned} | TRIED {tries} -> KEPT {kept} pairs "
               f"({len(kept_pairs)} rec) | SUSPECT {len(suspects)} | UNSURE {len(unsures)} "
-              f"| LEAK {len(leaks)}")
+              f"| LEAK {len(leaks)} | ~{toks} tok")
         print(f"  KEEP    -> {OUT}")
         print(f"  SUSPECT -> {SUSPECT}   (label-audit: model or witness disagrees with the bridge)")
         print(f"  UNSURE  -> {UNSURE}")

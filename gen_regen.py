@@ -179,7 +179,14 @@ SYSTEM = (
  "context or a sibling input would defeat that same construct, say so and lower your confidence "
  "rather than overstating it. Mention what you seriously considered and ruled out. Be honest when a "
  "sink or helper is out of view: if the snippet does not show enough to prove it either way, the "
- "correct answer is 'unsure' -- say what you would need to see. Do NOT overstate certainty; a "
+ "correct answer is 'unsure' -- say what you would need to see. And treat 'safe' as a POSITIVE "
+ "finding, never the mere absence of one: to conclude safe you must point to the actual operation "
+ "this weakness targets -- the query, the exec, the file access, the check itself -- present in the "
+ "code shown, and explain why it is now defended. If you cannot find that operation here at all "
+ "(you looked and nothing in this excerpt IS the sink the weakness describes), the vulnerable code "
+ "is simply not in view: answer 'unsure' and name the function or file you would need -- do NOT "
+ "settle for 'safe', and do not let a related-but-different construct stand in for the real sink. "
+ "Do NOT overstate certainty; a "
  "hedged, accurate read is worth more than a confident wrong one. Write in plain CONTINUOUS PROSE "
  "-- no section headers, labels, bullet lists, or fixed template, and vary how you open and "
  "structure it. Do not recite textbook definitions. End with EXACTLY one line: 'status: vuln', "
@@ -231,9 +238,39 @@ def load_key():
     raise SystemExit("OPENROUTER_API_KEY not found in env or .env")
 
 
+# A third exemplar: the WRONG-LOCUS case. The code has the SHAPE of the weakness (attacker input
+# reaching a data layer) but the real sink is a helper defined elsewhere, so the honest answer is
+# 'unsure', NOT 'safe' -- it teaches that "no sink found here" means the vuln is out of view, not
+# that the code is safe. Written in a deliberately DIFFERENT prose shape from the vuln/safe golds
+# (it opens from what is NOT shown) so the three exemplars together model varied reasoning, never a
+# single skeleton -- avoiding the templated-form problem the neutral rewrite exists to fix.
+_WRONGLOCUS = {
+    "cwe": "CWE-89",
+    "code": ("// routes/users.js\n"
+             "router.get('/user/:id', async (req, res) => {\n"
+             "  const id = req.params.id;\n"
+             "  const user = await db.users.find(id);\n"
+             "  if (!user) return res.status(404).json({ error: 'not found' });\n"
+             "  res.json(user);\n"
+             "});"),
+    "trace": (
+        "Everything that would decide this is a line I cannot see. `req.params.id` is obviously "
+        "attacker-controlled and it flows straight into `db.users.find(id)`, but `find` is a "
+        "data-access helper defined somewhere else, and nothing in this excerpt is itself a query -- "
+        "there is no string being assembled into SQL, no `execute`, no template literal dropped into "
+        "a statement. If `find` binds `id` as a parameter, this route is fine; if it interpolates it "
+        "into a raw query, it is wide open -- and the entire verdict turns on that one method body I "
+        "was not given. The reachability is real and the exposure is plausible, but a plausible "
+        "exposure is not a finding, and finding no sink in this file is not the same as the code "
+        "being safe. To actually judge it I would need the body of `db.users.find` (or whatever ORM "
+        "or driver it wraps).\nstatus: unsure"),
+}
+
+
 def fewshot():
-    """Two gold exemplars, framed with the SAME neutral request as build_user, so the few-shot
-    models the flowing, no-header style AND the self-reached verdict (no pre-stated answer)."""
+    """Three exemplars (vuln, safe, wrong-locus->unsure), framed with the SAME neutral request as
+    build_user, so the few-shot models the flowing no-header style, the self-reached verdict, AND
+    that 'no sink here' is 'unsure', not 'safe'. Each is a different prose shape on purpose."""
     ex = [json.loads(l) for l in open(GOLD, encoding="utf-8")]
     v = next(e for e in ex if e["_meta"]["label"] == "vuln")
     s = next(e for e in ex if e["_meta"]["label"] == "safe")
@@ -245,6 +282,10 @@ def fewshot():
         gen = _pick(GEN_ANGLES, m["cve"], m["label"], "g")
         msgs.append({"role": "user", "content": build_user(code, m["cwe"], stance, gen)})
         msgs.append({"role": "assistant", "content": e["messages"][1]["content"]})
+    # wrong-locus / unsure exemplar (no gen-angle: nothing to generalize from an unseen sink)
+    wl_stance = _pick(STANCES, "wronglocus", "u")
+    msgs.append({"role": "user", "content": build_user(_WRONGLOCUS["code"], _WRONGLOCUS["cwe"], wl_stance, "")})
+    msgs.append({"role": "assistant", "content": _WRONGLOCUS["trace"]})
     return msgs
 
 

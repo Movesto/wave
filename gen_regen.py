@@ -88,6 +88,65 @@ def grounding_leak(trace, code=""):
     return None
 
 
+# Sink-plausibility: does the extracted code even contain a construct that could be a sink/mechanism
+# for the labelled CWE? If a MODELLED CWE class has NO matching construct, the extraction likely
+# missed the vuln locus (a CWE-434 label on pure rendering code, an SQLi label on code with no
+# query) -> a verdict on it is vacuous, so drop the CVE BEFORE spending an API call. Families cover
+# only classes we can pattern with high recall; anything unmodelled (memory-safety, calc, locking)
+# passes by default -- we never drop what we cannot assess.
+_SINK_FAMILIES = {
+    "sqli":     (["CWE-89", "CWE-564", "CWE-943"],
+                 r"execute|executemany|\bquery\b|cursor|prepare|mysqli|pg_query|sqlite|"
+                 r"SELECT\s|INSERT\s|UPDATE\s|DELETE\s|WHERE\s|\.raw\(|Sprintf|knex|sequelize"),
+    "cmd":      (["CWE-77", "CWE-78", "CWE-88", "CWE-94", "CWE-95"],
+                 r"\bsystem\(|popen|\bexec[lv]?\(|execFile|\bspawn|subprocess|shell_exec|"
+                 r"passthru|proc_open|Runtime\.getRuntime|os\.system|child_process|\beval\(|`"),
+    "xss":      (["CWE-79", "CWE-80", "CWE-83", "CWE-116"],
+                 r"innerHTML|outerHTML|document\.write|dangerouslySetInnerHTML|insertAdjacentHTML|"
+                 r"\.html\(|render|echo\s|print|escapetool|htmlspecialchars|htmlentities|<script|"
+                 r"response\.write|\.send\("),
+    "path":     (["CWE-22", "CWE-23", "CWE-36", "CWE-59", "CWE-73"],
+                 r"\bopen\(|fopen|readFile|writeFile|File\(|Paths\.get|os\.path|\binclude|"
+                 r"require\(|\bfs\.|readdir|sendFile|realpath|basename|unlink|__dirname|file_get"),
+    "upload":   (["CWE-434"],
+                 r"move_uploaded_file|\$_FILES|multipart|unzip|extract|ZipFile|\bsave\(|upload|"
+                 r"\bcopy\(|putObject|createWriteStream|write\("),
+    "ssrf":     (["CWE-918"],
+                 r"requests\.(get|post)|urlopen|urllib|fetch\(|axios|http\.get|HttpClient|"
+                 r"curl_exec|file_get_contents\s*\(\s*\$|\.open\("),
+    "deser":    (["CWE-502"],
+                 r"unserialize|pickle\.load|yaml\.load|Marshal\.load|readObject|ObjectInputStream|"
+                 r"__reduce__|deserialize"),
+    "xxe":      (["CWE-611", "CWE-827"],
+                 r"parseXML|DocumentBuilder|SAXParser|etree|loadXML|XMLReader|simplexml|libxml"),
+    "proto":    (["CWE-1321", "CWE-915"],
+                 r"__proto__|constructor|prototype|\bmerge\(|extend\(|Object\.assign|deepMerge"),
+    "redirect": (["CWE-601"],
+                 r"redirect|Location:|sendRedirect|res\.redirect|header\s*\(\s*[\"']Location|"
+                 r"window\.location"),
+}
+# NOTE: only POSITIVE-SINK classes are gated above -- ones where the vulnerable code MUST contain a
+# dangerous operation (a query, an output sink, an exec, a file op). "Absence-of-control" classes
+# (CSRF-352, missing authz/auth, improper-privilege) are deliberately NOT gated: their vuln is a
+# MISSING check, so the fix ADDS the construct and the pre-fix code legitimately has none -- gating
+# them would false-drop every one. Those CWEs fall through has_plausible_sink as unmodelled -> pass.
+_CWE_SINK = {}
+for _fam, (_cwes, _pat) in _SINK_FAMILIES.items():
+    _rx = re.compile(_pat, re.I)
+    for _c in _cwes:
+        _CWE_SINK[_c] = _rx
+
+
+def has_plausible_sink(code, cwes):
+    """True if `code` contains a plausible sink for at least one labelled CWE we model. CWEs we do
+    NOT model (memory-safety, incorrect-calc, race) return True -- never drop what we can't assess.
+    Only a MODELLED CWE with zero matching constructs returns False = likely mislabel/mis-extraction."""
+    modeled = [c for c in cwes if (c or "").upper() in _CWE_SINK]
+    if not modeled:
+        return True
+    return any(_CWE_SINK[c.upper()].search(code or "") for c in modeled)
+
+
 def kind_of(cwes):
     for c in cwes:
         k = CWE2KIND.get((c or "").upper())
@@ -302,7 +361,7 @@ def main():
     rows = [r for r in rows if r.get("cve") not in done][args.offset:]
 
     # ---- pass 1 (sequential, cheap-local): build the work items past the misalignment filter ----
-    items, misaligned, tries = [], 0, 0
+    items, misaligned, tries, nosink = [], 0, 0, 0
     for r in rows:
         if tries >= args.n:
             break
@@ -317,6 +376,12 @@ def main():
         if al < ALIGN_MIN:
             misaligned += 1
             print(f"  {r['cve']} MISALIGNED (overlap {al:.2f}) -> skip")
+            continue
+        # sink-plausibility: if a modelled CWE has no matching construct in the vuln (pre-fix) code,
+        # the extraction missed the vuln locus -> a verdict would be vacuous. Skip before generating.
+        if not has_plausible_sink(vcode, r["cwes"]):
+            nosink += 1
+            print(f"  {r['cve']} NO-SINK for {r['cwes']} -> skip (extraction missed the vuln locus)")
             continue
         cidents, _anchor = changed(r["patch"])
         tries += 1
@@ -428,7 +493,7 @@ def main():
         dump(LEAK, leaks); dump(SINGLES, singles)
         n_safe_single = sum(1 for r in singles if r["_meta"]["label"] == "safe")
         n_strong = sum(1 for r in singles if r["_meta"].get("single_strength") == "strong")
-        print(f"\nMISALIGNED {misaligned} | TRIED {tries} -> KEPT {kept} pairs "
+        print(f"\nMISALIGNED {misaligned} | NO-SINK {nosink} | TRIED {tries} -> KEPT {kept} pairs "
               f"({len(kept_pairs)} rec) | SINGLES {len(singles)} ({n_safe_single} safe, "
               f"{n_strong} strong) | SUSPECT {len(suspects)} | UNSURE {len(unsures)} "
               f"| LEAK {len(leaks)} | ~{toks} tok")

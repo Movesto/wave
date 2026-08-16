@@ -104,6 +104,7 @@ OUT      = "data/cot/staging/regen_deepseek.jsonl"
 SUSPECT  = "data/cot/staging/regen_suspect.jsonl"
 UNSURE   = "data/cot/staging/regen_unsure.jsonl"
 LEAK     = "data/cot/staging/regen_leak.jsonl"
+SINGLES  = "data/cot/staging/regen_singles.jsonl"
 
 SYSTEM = (
  "You are writing a worked security-analysis example that will TRAIN a vulnerability detector. "
@@ -346,7 +347,7 @@ def main():
             results[(it["r"]["cve"], it["label"])] = res
 
     # ---- pass 3 (sequential): route in stable CVE order, pair up KEEP sides ----
-    kept_pairs, suspects, unsures, leaks = [], [], [], []
+    kept_pairs, suspects, unsures, leaks, singles = [], [], [], [], []
     kept, toks = 0, 0
     seen_cve = []
     for it in items:
@@ -354,6 +355,7 @@ def main():
             seen_cve.append(it["r"]["cve"])
     for cve in seen_cve:
         rec = []
+        side_bucket, side_v = {}, {}               # per-side bucket + model verdict, for singles
         for label in ("vuln", "safe"):
             res = results.get((cve, label))
             if not res:
@@ -385,13 +387,33 @@ def main():
                 bucket = "KEEP"; rec.append(row)
             else:
                 bucket = "DROP"                    # right verdict but ungrounded / no diff cite
+            side_bucket[label] = bucket; side_v[label] = v
             print(f"  {cve} {label:4s} {res['cwe']:8s} {r['primary_lang']:10s} "
                   f"verdict={str(v):6s} grounded={g} diff={d} leak={str(leak):8s} "
                   f"verif={vtag:14s} -> {bucket}")
             if args.show:
                 print("     " + res["trace"].replace("\n", "\n     "))
-        if len(rec) == 2:                          # keep only complete, agreeing pairs
+        if len(rec) == 2:                          # both sides clean -> contrastive PAIR
             kept_pairs.extend(rec); kept += 1
+        elif len(rec) == 1:
+            # one side passed the full KEEP gate but its partner was flagged (suspect/unsure/drop),
+            # so there is no contrastive pair. Don't discard the good side -- save it as a
+            # non-contrastive SINGLE. Teaches detection, not vuln-vs-safe discrimination, so it is a
+            # supplement to pairs; the SAFE singles are the scarce, high-value ones. See north-star.
+            row = rec[0]
+            kept_label = row["_meta"]["label"]
+            partner = "safe" if kept_label == "vuln" else "vuln"
+            # STRENGTH: if the model gave the partner the SAME verdict as this side, it did NOT
+            # discriminate (said e.g. 'safe' to both -> under-flag) -> WEAK. If the partner verdict
+            # differs (typically 'unsure' = out of view), the model discriminated as far as it could
+            # see -> STRONG. Weak singles are kept but flagged so training can down-weight/filter.
+            same = side_v.get(partner) == row["_meta"]["model_verdict"]
+            row["_meta"]["contrastive"] = False
+            row["_meta"]["single"] = True
+            row["_meta"]["partner_bucket"] = side_bucket.get(partner)
+            row["_meta"]["partner_verdict"] = side_v.get(partner)
+            row["_meta"]["single_strength"] = "weak" if same else "strong"
+            singles.append(row)
 
     def dump(path, rows):
         if not rows:
@@ -402,11 +424,16 @@ def main():
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     if not args.dry:
-        dump(OUT, kept_pairs); dump(SUSPECT, suspects); dump(UNSURE, unsures); dump(LEAK, leaks)
+        dump(OUT, kept_pairs); dump(SUSPECT, suspects); dump(UNSURE, unsures)
+        dump(LEAK, leaks); dump(SINGLES, singles)
+        n_safe_single = sum(1 for r in singles if r["_meta"]["label"] == "safe")
+        n_strong = sum(1 for r in singles if r["_meta"].get("single_strength") == "strong")
         print(f"\nMISALIGNED {misaligned} | TRIED {tries} -> KEPT {kept} pairs "
-              f"({len(kept_pairs)} rec) | SUSPECT {len(suspects)} | UNSURE {len(unsures)} "
+              f"({len(kept_pairs)} rec) | SINGLES {len(singles)} ({n_safe_single} safe, "
+              f"{n_strong} strong) | SUSPECT {len(suspects)} | UNSURE {len(unsures)} "
               f"| LEAK {len(leaks)} | ~{toks} tok")
         print(f"  KEEP    -> {OUT}")
+        print(f"  SINGLES -> {SINGLES}   (clean side, partner flagged: detection only, non-contrastive)")
         print(f"  SUSPECT -> {SUSPECT}   (label-audit: model or witness disagrees with the bridge)")
         print(f"  UNSURE  -> {UNSURE}")
         print(f"  LEAK    -> {LEAK}   (rejected: reasoned from CVE/advisory memory, not the code)")

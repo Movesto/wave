@@ -395,11 +395,19 @@ def main():
         pass
     key = None if args.dry else load_key()
     fs = fewshot()
+    # RESUMABLE: skip any CVE already generated in ANY bucket (gold + every output file), so a big
+    # run can be chunked across sessions and re-runs never duplicate or waste an API call.
     done = set()
-    if os.path.exists(GOLD):
-        done = {json.loads(l)["_meta"].get("cve") for l in open(GOLD, encoding="utf-8")}
+    for path in (GOLD, OUT, SUSPECT, UNSURE, LEAK, SINGLES):
+        if os.path.exists(path):
+            for l in open(path, encoding="utf-8"):
+                try:
+                    done.add(json.loads(l)["_meta"].get("cve"))
+                except Exception:
+                    pass
     rows = [json.loads(l) for l in open(WORKLIST, encoding="utf-8")]
     rows = [r for r in rows if r.get("cve") not in done][args.offset:]
+    print(f"worklist {len(rows)} remaining (skipped {len(done)} already-done)")
 
     # ---- pass 1 (sequential, cheap-local): build the work items past the misalignment filter ----
     items, misaligned, tries, nosink = [], 0, 0, 0

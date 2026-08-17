@@ -549,13 +549,31 @@ def build_model_and_tokenizer():
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        CONFIG["model_name"],
-        quantization_config=bnb_config,
-        device_map="auto",
-        trust_remote_code=True,
-    )
+    # Qwen3.5-9B is MULTIMODAL (Qwen3_5ForConditionalGeneration), so the plain causal-LM class
+    # fails to load it; fall back to AutoModelForImageTextToText (same pattern as run_local_model.py
+    # / scanner/full_model.py). We still fine-tune it as a TEXT model: the dataset feeds only
+    # input_ids/attention_mask/labels, the top-level forward routes through the language tower when
+    # no pixel_values are present, and the LoRA target suffixes (q_proj/k_proj/... ) match the LM
+    # tower -- the vision blocks use fused 'qkv'/'proj' names, so they are not adapted.
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            CONFIG["model_name"], quantization_config=bnb_config,
+            device_map="auto", trust_remote_code=True)
+        log("  loaded as causal LM")
+    except Exception as e:
+        log(f"  causal-LM load failed ({str(e)[:90]}); loading as multimodal image-text-to-text")
+        from transformers import AutoModelForImageTextToText
+        model = AutoModelForImageTextToText.from_pretrained(
+            CONFIG["model_name"], quantization_config=bnb_config,
+            device_map="auto", trust_remote_code=True)
+        log("  loaded as multimodal (fine-tuning the language tower only)")
     model.config.use_cache = False
+    # multimodal models keep the LM knobs on a nested text_config -- disable cache there too.
+    if hasattr(model.config, "text_config"):
+        try:
+            model.config.text_config.use_cache = False
+        except Exception:
+            pass
 
     log("Preparing model for k-bit training (gradient checkpointing on, non-reentrant)")
     model = prepare_model_for_kbit_training(

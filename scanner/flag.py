@@ -267,7 +267,7 @@ _JS_NEST_SRC = re.compile(
 # source->callee handoff: tainted value into `<recv>.<method>(<args>)` (optional `this.`). The
 # method body (the real sink) lives in the callee's file; the agent's retrieve tool follows it.
 # Covers NestJS `this.xService.m()` AND Express module-style `netService.runPing()`.
-_JS_XHANDOFF = re.compile(r"(?:this\.)?([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(([^)]*)\)")
+_JS_CALL_HEAD = re.compile(r"(?:this\.)?([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(")
 _XSAFE = {"log", "debug", "warn", "error", "info", "verbose", "map", "filter", "forEach", "push",
           "then", "catch", "json", "send", "status", "emit", "toString", "includes", "indexOf",
           "test", "match", "split", "join", "trim", "slice", "substring", "replace"}
@@ -311,9 +311,16 @@ def _js_taint(code, filename, unit_lookup):
     #    AGENT retrieves the callee and decides. This is the recall lever for NestJS controller->
     #    service flows (the reason a 128-file repo surfaced only 5 candidates).
     flagged_fns = {(c.file, c.unit) for c in out}
-    for m in _JS_XHANDOFF.finditer(code):
-        recv, meth, args = m.group(1), m.group(2), m.group(3)
-        if meth in _XSAFE or recv in _XSAFE_RECV or not args:
+    for m in _JS_CALL_HEAD.finditer(code):        # matches EVERY `recv.meth(` incl. nested calls
+        recv, meth = m.group(1), m.group(2)
+        if meth in _XSAFE or recv in _XSAFE_RECV:
+            continue
+        j, depth = m.end(), 1                     # read balanced args (handles res.json(svc.m(x)))
+        while j < len(code) and depth:
+            depth += (code[j] == "(") - (code[j] == ")")
+            j += 1
+        args = code[m.end():j - 1]
+        if not args.strip():
             continue
         if any(re.search(rf"\b{re.escape(t)}\b", args) for t in taint):
             line = code[:m.start()].count("\n") + 1
@@ -384,6 +391,43 @@ def _js_unit_lookup(code):
     return look
 
 
+def _blank_comments(code, lang):
+    """Replace comment CONTENT with spaces (keeping newlines + length so line numbers are intact),
+    so sink patterns written in comments -- like `// ... readFileSync(BASE + name)` -- are not
+    flagged as real code. Respects string literals (won't blank `//` inside a string)."""
+    out = list(code)
+    i, n, in_str = 0, len(code), None
+    while i < n:
+        c = code[i]
+        if in_str:
+            if c == "\\" and i + 1 < n:
+                i += 2; continue
+            if c == in_str:
+                in_str = None
+            i += 1; continue
+        if c in "\"'`":
+            in_str = c; i += 1; continue
+        if lang != "py" and c == "/" and i + 1 < n and code[i + 1] == "/":
+            while i < n and code[i] != "\n":
+                out[i] = " "; i += 1
+            continue
+        if lang != "py" and c == "/" and i + 1 < n and code[i + 1] == "*":
+            out[i] = out[i + 1] = " "; i += 2
+            while i < n and not (code[i] == "*" and i + 1 < n and code[i + 1] == "/"):
+                if code[i] != "\n":
+                    out[i] = " "
+                i += 1
+            if i + 1 < n:
+                out[i] = out[i + 1] = " "; i += 2
+            continue
+        if lang == "py" and c == "#":
+            while i < n and code[i] != "\n":
+                out[i] = " "; i += 1
+            continue
+        i += 1
+    return "".join(out)
+
+
 def scan_file(path):
     lang = EXT_LANG.get(Path(path).suffix.lower())
     if not lang:
@@ -401,12 +445,13 @@ def scan_file(path):
         look = _py_unit_lookup(tree)
         for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
             out += _py_taint(fn, code, str(path))
-        out += _pattern_scan(code, "py", str(path), look)
+        out += _pattern_scan(_blank_comments(code, "py"), "py", str(path), look)
     else:
-        look = _js_unit_lookup(code)
-        out += _js_taint(code, str(path), look)
-        out += _js_dom_xss(code, str(path), look)
-        out += _pattern_scan(code, "js", str(path), look)
+        look = _js_unit_lookup(code)             # names from original code; scan the comment-blanked
+        scan = _blank_comments(code, "js")        # copy so a sink written in a comment isn't flagged
+        out += _js_taint(scan, str(path), look)
+        out += _js_dom_xss(scan, str(path), look)
+        out += _pattern_scan(scan, "js", str(path), look)
     return out
 
 

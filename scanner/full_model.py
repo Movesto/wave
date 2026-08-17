@@ -36,9 +36,16 @@ class FullModelPredictor:
         self.eos = getattr(self.dec, "eos_token_id", None)
         self.max_new = max_new
 
+    def chat(self, msgs, max_new=None):
+        """Generate from a full message list (multi-turn) -- what the agent loop needs."""
+        return self._generate(msgs, max_new)
+
     def predict(self, prompt, system=None, max_new=None):
         msgs = ([{"role": "system", "content": system}] if system else []) \
             + [{"role": "user", "content": prompt}]
+        return self._generate(msgs, max_new)
+
+    def _generate(self, msgs, max_new=None):
         try:      # Qwen3 thinking models otherwise reason forever and never emit the answer
             text = self.tok.apply_chat_template(msgs, tokenize=False,
                                                 add_generation_prompt=True, enable_thinking=False)

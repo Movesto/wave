@@ -292,6 +292,11 @@ def main():
     ap.add_argument("--discover", action="store_true",
                     help="Station 4: model reads the WHOLE project for logic/auth/design flaws "
                          "tools can't find (IDOR, missing authz). REVIEW-tier. Needs the model.")
+    ap.add_argument("--agent", action="store_true",
+                    help="Station 2 as an AGENTIC LOOP (needs --model-id): the reasoner drives "
+                         "tools -- retrieve(unseen cross-file defs), witness, prove_safe -- "
+                         "reasons multi-turn, then verifies its own fix. Handles multi-file/complex "
+                         "vulns by fetching what it can't see instead of guessing.")
     ap.add_argument("--model-id", metavar="HF_ID",
                     help="Use a full standalone reasoner (e.g. Qwen/Qwen3.5-9B) for triage + "
                          "discovery instead of the fine-tuned LoRA adapter.")
@@ -352,6 +357,9 @@ def main():
     # --- Station 2/3: model triage + fix (GPU, only on candidates) ---
     # --no-model skips the GPU entirely: taint + guard-witness + patches only. The witness
     # (Station 2c) is model-independent, so guard-completeness findings still surface.
+    if args.agent and not args.model_id:
+        print("(--agent needs a full reasoner: pass --model-id Qwen/Qwen3.5-9B. Agent disabled.)")
+        args.agent = False
     model, is_full = None, False
     if not args.no_model:
         from eval.parsers import parse_shape1
@@ -374,18 +382,27 @@ def main():
         code = function_source(file, unit, line)
         if not code:
             continue
-        model_raw = ""
+        model_raw = ""; agent_info = None
         if model is not None:
-            if is_full:      # a general reasoner needs the task + output format spelled out
+            if args.agent and is_full:      # AGENTIC LOOP: the reasoner drives the tools
+                from agent_loop import run_agent
+                cwe_hint = sorted({c.cwe for c in cs})[0] if cs else None
+                a = run_agent(lambda m: model.chat(m), code, cwe=cwe_hint,
+                              project_root=str(args.target), current_file=str(file))
+                p = {"status": a["verdict"]}
+                agent_info = a
+                model_raw = a["final"]
+            elif is_full:      # single-shot: a general reasoner needs the format spelled out
                 prompt = (
                     "You are a security code reviewer. Decide whether this function has a "
                     "vulnerability. Reason briefly about untrusted input, the sink, and any "
                     "guard, then end with exactly one line:\nstatus: vuln   (or)   status: safe"
                     f"\n\n<SCAN>\n{code}\n</SCAN>")
+                model_raw = model.predict(prompt)
+                p = parse_shape1(model_raw)
             else:
-                prompt = f"<SCAN>\n{code}\n</SCAN>"
-            model_raw = model.predict(prompt)
-            p = parse_shape1(model_raw)
+                model_raw = model.predict(f"<SCAN>\n{code}\n</SCAN>")
+                p = parse_shape1(model_raw)
         else:
             p = {}
         model_vuln = p.get("status") in ("vuln", "confirmed")
@@ -431,6 +448,13 @@ def main():
             "model_raw": model_raw.strip(),
             "patch": patch,
         })
+        if agent_info:      # what the agentic loop did: cross-file fetches + its own fix check
+            results[-1]["agent"] = {"retrieved": agent_info["retrieved"],
+                                    "turns": agent_info["turns"],
+                                    "fix_check": agent_info["fix_check"]}
+            if agent_info["retrieved"]:
+                results[-1]["confidence"] += ("  [agent retrieved "
+                                              + ",".join(agent_info["retrieved"]) + "]")
         # localise + validate the guard claim (no model involved)
         g_text, g_line, g_verdict = localise_guard(file, p.get("trace", ""), line)
         results[-1].update({"guard": g_text, "guard_line": g_line,

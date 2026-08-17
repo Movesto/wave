@@ -86,9 +86,13 @@ def _hash(code: str) -> str:
 
 
 def _seen_hashes() -> set[str]:
-    """sha256 of every training <SCAN> prompt, so we can flag leaked pairs."""
+    """sha256 of every training <SCAN> prompt, so we can flag leaked pairs. Covers pilot_clean AND
+    the staging shapes that actually train (the regen corpus lives there) -- otherwise a V2P pair
+    that overlaps a regen training pair would be mislabelled 'unseen' and inflate the number."""
     seen = set()
-    for path in glob.glob(os.path.join(PILOT_DIR, "*.jsonl")):
+    paths = (glob.glob(os.path.join(PILOT_DIR, "*.jsonl"))
+             + glob.glob(os.path.join("data/cot/staging", "regen_*.jsonl")))
+    for path in paths:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()

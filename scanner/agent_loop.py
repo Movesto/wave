@@ -50,6 +50,10 @@ _CUE = re.compile(
     r"need to see|would need|unavailable|is missing|not in (?:the |this )?(?:snippet|excerpt|scope)",
     re.I)
 _BT = re.compile(r"`([A-Za-z_][A-Za-z0-9_]{2,})`")
+# language builtins/keywords the model may try to "retrieve" -- there is no def to fetch, and a
+# 'not found' on these was misread as "the sink doesn't exist -> safe" (the brokencrystals eval).
+_BUILTINS = {"eval", "exec", "system", "require", "import", "Function", "setTimeout", "print",
+             "open", "input", "os", "subprocess", "child_process", "fetch", "XMLHttpRequest"}
 
 
 def _kind_of(cwe):
@@ -60,10 +64,16 @@ def run_tool(name, arg, ctx):
     """Run one tool. ctx carries the accumulated code seen, project_root, current_file, cwe."""
     name = name.lower()
     if name == "retrieve":
+        if arg in _BUILTINS:
+            return (f"retrieve({arg}): `{arg}` is a language builtin, not a project symbol -- there "
+                    f"is no definition to fetch. This does NOT mean the operation is absent; the "
+                    f"taint pass already located it. Reason about the data flowing INTO it.")
         hit = resolve_local(ctx.get("project_root") or ".", arg,
                             exclude_path=ctx.get("current_file"))
         if not hit:
-            return f"retrieve({arg}): not found in the project."
+            return (f"retrieve({arg}): no DEFINITION found (it may be an external import or a "
+                    f"builtin). This does NOT mean the flagged operation is absent -- do not treat "
+                    f"'not found' as proof the code is safe; decide from the flow you can see.")
         ctx["code_seen"] += "\n\n// " + hit["path"] + "\n" + hit["snippet"]   # widen what tools see
         ctx.setdefault("retrieved", {})[arg] = hit["path"]
         return f"retrieve({arg}) -> from {hit['path']}:\n{hit['snippet']}"

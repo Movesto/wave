@@ -207,6 +207,18 @@ def function_source(path, unit, line):
     return _js_function_source(code, line)
 
 
+def sink_window(path, line, ctx=16):
+    """A window of source around `line` -- the fallback when function extraction mis-slices (TS
+    class methods especially) and hands back a function that does NOT contain the flagged sink.
+    Guarantees the model actually sees the dangerous operation instead of a sibling constructor."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return None
+    a, b = max(0, line - ctx), min(len(lines), line + ctx)
+    return "\n".join(lines[a:b])
+
+
 def module_scope(path, body):
     """Module-level definitions the function `body` REFERENCES -- e.g. a denylist/allowlist
     constant like `BLOCKED = ['localhost', '127.0.0.1']` defined at file scope.
@@ -385,6 +397,14 @@ def main():
     results = []
     for (file, unit, line), cs in by_fn.items():
         code = function_source(file, unit, line)
+        # if extraction mis-sliced and the flagged sink isn't even in the snippet (TS class methods
+        # hand back the constructor), show a window around the sink line so the model sees the real
+        # dangerous operation -- otherwise it correctly says "no sink here" and clears a true vuln.
+        sink_txt = (cs[0].sink if cs else "").strip()
+        if sink_txt and (not code or sink_txt not in code):
+            win = sink_window(file, line)
+            if win and sink_txt in win:
+                code = win
         if not code:
             continue
         model_raw = ""; agent_info = None

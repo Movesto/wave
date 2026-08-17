@@ -377,6 +377,11 @@ def main():
             print(f"Loading model: {desc}\n", flush=True)
             model = QwenLoraPredictor(adapter_path=adapter)
 
+    agent_tx = None
+    if args.agent:
+        os.makedirs("data/eval_runs", exist_ok=True)
+        agent_tx = open("data/eval_runs/agent_transcript.txt", "w", encoding="utf-8")
+
     results = []
     for (file, unit, line), cs in by_fn.items():
         code = function_source(file, unit, line)
@@ -387,8 +392,12 @@ def main():
             if args.agent and is_full:      # AGENTIC LOOP: the reasoner drives the tools
                 from agent_loop import run_agent
                 cwe_hint = sorted({c.cwe for c in cs})[0] if cs else None
+                if agent_tx:
+                    agent_tx.write(f"\n{'='*72}\n{file} :: {unit} line {line}  ({cwe_hint})\n")
                 a = run_agent(lambda m: model.chat(m), code, cwe=cwe_hint,
-                              project_root=str(args.target), current_file=str(file))
+                              project_root=str(args.target), current_file=str(file),
+                              sink=(cs[0].sink if cs else None),
+                              log=((lambda s: agent_tx.write(s + "\n")) if agent_tx else None))
                 p = {"status": a["verdict"]}
                 agent_info = a
                 model_raw = a["final"]
@@ -483,6 +492,10 @@ def main():
                     results[-1]["confidence"] = "MEDIUM (witness: guard proven insufficient)"
                 elif "[witness" not in results[-1]["confidence"]:
                     results[-1]["confidence"] += "  [witness: guard insufficient]"
+
+    if agent_tx:
+        agent_tx.close()
+        print(f"(agent transcript -> data/eval_runs/agent_transcript.txt)")
 
     if args.json:
         print(json.dumps(results, indent=2))

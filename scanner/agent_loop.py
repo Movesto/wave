@@ -40,6 +40,16 @@ view, RETRIEVE it -- do not conclude on what you cannot see. When you are certai
 
 _TOOL = re.compile(r"TOOL:\s*(retrieve|witness|prove_safe)\s*\(\s*([^)\n]*?)\s*\)", re.I)
 _VERDICT = re.compile(r"VERDICT:\s*(vulnerable|vuln|safe|unsure)", re.I)
+# A "missing code" CUE: the model says the deciding code isn't in front of it. When we see one, we
+# auto-retrieve the symbols it named (in either order -- "`X` is not found" or "without seeing `X`"),
+# so a forgotten tool call doesn't collapse to 'unsure' (the exact brokencrystals failure: it said
+# "the `AppService` class is not found" and gave up, though the file was right there).
+_CUE = re.compile(
+    r"without seeing|cannot see|can't see|not (?:shown|visible|found|in view|available|provided|"
+    r"present|retriev\w+|in scope)|implementation of|the body of|not defined here|defined elsewhere|"
+    r"need to see|would need|unavailable|is missing|not in (?:the |this )?(?:snippet|excerpt|scope)",
+    re.I)
+_BT = re.compile(r"`([A-Za-z_][A-Za-z0-9_]{2,})`")
 
 
 def _kind_of(cwe):
@@ -87,13 +97,17 @@ def _verify_fix(fix_code, cwe):
 
 
 def run_agent(gen_fn, code, cwe=None, project_root=None, current_file=None,
-              max_turns=4, log=None):
-    """Drive the loop. gen_fn(messages)->str is the model call. Returns a structured result."""
+              max_turns=5, log=None, sink=None):
+    """Drive the loop. gen_fn(messages)->str is the model call. Returns a structured result.
+    `sink` is the taint-flagged construct (line + pattern) -- passed so the model analyses the
+    ACTUAL flagged sink instead of wandering onto an unrelated line."""
     ctx = {"code_seen": code, "project_root": project_root,
            "current_file": current_file, "cwe": cwe}
+    anchor = (f"\n\nA static taint pass flagged this as a possible {cwe or 'vulnerability'} "
+              f"sink: `{sink}`. Center your analysis on THAT operation and what flows into it."
+              if sink else (f"\n(suspected class: {cwe})" if cwe else ""))
     msgs = [{"role": "system", "content": SYSTEM},
-            {"role": "user", "content": f"```\n{code}\n```"
-             + (f"\n(suspected class: {cwe})" if cwe else "")}]
+            {"role": "user", "content": f"```\n{code}\n```" + anchor}]
     final = ""
     for turn in range(max_turns):
         r = gen_fn(msgs)
@@ -107,6 +121,25 @@ def run_agent(gen_fn, code, cwe=None, project_root=None, current_file=None,
                 log(f"--- tool: {m.group(1)}({m.group(2)}) ---\n{res}")
             msgs.append({"role": "user", "content": res + "\n\nContinue."})
             continue
+        # AUTO-RETRIEVE FALLBACK: model reached a verdict but signalled the deciding code was out of
+        # view and never fetched it. If we CAN fetch a symbol it named, do so and give one more turn
+        # instead of accepting 'unsure'. Order-independent: any missing-code cue + backticked symbols.
+        needed = ([s for s in _BT.findall(r) if s not in ctx.get("retrieved", {})]
+                  if _CUE.search(r) else [])
+        if needed and turn < max_turns - 1:
+            got = []
+            for sym in needed[:2]:
+                res = run_tool("retrieve", sym, ctx)
+                if "not found" not in res:
+                    got.append((sym, res))
+            if got:
+                if log:
+                    log(f"--- auto-retrieve {[g[0] for g in got]} (model named but did not fetch) ---")
+                blob = "\n\n".join(g[1] for g in got)
+                msgs.append({"role": "user", "content":
+                             "You referred to code you had not fetched -- here it is:\n\n" + blob
+                             + "\n\nNow reconsider and give your final answer."})
+                continue
         final = r
         break
 

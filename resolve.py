@@ -70,7 +70,7 @@ def touched_files(patch_filename, patch_text=None):
 def _def_line_re(sym):
     s = re.escape(sym)
     return re.compile(
-        r"(?:^|\s)(?:def|function|func|class|interface|struct|type)\s+" + s + r"\b"      # def sym
+        r"(?:^|\s)(?:def|function|func|class|interface|struct|type|enum|trait)\s+" + s + r"\b"  # def sym
         r"|(?:const|let|var|public|private|protected|static|final|async|export)\s+" + s + r"\b"
         r"|\b" + s + r"\s*[:=]\s*(?:async\s*)?(?:function|\([^)]*\)\s*(?:=>|\{|:))"        # sym = fn
         r"|\b" + s + r"\s*\([^)]*\)\s*(?:=>|\{|:|throws|->)"                               # sym(...) {

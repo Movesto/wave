@@ -79,7 +79,17 @@ CONFIG = {
                         # real safe code went 40%->75%. Its safe side was AUTHORED, so
                         # the model memorized the inserted guard string instead of
                         # reading the flow. Do not rewire without REAL post-fix guards.
-                        "shape1_r2vul_clean"],
+                        "shape1_r2vul_clean",
+                        # REGEN 2026-08-17: teaching-quality reasoning REGENERATED from real
+                        # CVE patches (vulnrichment<->morefixes bridge), distribution-matched to
+                        # fill the authz/CSRF/XSS + multi-file gaps v14 lacked. DeepSeek-authored,
+                        # honest-verdict prompt (no templated form: 485/485 unique skeletons),
+                        # two-pass cross-file retrieval, gated + corpus-audited. These are the
+                        # high-value discrimination signal; the r2vul/localize shapes below are
+                        # down-weighted so this leads. regen_deepseek = 154 contrastive PAIRS;
+                        # regen_singles_strong = 176 single sides where the model discriminated
+                        # (partner out-of-view); regen_singles_weak = 234 detection-only (low wt).
+                        "regen_deepseek", "regen_singles_strong", "regen_singles_weak"],
     # Effective sampling weight per shape. shape1 has ~4k records, the others
     # ~170-300. With weights [1,4,4,4] each minibatch sees roughly equal
     # representation despite the 14x raw imbalance. shape1_ts is now vuln-only;
@@ -174,7 +184,7 @@ CONFIG = {
                         # 99.8% of it is multi-file, against ~14% of the TS/JS pairs and
                         # 0% of everything else. A CVE fix diff is one function, so the
                         # paired sets structurally cannot cover cross-file flow.
-                        "shape3_codeql_localize": 1.0,
+                        "shape3_codeql_localize": 0.5,   # REGEN: down-weighted (localization drill)
                         # shape1_contrastive (7,334 pairs) is RETIRED. Its CWEs are
                         # ALL classifier-derived and agree with CISA/OSV on only 19.7%
                         # of 3,215 checked records -- CWE-78 on SSRF fixes, CWE-22 on
@@ -231,7 +241,7 @@ CONFIG = {
                         # property name -- all three produced fixes that were wrong, and
                         # were dropped on a hand-read rather than shipped.
                         "shape_codeql_contrastive": 6.0,
-                        "shape_restructure_r2vul": 10.0,
+                        "shape_restructure_r2vul": 2.0,   # REGEN: down 10->2 (templated r2vul)
                         # shape_restructure_contrastive is NOT listed: it FAILS R4
                         # (no CVE resolvable for any of its 4 pairs) and its source is
                         # degenerate -- `verify` picked out of the construct
@@ -245,12 +255,17 @@ CONFIG = {
                         # TS stays highest: it is the language at MCC 0.000.
                         "shape1_contrastive_ts_osv": 6.0,
                         "shape1_contrastive_js_osv": 5.0,
-                        "shape1_contrastive_r2vul": 4.0,
+                        "shape1_contrastive_r2vul": 1.5,   # REGEN: down 4->1.5 (templated r2vul)
                         "shape1_contrastive_attested": 3.0,
                         # 14,228 single-sided records: correct, provenance-carrying,
                         # zero boilerplate -- but single-sided, so it cannot teach
                         # guard discrimination. Ballast, weighted like shape1.
-                        "shape1_r2vul_clean": 1.0,
+                        "shape1_r2vul_clean": 0.15,  # REGEN: down 1.0->0.15 -- 14k TEMPLATED r2vul
+                        #   discrimination records taught "a form"; this is regen's direct competitor,
+                        #   so held BELOW regen_deepseek's effective weight. Kept nonzero only for
+                        #   CWE/lang coverage; the regen pairs now carry the discrimination reasoning.
+                        #   (localize/fixgen/codeql_localize are AUXILIARY locate/repair tasks, a
+                        #   different skill, so they stay at moderate weight -- not form competitors.)
                         # NOT LISTED, DELIBERATELY: shape1_contrastive_syn_java (1,000
                         # pairs, all Java, synthetic:True). shape_react_syn scored 100%
                         # while real react scored 41.2% in the same eval -- synthetic
@@ -258,8 +273,19 @@ CONFIG = {
                         # VulLLM (2406.03718) auxiliary tasks — localization ("which
                         # line") + fix-generation ("produce the patch"). Force the model
                         # to LOCATE and REPAIR, not just classify -> less pattern-matching.
-                        "shape1_localize": 1.5,
-                        "shape1_fixgen": 1.0,
+                        "shape1_localize": 0.5,   # REGEN: down 1.5->0.5 (localization drill)
+                        "shape1_fixgen": 0.5,     # REGEN: down 1.0->0.5 (fix-gen drill)
+                        # REGEN 2026-08-17: the regenerated teaching corpus leads the discrimination
+                        # signal. regen_deepseek = 154 real contrastive PAIRS (both sides gated,
+                        # distribution-matched, unique skeletons); regen_singles_strong = 176 sides
+                        # where the model discriminated but the partner was out-of-view. High weight
+                        # (small sets, ~300+176 rec) so they are well-represented against the 11k
+                        # down-weighted r2vul, but not so high as to memorize. Weak singles low.
+                        # regen_suspect (label-audit) and regen_unsure (agentic ask-for-X) are NOT
+                        # wired here -- separate datasets for a later agentic phase.
+                        "regen_deepseek": 8.0,
+                        "regen_singles_strong": 6.0,
+                        "regen_singles_weak": 1.0,
                         # Cross-file contrastive pairs are GONE (2026-07-31), not merely
                         # unwired. They were the only cross-file SAFE records, and that
                         # is exactly why they were weighted 8.0 -- the sole counterweight

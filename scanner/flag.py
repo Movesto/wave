@@ -264,11 +264,17 @@ _JS_SRC = re.compile(
 _JS_NEST_SRC = re.compile(
     r"@(?:Body|Query|Param|Headers|Req|Request|UploadedFiles?|Session|Ip|HostParam|RawBody|"
     r"Cookies?|MessageBody|Payload)\s*\([^)]*\)\s*([A-Za-z_$][\w$]*)")
-# controller->service handoff: tainted value into `this.<recv>.<method>(<args>)`. The method body
-# (the real sink) lives in the callee's file; the agent's retrieve tool follows it.
-_JS_XHANDOFF = re.compile(r"this\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(([^)]*)\)")
+# source->callee handoff: tainted value into `<recv>.<method>(<args>)` (optional `this.`). The
+# method body (the real sink) lives in the callee's file; the agent's retrieve tool follows it.
+# Covers NestJS `this.xService.m()` AND Express module-style `netService.runPing()`.
+_JS_XHANDOFF = re.compile(r"(?:this\.)?([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(([^)]*)\)")
 _XSAFE = {"log", "debug", "warn", "error", "info", "verbose", "map", "filter", "forEach", "push",
-          "then", "catch", "json", "send", "status", "emit", "toString", "includes", "indexOf"}
+          "then", "catch", "json", "send", "status", "emit", "toString", "includes", "indexOf",
+          "test", "match", "split", "join", "trim", "slice", "substring", "replace"}
+# receivers that are builtins/response/framework -- not a service whose body we'd need to fetch.
+_XSAFE_RECV = {"console", "JSON", "Math", "Object", "Array", "String", "Number", "Promise", "res",
+               "response", "req", "request", "logger", "Logger", "process", "window", "document",
+               "localStorage", "module", "exports", "Buffer", "Date", "RegExp", "Reflect"}
 JS_SINKS = [
     (re.compile(r"dangerouslySetInnerHTML\s*=\s*\{\{?\s*__html:\s*([^}]+)"), "CWE-79", "xss"),
     (re.compile(r"\.innerHTML\s*=\s*([^;\n]+)|document\.write\(([^)]+)|\.html\(([^)]+)"), "CWE-79", "xss"),
@@ -307,7 +313,7 @@ def _js_taint(code, filename, unit_lookup):
     flagged_fns = {(c.file, c.unit) for c in out}
     for m in _JS_XHANDOFF.finditer(code):
         recv, meth, args = m.group(1), m.group(2), m.group(3)
-        if meth in _XSAFE or not args:
+        if meth in _XSAFE or recv in _XSAFE_RECV or not args:
             continue
         if any(re.search(rf"\b{re.escape(t)}\b", args) for t in taint):
             line = code[:m.start()].count("\n") + 1

@@ -441,7 +441,16 @@ def main():
         has_taint = any(c.detector in ("taint", "pattern") for c in cs)
         # confidence: a CodeQL interprocedural flow is a strong signal on its own; taint+model
         # agreeing is strongest; a single signal is review.
-        if has_codeql and model_vuln:
+        # AGENT cross-file: an 'xflow' handoff has no in-file sink, so the taint+model HIGH rule
+        # can't fire -- yet if the agent RETRIEVED the callee and reasoned it to 'vuln', it followed
+        # the flow to the real sink. Elevate that out of REVIEW (HIGH if it also verified its fix).
+        agent_xfile_vuln = bool(agent_info and agent_info.get("verdict") == "vuln"
+                                and agent_info.get("retrieved"))
+        agent_fix_ok = bool(agent_info and "verified" in (agent_info.get("fix_check") or "").lower())
+        if agent_xfile_vuln and not (has_taint and model_vuln):
+            confidence = ("HIGH (agent traced cross-file flow + fix verified)" if agent_fix_ok
+                          else "MEDIUM (agent traced cross-file flow -> vuln)")
+        elif has_codeql and model_vuln:
             confidence = "HIGH (CodeQL flow + model agree)"
         elif has_taint and model_vuln:
             confidence = "HIGH (taint + model agree)"

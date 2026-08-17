@@ -106,6 +106,11 @@ def extract_def(content, symbol, max_lines=48, max_chars=1600):
                 break
             block.append(ln); j += 1
     snippet = "\n".join(block)
+    # reject a bare variable declaration (e.g. `let textHTML;`): no body, nothing to reason about.
+    # A useful definition has a call signature or an opening block somewhere in it.
+    body = "\n".join(block[:6])
+    if "(" not in body and "{" not in body and len(block) <= 2:
+        return None
     return snippet[:max_chars]
 
 

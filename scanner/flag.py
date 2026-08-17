@@ -258,19 +258,31 @@ def _pattern_scan(code, lang, filename, unit_lookup):
 _JS_SRC = re.compile(
     r"req(uest)?\.(query|params|body|cookies|headers)|ctx\.(query|params|request)|"
     r"event\.(body|queryStringParameters)|location\.(search|hash|href)|process\.argv|window\.location")
+# NestJS delivers request data through PARAMETER DECORATORS, not req.query -- so `@Body() payload`
+# makes `payload` untrusted. Missing these was why Station 1 found 5 candidates in a repo with 83
+# decorated request sources. Capture the parameter name right after the decorator call.
+_JS_NEST_SRC = re.compile(
+    r"@(?:Body|Query|Param|Headers|Req|Request|UploadedFiles?|Session|Ip|HostParam|RawBody|"
+    r"Cookies?|MessageBody|Payload)\s*\([^)]*\)\s*([A-Za-z_$][\w$]*)")
+# controller->service handoff: tainted value into `this.<recv>.<method>(<args>)`. The method body
+# (the real sink) lives in the callee's file; the agent's retrieve tool follows it.
+_JS_XHANDOFF = re.compile(r"this\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(([^)]*)\)")
+_XSAFE = {"log", "debug", "warn", "error", "info", "verbose", "map", "filter", "forEach", "push",
+          "then", "catch", "json", "send", "status", "emit", "toString", "includes", "indexOf"}
 JS_SINKS = [
     (re.compile(r"dangerouslySetInnerHTML\s*=\s*\{\{?\s*__html:\s*([^}]+)"), "CWE-79", "xss"),
     (re.compile(r"\.innerHTML\s*=\s*([^;\n]+)|document\.write\(([^)]+)|\.html\(([^)]+)"), "CWE-79", "xss"),
     (re.compile(r"child_process\.(exec|execSync|spawn|spawnSync)\(([^)]+)|(?<![.\w])exec(Sync)?\(([^)]+)"), "CWE-78", "command injection"),
-    (re.compile(r"\.(query|execute)\(\s*([`\"'][^)]*)"), "CWE-89", "sql injection"),
-    (re.compile(r"fs\.(readFile|readFileSync|createReadStream|writeFile)\(([^),]+)|res\.sendFile\(([^)]+)"), "CWE-22", "path traversal"),
+    (re.compile(r"(?<![.\w])(?:eval|Function)\(\s*([^)]+)"), "CWE-95", "code injection"),
+    (re.compile(r"\.(query|execute|raw|createQueryBuilder)\(\s*([`\"'][^)]*|[^)]*\$\{)"), "CWE-89", "sql injection"),
+    (re.compile(r"fs\.(readFile|readFileSync|createReadStream|writeFile|writeFileSync|unlink)\(([^),]+)|res\.sendFile\(([^)]+)"), "CWE-22", "path traversal"),
     (re.compile(r"(?<![.\w])(fetch|axios(?:\.\w+)?)\(([^)]+)|http\.get\(([^)]+)"), "CWE-918", "ssrf"),
 ]
 
 
 def _js_taint(code, filename, unit_lookup):
     # 1. tainted vars (file-wide, fixpoint)
-    taint = set()
+    taint = set(_JS_NEST_SRC.findall(code))          # NestJS @Body/@Query/... decorated params
     assigns = re.findall(r"(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)", code)
     for _ in range(3):
         before = len(taint)
@@ -288,6 +300,23 @@ def _js_taint(code, filename, unit_lookup):
                 line = code[:m.start()].count("\n") + 1
                 out.append(Candidate(filename, unit_lookup(line), line, cwe, fam, "taint",
                                      m.group(0).strip().replace("\n", " ")[:120]))
+    # 3. CROSS-FILE HANDOFF: a tainted value passed into `this.xService.method(...)` -- the sink is
+    #    in the callee (another file), which intra-file taint can't see. Flag ONE per function so the
+    #    AGENT retrieves the callee and decides. This is the recall lever for NestJS controller->
+    #    service flows (the reason a 128-file repo surfaced only 5 candidates).
+    flagged_fns = {(c.file, c.unit) for c in out}
+    for m in _JS_XHANDOFF.finditer(code):
+        recv, meth, args = m.group(1), m.group(2), m.group(3)
+        if meth in _XSAFE or not args:
+            continue
+        if any(re.search(rf"\b{re.escape(t)}\b", args) for t in taint):
+            line = code[:m.start()].count("\n") + 1
+            unit = unit_lookup(line)
+            if (filename, unit) in flagged_fns:      # already a concrete sink here -> don't double
+                continue
+            flagged_fns.add((filename, unit))
+            out.append(Candidate(filename, unit, line, "CWE-20", "cross-file handoff", "xflow",
+                                 f"tainted -> {recv}.{meth}(...) [sink in callee]"[:120]))
     return out
 
 

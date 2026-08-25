@@ -10,7 +10,7 @@ from dataclasses import asdict
 from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
-from . import registry, oracle, remediate
+from . import registry, oracle, remediate, idor
 from . import auth as auth_mod
 from .models import Finding
 
@@ -47,11 +47,28 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                 findings.append(f)
             else:
                 deferred.append((c, v.get("notes", "not proven at sink")))
+
+        # --- IDOR / authorization (differential oracle; model judges which id-routes are private) ---
+        idor_routes = idor.flag_owned(model, idor.id_param_routes(routes))
+        attackers = auth_mod.synthesize_multi(rt, routes, 2)      # >=1 authenticated attacker
+        atk = attackers[0]["auth"] if attackers else auth
+        for route in idor_routes:
+            c = idor.candidate_for(route)
+            v = idor.prove_idor(rt, route, atk)
+            if v.get("status") == "proven":
+                findings.append(Finding(candidate=c, status="proven", evidence=v["evidence"],
+                                        payload=v["payload"], proven_request=None,
+                                        notes=f"{v['oracle']} via {v['request']} [owner-judgment: needs confirm]"))
+            else:
+                deferred.append((c, v.get("notes", "idor not proven")))
     finally:
         rt.down()                      # free the port before the patch phase re-provisions
 
     if fix and findings:
         for f in findings:
+            if f.candidate.detector == "differential":     # IDOR fix (ownership check) not automated yet
+                f.status = "proven (fix-deferred: authz)"
+                continue
             r = remediate.remediate(target, f.candidate, f, model, routes, hook_list, host_port=host_port)
             f.patch = r.get("patch", "")
             f.gate_a = r.get("gate_a", "")

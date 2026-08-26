@@ -107,6 +107,15 @@ def checkout():
     return {"order_id": 1, "product_id": pid, "quantity": qty, "total": round(price * qty, 2)}
 
 
+@app.route("/profile", methods=["POST"])                # mass-assignment-safe: role is server-fixed, allow-listed
+def profile():
+    d = request.get_json(silent=True) or request.form
+    uname = d.get("username", "guest")
+    prof = {"username": uname, "role": "user",          # role NEVER taken from the client
+            "display_name": d.get("display_name", uname)}   # only allow-listed fields bound
+    return {"username": uname, "profile": prof}
+
+
 @app.route("/")
 def index():
     return {"app": "safeapp"}

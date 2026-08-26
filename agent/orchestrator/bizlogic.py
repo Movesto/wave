@@ -26,6 +26,11 @@ _VALUE_ROUTE = re.compile(
     r"refund|charge|billing|invoice|subscri|donate|deposit", re.I)
 # candidate fields a server should own/compute -- probed empirically (money/authority fields)
 _MONEY = ["price", "amount", "total", "cost", "unit_price", "subtotal", "fee", "value", "balance", "discount"]
+# LEGITIMATE multipliers -- a secure server SHOULD honor these, so lowering them lowers the total by
+# design (you get fewer goods, not underpay). Treating them as tamper candidates is a false positive,
+# so they are excluded from the money-field set (incl. any the model suggests).
+_LEGIT = re.compile(r"quant|qty|count|\bnum\b|items?|seats?|units?|guests?|nights?|days?|weeks?|months?|"
+                    r"people|pax|tickets?|rooms?|passengers?", re.I)
 _HONEST, _LOW = 100.0, 10.0                              # a 10x drop -> the tracked value must fall to ~0.1
 
 
@@ -92,6 +97,7 @@ def prove_tamper(rt, route, auth=None, hint=None):
     trusts that client field. A server that recomputes shows no tracked delta -> DEFER."""
     base = dict((hint or {}).get("body") or {})
     cand = list(dict.fromkeys(list((hint or {}).get("fields") or []) + _MONEY))
+    cand = [f for f in cand if not _LEGIT.search(f)]        # never tamper a legitimate quantity/count multiplier
     baseline = {**base, **{f: _HONEST for f in cand}}
     st0, resp0 = exploit.fire(rt.base_url, route.method, route.path, baseline, headers=dict(auth or {}))
     r0 = _nums(resp0)
@@ -117,4 +123,104 @@ def candidate_for(route):
     return Candidate(file=route.file, unit=route.function or "<handler>", line=0, cwe="CWE-472",
                      family="business logic: web parameter tampering", detector="differential",
                      sink=f"{route.method} {route.path}", provable=True, rank=45,
+                     route_hint=f"{route.method} {route.path}")
+
+
+# ---- Privilege-via-parameter / mass assignment (CWE-915) -------------------------------------------
+# An account create/update endpoint that binds ALL client fields lets the client set a privilege
+# attribute the server should own (role=admin, is_admin=true). Proven differentially: an attacker who
+# injects the field ends up with it PERSISTED, while a control account that never sent it stays default.
+# (Surface avoids register/signup on purpose -- those collide with the rate-limit oracle's sensitive
+# set; profile/account/user-update routes are the clean, non-overlapping mass-assignment surface.)
+_PRIV_ROUTE = re.compile(r"profile|account|\buser(s|_update|-update)?\b|member|settings|\bme\b|onboard", re.I)
+_PRIV_FIELDS = {
+    "role": "admin", "user_type": "admin", "account_type": "admin", "usertype": "admin",
+    "privilege": "admin", "scope": "admin", "permissions": "admin", "grant": "admin", "group": "admin",
+    "is_admin": True, "isadmin": True, "admin": True, "is_staff": True, "isstaff": True,
+    "is_superuser": True, "superuser": True, "verified": True, "is_verified": True,
+    "access_level": 99, "level": 99,
+}
+_PRIV_KEYS = set(_PRIV_FIELDS)
+
+
+def privilege_routes(routes):
+    """POST/PUT routes that create or update an account/profile (mass-assignment surface), excluding
+    the auth endpoints the rate-limit oracle already owns (register/signup/login/reset)."""
+    seen, out = set(), []
+    for r in routes:
+        if (r.method in ("POST", "PUT", "PATCH") and _PRIV_ROUTE.search(r.path)
+                and not re.search(r"login|signin|register|signup|reset|forgot|logout", r.path, re.I)
+                and r.path not in seen):
+            seen.add(r.path)
+            out.append(r)
+    return out
+
+
+def _collect_priv(resp):
+    """Walk a response body (nested dicts/lists) and collect every privilege-ish field -> {lower: value}."""
+    out = {}
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if isinstance(k, str) and k.lower() in _PRIV_KEYS and not isinstance(v, (dict, list)):
+                    out.setdefault(k.lower(), v)
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    try:
+        walk(json.loads(resp or ""))
+    except Exception:
+        pass
+    return out
+
+
+def _matches(readback, sentinel):
+    """Did the readback take the injected privileged value?"""
+    if readback is None:
+        return False
+    if isinstance(sentinel, bool):
+        return readback is True or str(readback).strip().lower() in ("true", "1", "yes")
+    if isinstance(sentinel, (int, float)):
+        try:
+            return float(readback) >= float(sentinel)
+        except (TypeError, ValueError):
+            return False
+    return str(readback).strip().lower() == str(sentinel).strip().lower()
+
+
+def prove_mass_assignment(rt, route, auth=None):
+    """Differential: create a CONTROL account (no privilege fields) and an ATTACK account that injects
+    them. If the attacker's readback shows an injected privilege PERSISTED while the control stays
+    default, the server trusts a client-controlled privilege attribute (mass assignment). Server that
+    strips/ignores privilege fields -> attack readback == control -> DEFER."""
+    from secrets import token_hex
+    tag = token_hex(3)
+    common = {"password": "Wave_123!"}
+    ctrl = {**common, "username": f"wctl{tag}", "email": f"c{tag}@wave.test", "display_name": "ctl"}
+    atk = {**common, "username": f"watk{tag}", "email": f"a{tag}@wave.test", "display_name": "atk", **_PRIV_FIELDS}
+    _, rc = exploit.fire(rt.base_url, route.method, route.path, ctrl, headers=dict(auth or {}))
+    _, ra = exploit.fire(rt.base_url, route.method, route.path, atk, headers=dict(auth or {}))
+    pc, pa = _collect_priv(rc), _collect_priv(ra)
+    if not pa:
+        return {"status": "not-proven", "cwe": "CWE-915",
+                "notes": "no privilege field reflected in the account response -- nothing to compare"}
+    for field, sentinel in _PRIV_FIELDS.items():
+        av, cv = pa.get(field), pc.get(field)
+        if _matches(av, sentinel) and not _matches(cv, sentinel):
+            return {"status": "proven", "cwe": "CWE-915", "oracle": "differential",
+                    "payload": f"{field}={sentinel}", "request": f"{route.method} {route.path}",
+                    "evidence": (f"attacker-injected '{field}={sentinel}' PERSISTED (readback '{field}'={av!r}) "
+                                 f"while a control account that never sent it stays default ('{field}'={cv!r}) "
+                                 f"-- server binds a client-controlled privilege attribute (mass assignment)")}
+    return {"status": "not-proven", "cwe": "CWE-915",
+            "notes": f"no injected privilege persisted (attack readback {pa} == control-default) -- server owns it"}
+
+
+def candidate_for_privilege(route):
+    return Candidate(file=route.file, unit=route.function or "<handler>", line=0, cwe="CWE-915",
+                     family="business logic: privilege-via-parameter (mass assignment)", detector="differential",
+                     sink=f"{route.method} {route.path}", provable=True, rank=48,
                      route_hint=f"{route.method} {route.path}")

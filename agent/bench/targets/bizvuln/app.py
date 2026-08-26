@@ -49,9 +49,24 @@ def order(oid):
     return {"order_id": oid, "product_id": row[0], "total": row[1]}
 
 
+_profiles = {}
+
+
+@app.route("/profile", methods=["POST"])              # CWE-915 mass assignment (client controls role)
+def profile():
+    d = request.get_json(silent=True) or request.form
+    uname = d.get("username", "guest")
+    prof = _profiles.get(uname, {"username": uname, "role": "user"})
+    for k, v in d.items():                            # <-- binds EVERY client field, incl role/is_admin
+        if k != "password":
+            prof[k] = v
+    _profiles[uname] = prof
+    return {"username": uname, "profile": prof}        # reflects the persisted record
+
+
 @app.route("/")
 def index():
-    return {"app": "bizvuln", "routes": ["/product/<id>", "/checkout (POST)", "/order/<id>"]}
+    return {"app": "bizvuln", "routes": ["/product/<id>", "/checkout (POST)", "/order/<id>", "/profile (POST)"]}
 
 
 _init()

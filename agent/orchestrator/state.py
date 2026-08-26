@@ -11,7 +11,7 @@ from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
 from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls, behavioral
-from . import browser_recon
+from . import browser_recon, bizlogic
 from . import auth as auth_mod
 from .models import Finding
 
@@ -116,6 +116,20 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                                         notes=f"{v['oracle']} via {v['request']} [control-judgment: needs confirm]"))
             else:
                 deferred.append((c, v.get("notes", "control present")))
+
+        # --- Business logic (Tier-2; §18): the MODEL proposes an invariant + tamper, a differential
+        # PROVES the violation by a server-confirmed, attacker-favorable delta. First class: web
+        # parameter tampering (CWE-472) -- server trusts a client price/amount it should own. ---
+        biz_hints = bizlogic.propose_hints(model, routes)      # model frames body/fields (hint only)
+        for route in bizlogic.value_routes(routes):
+            c = bizlogic.candidate_for(route)
+            v = bizlogic.prove_tamper(rt, route, auth, hint=biz_hints.get(route.path))
+            if v.get("status") == "proven":
+                findings.append(Finding(candidate=c, status="proven", evidence=v["evidence"],
+                                        payload=v["payload"], proven_request=None,
+                                        notes=f"{v['oracle']} via {v['request']} [logic-judgment: needs confirm]"))
+            else:
+                deferred.append((c, v.get("notes", "no tamper delta")))
 
         # --- OAST async sweep: a callback that arrived AFTER the synchronous proving window (a
         # second-order payload / a delayed worker egress) -- exactly what the sync sink poll misses. ---

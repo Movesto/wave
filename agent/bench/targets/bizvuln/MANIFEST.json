@@ -1,0 +1,7 @@
+{
+  "name": "bizvuln",
+  "stack": "python/flask",
+  "vulns": [
+    {"cwe": "CWE-472", "route": "POST /checkout", "param": "price", "desc": "web parameter tampering (server trusts client-supplied price)"}
+  ]
+}

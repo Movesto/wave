@@ -139,6 +139,15 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                                         notes=f"{v['oracle']} via {v['request']} [logic-judgment: needs confirm]"))
             else:
                 deferred.append((c, v.get("notes", "no privilege persisted")))
+        for route in bizlogic.replay_routes(routes):           # replay / missing idempotency (CWE-837)
+            c = bizlogic.candidate_for_replay(route)
+            v = bizlogic.prove_replay(rt, route, auth)
+            if v.get("status") == "proven":
+                findings.append(Finding(candidate=c, status="proven", evidence=v["evidence"],
+                                        payload=v["payload"], proven_request=None,
+                                        notes=f"{v['oracle']} via {v['request']} [logic-judgment: needs confirm]"))
+            else:
+                deferred.append((c, v.get("notes", "idempotent / no stacking")))
 
         # --- OAST async sweep: a callback that arrived AFTER the synchronous proving window (a
         # second-order payload / a delayed worker egress) -- exactly what the sync sink poll misses. ---

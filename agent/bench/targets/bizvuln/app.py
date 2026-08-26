@@ -64,9 +64,21 @@ def profile():
     return {"username": uname, "profile": prof}        # reflects the persisted record
 
 
+_wallet = {}
+
+
+@app.route("/claim", methods=["POST"])                # CWE-837 replay: no once-only guard, bonus stacks
+def claim():
+    d = request.get_json(silent=True) or request.form
+    u = d.get("username", "guest")
+    _wallet[u] = _wallet.get(u, 0) + 50               # <-- credited on EVERY call; replay stacks the balance
+    return {"username": u, "credited": 50, "balance": _wallet[u]}
+
+
 @app.route("/")
 def index():
-    return {"app": "bizvuln", "routes": ["/product/<id>", "/checkout (POST)", "/order/<id>", "/profile (POST)"]}
+    return {"app": "bizvuln",
+            "routes": ["/product/<id>", "/checkout (POST)", "/order/<id>", "/profile (POST)", "/claim (POST)"]}
 
 
 _init()

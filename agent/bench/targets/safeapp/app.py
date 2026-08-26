@@ -116,6 +116,20 @@ def profile():
     return {"username": uname, "profile": prof}
 
 
+_claimed, _swallet = set(), {}
+
+
+@app.route("/claim", methods=["POST"])                  # replay-safe: once-only per user (idempotent)
+def claim():
+    d = request.get_json(silent=True) or request.form
+    u = d.get("username", "guest")
+    if u in _claimed:                                   # second+ claim is a no-op -> balance does not stack
+        return {"username": u, "credited": 0, "balance": _swallet.get(u, 50), "error": "already claimed"}
+    _claimed.add(u)
+    _swallet[u] = 50
+    return {"username": u, "credited": 50, "balance": 50}
+
+
 @app.route("/")
 def index():
     return {"app": "safeapp"}

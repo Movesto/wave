@@ -224,3 +224,53 @@ def candidate_for_privilege(route):
                      family="business logic: privilege-via-parameter (mass assignment)", detector="differential",
                      sink=f"{route.method} {route.path}", provable=True, rank=48,
                      route_hint=f"{route.method} {route.path}")
+
+
+# ---- Replay / idempotency abuse (CWE-837) ---------------------------------------------------------
+# A once-only operation (claim a bonus, redeem a coupon, cash a referral) with no idempotency guard can
+# be REPLAYED, each time accumulating value in the attacker's favor. Proven by firing the SAME request N
+# times and watching a BALANCE-like field STACK monotonically. A secure server applies it once and
+# plateaus -> no accumulation -> DEFER. Only value/balance fields are tracked (a transaction/receipt id
+# legitimately increments and must not count).
+_REPLAY_ROUTE = re.compile(r"claim|redeem|coupon|voucher|promo|\bgift\b|bonus|reward|referral|cashback", re.I)
+_CUMULATIVE = {"balance", "wallet", "credit", "credits", "points", "funds", "reward", "rewards",
+               "cashback", "bonus", "coins", "tokens", "store_credit"}
+
+
+def replay_routes(routes):
+    """POST/PUT routes for a once-only value operation (claim/redeem/coupon/bonus) -- replay candidates."""
+    seen, out = set(), []
+    for r in routes:
+        if r.method in ("POST", "PUT") and _REPLAY_ROUTE.search(r.path) and r.path not in seen:
+            seen.add(r.path)
+            out.append(r)
+    return out
+
+
+def prove_replay(rt, route, auth=None, n=4):
+    """Fire the SAME operation n times as one identity; if a balance-like field STACKS strictly across
+    replays, the once-only/idempotency control is missing. Plateau (applied once) -> DEFER."""
+    from secrets import token_hex
+    u = "wrep" + token_hex(3)
+    body = {"username": u, "user": u, "code": "WAVE", "coupon": "WAVE"}   # extras harmless; app uses what it needs
+    seqs = {}
+    for _ in range(n):
+        st, resp = exploit.fire(rt.base_url, route.method, route.path, body, headers=dict(auth or {}))
+        for k, v in _nums(resp).items():
+            if k.lower() in _CUMULATIVE:
+                seqs.setdefault(k, []).append(v)
+    for k, vals in seqs.items():
+        if len(vals) == n and all(vals[i] < vals[i + 1] for i in range(n - 1)):
+            return {"status": "proven", "cwe": "CWE-837", "oracle": "differential",
+                    "payload": f"{n}x replay of {route.method} {route.path}", "request": f"{route.method} {route.path}",
+                    "evidence": (f"the same operation replayed {n}x kept stacking '{k}': {vals} -- no once-only/"
+                                 f"idempotency guard, each replay credits the attacker again")}
+    return {"status": "not-proven", "cwe": "CWE-837",
+            "notes": f"no value field accumulated across {n} replays (tracked {seqs or 'none'}) -- once-only guard present"}
+
+
+def candidate_for_replay(route):
+    return Candidate(file=route.file, unit=route.function or "<handler>", line=0, cwe="CWE-837",
+                     family="business logic: replay / missing idempotency", detector="differential",
+                     sink=f"{route.method} {route.path}", provable=True, rank=44,
+                     route_hint=f"{route.method} {route.path}")

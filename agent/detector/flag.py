@@ -32,6 +32,7 @@ PY_SINKS = [
     (re.compile(r"^(requests|httpx|aiohttp)\.(get|post|put|delete|request|head)$"
                 r"|^urllib\.request\.(urlopen|urlretrieve)$|^urlopen$|^urlretrieve$"), "CWE-918", "ssrf", 0),
     (re.compile(r"\.render_template_string$|^render_template_string$|^Markup$"), "CWE-79", "xss", 0),
+    (re.compile(r"^Template$|\.from_string$"), "CWE-1336", "server-side template injection", 0),
 ]
 
 
@@ -236,6 +237,13 @@ PATTERNS = [
     (re.compile(r"(?:res|response)\.redirect\s*\(\s*"
                 r"(?!['\"][^'\"]*['\"]\s*\))[\w.]"),
      "CWE-601", "redirect to a non-literal target (check the guard)", "js", False),
+
+    # Reflected XSS: user input written into an HTML response. Liberal on purpose -- the DOM oracle
+    # (real script execution in a headless browser) filters safe reflections, so an over-flag DEFERS.
+    (re.compile(r"return\s+f?[\"'][^\"']*<[a-zA-Z][^\"']*[\"']\s*\+"),
+     "CWE-79", "reflected XSS: user input concatenated into an HTML response", "py", False),
+    (re.compile(r"(?:res|response)\.(?:send|write|end)\s*\([^)]*\breq\.(?:query|body|params)"),
+     "CWE-79", "reflected XSS: request input written to the response", "js", False),
 
     # Prototype pollution: a recursive descent `merge(target[k], source[k])` (two
     # bracket-indexed args is the deep-merge idiom, rare elsewhere) or a deep merge/set

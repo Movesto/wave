@@ -38,6 +38,7 @@ PROVABLE = {
     "CWE-918",  # SSRF                      -> outbound interceptor
     "CWE-502",  # deserialization          -> deserializer interceptor
     "CWE-1321", # prototype pollution      -> object-proto probe
+    "CWE-1336", # server-side template injection -> template render interceptor
 }
 _DETECTOR_RANK = {"taint": 2, "pattern": 1, "xflow": 1}
 _XFLOW_METH = re.compile(r"->\s*\w+\.(\w+)\(")

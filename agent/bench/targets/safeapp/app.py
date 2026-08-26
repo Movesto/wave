@@ -26,8 +26,15 @@ def _init():
     open("/app/files/readme.txt", "w").write("public readme")
 
 
-@app.route("/login", methods=["POST"])
+_attempts = {}
+
+
+@app.route("/login", methods=["POST"])                  # brute-force-safe: rate limited
 def login():
+    ip = request.remote_addr or "x"
+    _attempts[ip] = _attempts.get(ip, 0) + 1
+    if _attempts[ip] > 5:
+        return {"error": "too many attempts"}, 429
     d = request.get_json(silent=True) or request.form
     session["user"] = d.get("username")
     return {"ok": True}

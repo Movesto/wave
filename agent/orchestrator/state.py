@@ -10,7 +10,7 @@ from dataclasses import asdict
 from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
-from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast
+from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls
 from . import auth as auth_mod
 from .models import Finding
 
@@ -85,6 +85,17 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
             else:
                 deferred.append((c, v.get("notes", "idor not proven")))
 
+        # --- Missing controls (behavioral; §18 #2): rate limiting on credential-sensitive routes ---
+        for route in missing_controls.sensitive_routes(routes):
+            c = missing_controls.candidate_for(route)
+            v = missing_controls.prove_no_ratelimit(rt, route, auth)
+            if v.get("status") == "proven":
+                findings.append(Finding(candidate=c, status="proven", evidence=v["evidence"],
+                                        payload=v["payload"], proven_request=None,
+                                        notes=f"{v['oracle']} via {v['request']} [control-judgment: needs confirm]"))
+            else:
+                deferred.append((c, v.get("notes", "control present")))
+
         # --- OAST async sweep: a callback that arrived AFTER the synchronous proving window (a
         # second-order payload / a delayed worker egress) -- exactly what the sync sink poll misses. ---
         for mk, c in pending_oast:
@@ -100,8 +111,8 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
 
     if fix and findings:
         for f in findings:
-            if f.candidate.detector == "differential" or f.candidate.cwe == "CWE-79":
-                f.status = "proven (fix-deferred)"          # IDOR (authz) / XSS (encoding) fix not automated yet
+            if f.candidate.detector in ("differential", "behavioral") or f.candidate.cwe == "CWE-79":
+                f.status = "proven (fix-deferred)"          # IDOR / rate-limit / XSS fixes not automated yet
                 continue
             r = remediate.remediate(target, f.candidate, f, model, routes, hook_list, host_port=host_port)
             f.patch = r.get("patch", "")

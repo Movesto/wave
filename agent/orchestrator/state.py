@@ -10,9 +10,23 @@ from dataclasses import asdict
 from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
-from . import registry, oracle, remediate, idor
+from . import registry, oracle, remediate, idor, exploit, dom_oracle
 from . import auth as auth_mod
 from .models import Finding
+
+
+def _prove_xss(rt, c, routes, model, auth):
+    """XSS has no backend sink -- the model crafts an executing payload and the headless-browser DOM
+    oracle witnesses it run (mere reflection is not proven). Reflected XSS via the crafted request URL."""
+    import secrets
+    marker = "WZ" + secrets.token_hex(3)
+    for r in exploit.craft_requests(model, c, routes, marker):
+        url = rt.base_url.rstrip("/") + "/" + r["path"].lstrip("/")
+        v = dom_oracle.prove_xss(url, {**(auth or {}), **(r["headers"] or {})}, marker)
+        if v.get("status") == "proven":
+            v["proven_request"], v["request"], v["payload"] = r, f"{r['method']} {r['path']}", r["payload"]
+            return v
+    return {"status": "not-proven", "cwe": "CWE-79", "notes": "no crafted XSS executed in the DOM"}
 
 
 def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False):
@@ -36,14 +50,19 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
     findings, deferred = [], []
     try:
         for c in provable:
-            if not hook_list:
+            if c.cwe == "CWE-79":                          # XSS -> DOM oracle (headless browser)
+                v = _prove_xss(rt, c, routes, model, auth)
+            elif not hook_list:
                 deferred.append((c, "no instrumented sink hook for this app's drivers"))
                 continue
-            v = oracle.prove_injection(rt, hook_list, c, routes, model, strikes=strikes, auth=auth)
+            else:
+                v = oracle.prove_injection(rt, hook_list, c, routes, model, strikes=strikes, auth=auth)
             if v.get("status") == "proven":
-                f = Finding(candidate=c, status="proven", evidence=v["evidence"], payload=v["payload"],
-                            proven_request=v["proven_request"], notes=f"{v['oracle']} via {v['request']}")
-                f.baseline_status = oracle.benign_status(rt, f.proven_request, auth=auth)
+                f = Finding(candidate=c, status="proven", evidence=v["evidence"], payload=v.get("payload", ""),
+                            proven_request=v.get("proven_request"),
+                            notes=f"{v.get('oracle', '')} via {v.get('request', '')}")
+                if v.get("proven_request"):
+                    f.baseline_status = oracle.benign_status(rt, f.proven_request, auth=auth)
                 findings.append(f)
             else:
                 deferred.append((c, v.get("notes", "not proven at sink")))
@@ -66,8 +85,8 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
 
     if fix and findings:
         for f in findings:
-            if f.candidate.detector == "differential":     # IDOR fix (ownership check) not automated yet
-                f.status = "proven (fix-deferred: authz)"
+            if f.candidate.detector == "differential" or f.candidate.cwe == "CWE-79":
+                f.status = "proven (fix-deferred)"          # IDOR (authz) / XSS (encoding) fix not automated yet
                 continue
             r = remediate.remediate(target, f.candidate, f, model, routes, hook_list, host_port=host_port)
             f.patch = r.get("patch", "")

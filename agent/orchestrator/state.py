@@ -11,6 +11,7 @@ from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
 from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls, behavioral
+from . import browser_recon
 from . import auth as auth_mod
 from .models import Finding
 
@@ -42,6 +43,15 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
     provable = [c for c in cands if c.provable]
 
     rt = prov.provision(target, host_port=host_port)
+    recon = browser_recon.recon(rt)                        # browser-as-eyes: live forms/links/egress (§18 #5)
+    if recon.get("routes"):                                # augment the static route table with what the app renders
+        known = {(r.method, r.path) for r in routes}
+        new = [r for r in recon["routes"] if (r.method, r.path) not in known]
+        if new:
+            print(f"[recon] +{len(new)} route(s) from the rendered DOM (forms/links)", flush=True)
+            routes = routes + new
+    if recon.get("egress"):
+        print(f"[recon] external hosts the app contacts: {recon['egress']}", flush=True)
     hook_list = registry.select(rt.profile.deps_text, rt.profile.lang)   # the app's instrumented sinks
     auth = auth_mod.synthesize(rt, routes)                 # session for routes behind login (or {})
     if auth:

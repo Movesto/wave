@@ -10,7 +10,7 @@ from dataclasses import asdict
 from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
-from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls
+from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls, behavioral
 from . import auth as auth_mod
 from .models import Finding
 
@@ -53,6 +53,8 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
         for c in provable:
             if c.cwe == "CWE-79":                          # XSS -> DOM oracle (headless browser)
                 v = _prove_xss(rt, c, routes, model, auth)
+            elif c.cwe == "CWE-1333":                      # ReDoS -> behavioral timing oracle
+                v = behavioral.prove_redos(rt, c, auth)
             elif not hook_list:
                 deferred.append((c, "no instrumented sink hook for this app's drivers"))
                 continue
@@ -111,8 +113,8 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
 
     if fix and findings:
         for f in findings:
-            if f.candidate.detector in ("differential", "behavioral") or f.candidate.cwe == "CWE-79":
-                f.status = "proven (fix-deferred)"          # IDOR / rate-limit / XSS fixes not automated yet
+            if f.candidate.detector in ("differential", "behavioral") or f.candidate.cwe in ("CWE-79", "CWE-1333"):
+                f.status = "proven (fix-deferred)"          # IDOR / rate-limit / XSS / ReDoS fixes not automated
                 continue
             r = remediate.remediate(target, f.candidate, f, model, routes, hook_list, host_port=host_port)
             f.patch = r.get("patch", "")

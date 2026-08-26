@@ -33,6 +33,7 @@ PY_SINKS = [
                 r"|^urllib\.request\.(urlopen|urlretrieve)$|^urlopen$|^urlretrieve$"), "CWE-918", "ssrf", 0),
     (re.compile(r"\.render_template_string$|^render_template_string$|^Markup$"), "CWE-79", "xss", 0),
     (re.compile(r"^Template$|\.from_string$"), "CWE-1336", "server-side template injection", 0),
+    (re.compile(r"^re\.(match|search|fullmatch)$"), "CWE-1333", "regex on user input (ReDoS risk)", 1),
 ]
 
 

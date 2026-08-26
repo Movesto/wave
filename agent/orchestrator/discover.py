@@ -39,6 +39,7 @@ PROVABLE = {
     "CWE-502",  # deserialization          -> deserializer interceptor
     "CWE-1321", # prototype pollution      -> object-proto probe
     "CWE-1336", # server-side template injection -> template render interceptor
+    "CWE-1333", # ReDoS (regex on user input)    -> behavioral timing oracle
 }
 _DETECTOR_RANK = {"taint": 2, "pattern": 1, "xflow": 1}
 _XFLOW_METH = re.compile(r"->\s*\w+\.(\w+)\(")

@@ -2,6 +2,7 @@
 detector flags candidates) but are correctly defended, so every oracle must DEFER -> zero findings.
 This measures the false-positive rate: the whole soundness claim is 'flagged-but-safe -> not proven'."""
 import os
+import re
 
 import requests
 from flask import Flask, request, session
@@ -59,6 +60,13 @@ def fetch():
     if urlparse(url).hostname not in _ALLOWED_HOSTS:
         return {"error": "host not allowed"}, 400
     return {"body": requests.get(url, timeout=3).text[:200]}
+
+
+@app.route("/validate")                                 # ReDoS-safe: linear regex, no nested quantifier
+def validate():
+    s = request.args.get("s", "")
+    ok = re.match(r"^[a-z0-9]+$", s) is not None
+    return {"valid": ok}
 
 
 @app.route("/echo")                                     # XSS-safe: output escaped

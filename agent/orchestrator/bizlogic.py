@@ -392,3 +392,53 @@ def candidate_for_negative(route):
                      family="business logic: unvalidated quantity (negative -> credit)", detector="differential",
                      sink=f"{route.method} {route.path}", provable=True, rank=45,
                      route_hint=f"{route.method} {route.path}")
+
+
+# ---- Fund-flow reversal: negative amount on a money-OUT route (CWE-682) ----------------------------
+# A withdraw/transfer/payout that doesn't require a POSITIVE amount can be REVERSED: a negative amount
+# runs the arithmetic backwards, CREDITING the attacker instead of debiting. Proven by a direction
+# differential: a positive amount leaves the account LOWER, a negative amount leaves it HIGHER. A
+# server that rejects non-positive amounts blocks the negative case -> no reversal -> DEFER.
+_FLOW_ROUTE = re.compile(r"withdraw|transfer|\bsend\b|payout|cashout|remit|\bwire\b|disburse|redeem[-_]?cash", re.I)
+_BAL = {"balance", "wallet", "funds", "account_balance", "new_balance", "available", "credit"}
+
+
+def flow_routes(routes):
+    """POST/PUT money-OUT routes (withdraw/transfer/payout) -- fund-flow-reversal candidates."""
+    seen, out = set(), []
+    for r in routes:
+        if r.method in ("POST", "PUT") and _FLOW_ROUTE.search(r.path) and r.path not in seen:
+            seen.add(r.path)
+            out.append(r)
+    return out
+
+
+def prove_reversal(rt, route, auth=None, amount=50.0):
+    """Direction differential on two fresh accounts: one withdraws a POSITIVE amount (balance should
+    drop), one a NEGATIVE amount (balance should be REJECTED). If the negative case ends up at least
+    `amount` HIGHER than the positive case, the negative amount was credited -- the flow reversed."""
+    from secrets import token_hex
+    hdr = dict(auth or {})
+    un, up = "wneg" + token_hex(3), "wpos" + token_hex(3)
+    _, rn = exploit.fire(rt.base_url, route.method, route.path,
+                         {"username": un, "user": un, "to": un, "amount": -amount}, headers=hdr)
+    _, rp = exploit.fire(rt.base_url, route.method, route.path,
+                         {"username": up, "user": up, "to": up, "amount": amount}, headers=hdr)
+    nn, np_ = _nums(rn), _nums(rp)
+    for k in _BAL:
+        bn, bp = nn.get(k), np_.get(k)
+        if bn is not None and bp is not None and bn > bp + amount:
+            return {"status": "proven", "cwe": "CWE-682", "oracle": "differential",
+                    "payload": f"amount = -{amount}", "request": f"{route.method} {route.path}",
+                    "evidence": (f"a NEGATIVE amount on '{route.path}' left the attacker with MORE '{k}' "
+                                 f"({bn}) than a positive amount did ({bp}) -- a negative withdrawal/transfer "
+                                 f"is CREDITED, not debited (fund-flow reversal; no amount>0 validation)")}
+    return {"status": "not-proven", "cwe": "CWE-682",
+            "notes": "negative amount did not reverse the fund flow (rejected / validated as positive)"}
+
+
+def candidate_for_reversal(route):
+    return Candidate(file=route.file, unit=route.function or "<handler>", line=0, cwe="CWE-682",
+                     family="business logic: fund-flow reversal (negative amount)", detector="differential",
+                     sink=f"{route.method} {route.path}", provable=True, rank=47,
+                     route_hint=f"{route.method} {route.path}")

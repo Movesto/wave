@@ -73,6 +73,19 @@ def profile():
     return {"username": uname, "profile": prof}        # reflects the persisted record
 
 
+_bank = {}
+
+
+@app.route("/withdraw", methods=["POST"])             # CWE-682 negative amount reverses the flow (credit)
+def withdraw():
+    d = request.get_json(silent=True) or request.form
+    u = d.get("username", "guest")
+    amt = float(d.get("amount", 0))
+    bal = _bank.get(u, 1000.0) - amt                  # <-- no amount>0 check; a negative amt INCREASES balance
+    _bank[u] = bal
+    return {"username": u, "balance": bal}            # returns the computed balance only (no echoed amount)
+
+
 _wallet = {}
 
 

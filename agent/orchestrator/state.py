@@ -139,6 +139,15 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                                         notes=f"{v['oracle']} via {v['request']} [logic-judgment: needs confirm]"))
             else:
                 deferred.append((c, v.get("notes", "quantity validated")))
+        for route in bizlogic.flow_routes(routes):             # fund-flow reversal / negative amount (CWE-682)
+            c = bizlogic.candidate_for_reversal(route)
+            v = bizlogic.prove_reversal(rt, route, auth)
+            if v.get("status") == "proven":
+                findings.append(Finding(candidate=c, status="proven", evidence=v["evidence"],
+                                        payload=v["payload"], proven_request=None,
+                                        notes=f"{v['oracle']} via {v['request']} [logic-judgment: needs confirm]"))
+            else:
+                deferred.append((c, v.get("notes", "amount validated")))
         for route in bizlogic.privilege_routes(routes):        # privilege-via-parameter / mass assignment (CWE-915)
             c = bizlogic.candidate_for_privilege(route)
             v = bizlogic.prove_mass_assignment(rt, route, auth)

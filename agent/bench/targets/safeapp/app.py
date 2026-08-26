@@ -116,6 +116,23 @@ def profile():
     return {"username": uname, "profile": prof}
 
 
+_sbank = {}
+
+
+@app.route("/withdraw", methods=["POST"])               # flow-safe: positive amount + funds check
+def withdraw():
+    d = request.get_json(silent=True) or request.form
+    amt = float(d.get("amount", 0))
+    if amt <= 0:                                        # non-positivity rejected -> no reversal
+        return {"error": "amount must be positive"}, 400
+    u = d.get("username", "guest")
+    bal = _sbank.get(u, 1000.0)
+    if amt > bal:
+        return {"error": "insufficient funds"}, 400
+    _sbank[u] = bal - amt
+    return {"username": u, "balance": _sbank[u]}
+
+
 _claimed, _swallet = set(), {}
 
 

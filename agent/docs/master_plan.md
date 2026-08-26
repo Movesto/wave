@@ -490,6 +490,20 @@ classes are complete, and *before* general business logic.
 - **#1 — Developer-psychology (git-blame + `TODO`/`HACK` regex) [nice-to-have, deprioritized].**
   Cheap prioritization hint (which candidate first), but *not* our bottleneck (discovery already
   finds sinks; reaching/proving is the constraint). Add later, don't lead with it.
+- **#5 — Behavioral recon: browser-as-structured-eyes [the human-intuition analog; the hard-frontier
+  channel].** A human forms exploit hypotheses by *watching the running app* — visiting pages, seeing
+  what links do, noticing how state refreshes, which internal vs external calls fire. The model has
+  no vision, and today perceives only code + HTTP text + sink logs — it never explores the live UI.
+  The fix is **not a vision model** (pixels are costly on 16 GB and give *less* than the DOM): reuse
+  the headless browser (already built for the XSS oracle, §5.6) as a **perception/recon channel**.
+  The agent drives it and observes structurally — the **DOM** (every form/input/hidden-field/link/
+  inline-script), **navigation** (what a click does, how URL/state change), and **network** (exactly
+  which internal/external requests each page fires) — and feeds that behavioral map into the model's
+  reasoning to *form hypotheses*. This is the agentic loop applied to **recon**, not just proving one
+  candidate. It matters for the *behavioral* frontier — business logic, auth/session flows, CSRF,
+  client-side, multi-step chains — NOT injection (which code + HTTP already nails, benchmark 100%).
+  A literal vision model stays a separate, deferred option only for visual-only cues (canvas,
+  CSS-hidden elements).
 
 ### One-paragraph summary for the reviewer
 Wave is a local, model-driven security agent built on one bet: **let the model hunt any vulnerability with total freedom, and let runtime demonstration — not the model's word — decide what counts.** The model works a target like a pentester — a closed observe→reason→act loop with a sandbox, search, and memory, guarded against spin by a request-hash backtrack — and confirms in two tiers: **Tier 1**, a pre-built deterministic oracle (instrumented sinks, differential execution, the DOM oracle, eBPF/L7 egress), gives *proven, zero-false-positive* findings; **Tier 2**, a check the model *composes from a shared toolkit of primitives*, gives *demonstrated, confidence-scored* findings for everything else — CSRF, business logic, open redirect, novel shapes — routed to human review. So the model is never limited in *what* it looks for, only in *how strongly* a result is guaranteed; Tier-1 fixes auto-verify through a functionality-preserving dual-gate or are rejected, Tier-2 goes to a human. It is deliberately *incomplete* but never *confidently wrong*, it is *measured* per-tier against a graded benchmark (Tier-1 precision pinned at 1.0, Tier-2 calibration tracked), and it *grows* by promoting reliable Tier-2 checks into hardened Tier-1 oracles.

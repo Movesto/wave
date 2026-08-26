@@ -41,6 +41,14 @@ def login():
     return {"ok": True}
 
 
+@app.route("/change-password", methods=["POST"])        # safe: requires the old password
+def change_password():
+    d = request.get_json(silent=True) or request.form
+    if not d.get("old_password"):
+        return {"error": "old password required"}, 400
+    return {"ok": True}
+
+
 @app.route("/greet")                                    # SSTI-safe: input is CONTEXT, not the template
 def greet():
     name = request.args.get("name", "world")

@@ -107,6 +107,15 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                                         notes=f"{v['oracle']} via {v['request']} [control-judgment: needs confirm]"))
             else:
                 deferred.append((c, v.get("notes", "control present")))
+        for route in missing_controls.change_routes(routes):   # missing old-password check (CWE-620)
+            c = missing_controls.candidate_for_change(route)
+            v = missing_controls.prove_no_oldpassword(rt, route, auth)
+            if v.get("status") == "proven":
+                findings.append(Finding(candidate=c, status="proven", evidence=v["evidence"],
+                                        payload=v["payload"], proven_request=None,
+                                        notes=f"{v['oracle']} via {v['request']} [control-judgment: needs confirm]"))
+            else:
+                deferred.append((c, v.get("notes", "control present")))
 
         # --- OAST async sweep: a callback that arrived AFTER the synchronous proving window (a
         # second-order payload / a delayed worker egress) -- exactly what the sync sink poll misses. ---

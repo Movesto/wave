@@ -19,10 +19,16 @@ _SENSITIVE = re.compile(
 
 
 def sensitive_routes(routes):
-    """POST/PUT routes whose path suggests a credential-sensitive action (rate-limit candidates)."""
+    """POST/PUT routes whose path suggests a SECRET-GUESSING action (rate-limit candidates): login,
+    reset, otp, register, verify. An authenticated password-CHANGE is deliberately EXCLUDED -- its
+    control is old-password verification (change_routes / prove_no_oldpassword), not brute-force
+    throttling; flagging a change route as 'no rate limit' is over-eager (a false positive on a route
+    whose real control is present)."""
+    change = {r.path for r in change_routes(routes)}
     seen, out = set(), []
     for r in routes:
-        if r.method in ("POST", "PUT") and _SENSITIVE.search(r.path) and r.path not in seen:
+        if (r.method in ("POST", "PUT") and _SENSITIVE.search(r.path)
+                and r.path not in change and r.path not in seen):
             seen.add(r.path)
             out.append(r)
     return out
@@ -48,5 +54,43 @@ def prove_no_ratelimit(rt, route, auth=None, n=18):
 def candidate_for(route):
     return Candidate(file=route.file, unit=route.function or "<handler>", line=0, cwe="CWE-307",
                      family="missing rate limiting / brute-force protection", detector="behavioral",
+                     sink=f"{route.method} {route.path}", provable=True, rank=40,
+                     route_hint=f"{route.method} {route.path}")
+
+
+# ---- Missing old-password verification on password change (CWE-620, account takeover) -------------
+# Genuine AUTHENTICATED change only -- deliberately NOT 'reset'/'forgot': a token-based reset flow
+# legitimately has no old password, so matching it would make prove_no_oldpassword emit a false positive.
+_CHANGE = re.compile(r"change[-_]?pass|change[-_]?pwd|update[-_]?pass", re.I)
+
+
+def change_routes(routes):
+    """POST/PUT routes that look like an authenticated password-CHANGE action (not register/login/reset)."""
+    seen, out = set(), []
+    for r in routes:
+        if (r.method in ("POST", "PUT") and _CHANGE.search(r.path)
+                and not re.search(r"login|signin|register|signup", r.path, re.I) and r.path not in seen):
+            seen.add(r.path)
+            out.append(r)
+    return out
+
+
+def prove_no_oldpassword(rt, route, auth=None):
+    """POST a password change WITHOUT the old/current password; if it is accepted (2xx, no
+    'old password required'-style error), the verification is missing -- account-takeover risk."""
+    body = {"password": "WaveNew_123", "new_password": "WaveNew_123", "newPassword": "WaveNew_123"}
+    st, resp = exploit.fire(rt.base_url, route.method, route.path, body, headers=dict(auth or {}))
+    accepted = bool(st and 200 <= st < 300 and
+                    not re.search(r"old|current|required|invalid|denied|forbidden|missing", resp or "", re.I))
+    if accepted:
+        return {"status": "proven", "cwe": "CWE-620", "oracle": "behavioral",
+                "payload": "password change without old password", "request": f"{route.method} {route.path}",
+                "evidence": f"password change at {route.path} accepted WITHOUT the old password (status {st})"}
+    return {"status": "not-proven", "cwe": "CWE-620", "notes": f"old-password check present (status {st})"}
+
+
+def candidate_for_change(route):
+    return Candidate(file=route.file, unit=route.function or "<handler>", line=0, cwe="CWE-620",
+                     family="missing old-password verification on password change", detector="behavioral",
                      sink=f"{route.method} {route.path}", provable=True, rank=40,
                      route_hint=f"{route.method} {route.path}")

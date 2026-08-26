@@ -45,6 +45,16 @@ def login():
     return {"ok": True}
 
 
+@app.route("/change-password", methods=["POST"])        # CWE-620 no old-password verification
+def change_password():
+    d = request.get_json(silent=True) or request.form
+    user = session.get("user", "alice")
+    with engine.begin() as c:
+        c.execute(text("UPDATE users SET password = :p WHERE username = :u"),
+                  {"p": d.get("password"), "u": user})
+    return {"ok": True}
+
+
 @app.route("/search")                                   # CWE-89 SQL injection
 def search():
     q = request.args.get("q", "")

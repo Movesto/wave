@@ -278,16 +278,20 @@ _JS_SSRF = SinkHook(
 try {
   const http = require("http"), https = require("https");
   function wrap(mod, name) {
-    const orig = mod.request;
-    if (typeof orig !== "function") return;
-    mod.request = function (a) {
-      try {
-        var u = (typeof a === "string") ? a
-              : (a && (a.href || ((a.protocol || "http:") + "//" + (a.hostname || a.host || "") + (a.path || "")))) || "";
-        console.log("WAVE-SINK-SSRF:: " + name + " " + String(u));
-      } catch (e) {}
-      return orig.apply(this, arguments);
-    };
+    // wrap BOTH request and get: http.get uses its OWN captured reference to the original request,
+    // so reassigning request alone misses http.get(url).
+    ["request", "get"].forEach((fn) => {
+      const orig = mod[fn];
+      if (typeof orig !== "function") return;
+      mod[fn] = function (a) {
+        try {
+          var u = (typeof a === "string") ? a
+                : (a && (a.href || ((a.protocol || "http:") + "//" + (a.hostname || a.host || "") + (a.path || "")))) || "";
+          console.log("WAVE-SINK-SSRF:: " + name + " " + String(u));
+        } catch (e) {}
+        return orig.apply(this, arguments);
+      };
+    });
   }
   wrap(http, "http"); wrap(https, "https");
   if (typeof global.fetch === "function") {

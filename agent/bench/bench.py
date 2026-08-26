@@ -21,12 +21,22 @@ def run_target(tdir, fix=False):
     t0 = time.time()
     res = state.run_loop(str(tdir), fix=fix)
     dt = time.time() - t0
-    found = {f.candidate.cwe for f in res["findings"]}
+    findings = res["findings"]
+    found = {f.candidate.cwe for f in findings}
+    print(f"\n{'=' * 68}\nTARGET {man['name']}  ({man['stack']})   [{dt:.0f}s]")
+
+    if man.get("safe") or not truth:                       # SECURE control -> any finding is a FALSE POSITIVE
+        fp = len(findings)
+        prec = 1.0 if fp == 0 else 0.0
+        print(f"  SAFE control: expected 0 vulns, found {fp} -> {'PASS (0 FP)' if fp == 0 else 'FAIL'}  precision={prec:.0%}")
+        for f in findings:
+            print(f"    [FALSE POSITIVE] {f.candidate.cwe} {f.candidate.loc()} -- {f.notes}")
+        print(f"  summary: {res['summary']}")
+        return {"name": man["name"], "safe": True, "false_positives": fp, "precision": prec, "secs": dt}
+
     hit, extra, missed = truth & found, found - truth, truth - found
     recall = len(hit) / len(truth) if truth else 0.0
     prec = len(hit) / len(found) if found else 1.0
-
-    print(f"\n{'=' * 68}\nTARGET {man['name']}  ({man['stack']})   [{dt:.0f}s]")
     print(f"  truth={len(truth)}  proven-classes={len(found)}  recall={recall:.0%}  precision={prec:.0%}")
     for v in man["vulns"]:
         mark = "PROVEN" if v["cwe"] in found else " MISS "
@@ -44,9 +54,12 @@ def main():
     ap.add_argument("--fix", action="store_true")
     a = ap.parse_args()
     r = run_target(BENCH / a.target, fix=a.fix)
-    print(f"\nSCORE {r['name']}: recall {r['recall']:.0%}, precision {r['precision']:.0%}, {r['secs']:.0f}s")
-    if r["missed"]:
-        print(f"  missed: {r['missed']}")
+    if r.get("safe"):
+        print(f"\nSCORE {r['name']}: {r['false_positives']} false positives, precision {r['precision']:.0%}, {r['secs']:.0f}s")
+    else:
+        print(f"\nSCORE {r['name']}: recall {r['recall']:.0%}, precision {r['precision']:.0%}, {r['secs']:.0f}s")
+        if r["missed"]:
+            print(f"  missed: {r['missed']}")
 
 
 if __name__ == "__main__":

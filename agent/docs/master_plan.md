@@ -305,9 +305,26 @@ Only one model resident at a time; the orchestrator owns lifecycle.
 
 ---
 
-## 13. Evaluation harness & benchmark (how we *prove* it works — build this FIRST)
+## 13. Evaluation harness & benchmark (how we *prove* it works)
 
-The previous plans had no way to demonstrate complex-vuln capability; a passing hand-run on VAmPI's easy SQLi proves almost nothing. This is built **before** the loop, so every subsequent change is measured against the real goal.
+**STATUS: BUILT (`agent/bench/`).** A scoring harness (`bench.py`) runs the loop on controlled
+targets and scores findings vs a per-target `MANIFEST.json` ground truth. Controlled targets boot
+cleanly and expose one *discoverable* vuln per class, so every oracle gets full-loop e2e coverage +
+a measured recall/precision number. Targets so far:
+- **`pyvuln`** (Flask): SQLi/command/path/SSRF/SSTI/eval/XSS/IDOR → **recall 100%, precision 100%** —
+  the whole Tier-1 catalog proven through the live loop (SSTI via the Jinja hook, XSS via the
+  headless-browser DOM oracle).
+- **`nodevuln`** (Express): eval/command/path/SSRF/deser/XSS → validates the JS-side hooks.
+- **`safeapp`** (Flask, secure control): routes that *look* vulnerable but are defended → any finding
+  is a **false positive**; measures the zero-FP claim empirically.
+
+The benchmark already earned its keep: it surfaced and got fixed three real oracle/coverage bugs
+(SSRF hostname case-sensitivity; Flask `<int:id>` param normalization; Node `http.get` not wrapped)
+and two detector-recall gaps (SSTI `Template()`, reflected XSS) — each a measured before/after.
+
+The design below is the target end-state (tiered difficulty, CI regression gate).
+
+The previous plans had no way to demonstrate complex-vuln capability; a passing hand-run on VAmPI's easy SQLi proves almost nothing. This is measured continuously, so every change is checked against the real goal.
 
 - **A graded target set**, tiered by difficulty: (T1) direct single-file injection; (T2) cross-file handoff injection; (T3) auth-gated injection; (T4) IDOR/authz; (T5) stateful/chained/logic. Sourced from known-vulnerable apps (VAmPI, NodeGoat, brokencrystals, DVWA-class, Juice Shop, plus a few hand-authored to fill gaps), each shipped with its **per-target fixture + State Ledger** and annotated with ground-truth vuln locations and classes.
 - **Metrics, split by tier:**

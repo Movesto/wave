@@ -1,0 +1,6 @@
+{
+  "name": "htmlsafe",
+  "stack": "python/flask",
+  "safe": true,
+  "vulns": []
+}

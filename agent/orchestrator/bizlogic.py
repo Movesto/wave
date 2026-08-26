@@ -74,8 +74,14 @@ def propose_hints(model, routes):
     return hints
 
 
+_NUM = r"([-$]*\s*[\d,]*\.?\d+)"                          # leading -/$ in any order, thousands separators; stripped on parse
+
+
 def _nums(resp):
-    """Every top-level numeric value in a response body, keyed by name (JSON first, regex fallback)."""
+    """Every keyed numeric value in a response, keyed by (lowercased) name. JSON parses win, so JSON
+    apps are unchanged; otherwise HTML/text is scanned -- form inputs (`name=total value="123"`),
+    id/class/data spans (`<span id="total">123`), table label/value cells (`<td>Total</td><td>123`),
+    and plain `Total: $1,234` text -- so the differential oracles work on apps that render HTML."""
     out = {}
     try:
         obj = json.loads(resp or "")
@@ -83,11 +89,24 @@ def _nums(resp):
             for k, v in obj.items():
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     out[k] = float(v)
+        if out:
+            return out
     except Exception:
         pass
-    if not out:
-        for k, v in re.findall(r'["\']?(\w+)["\']?\s*[:=]\s*"?(-?\d+(?:\.\d+)?)', resp or ""):
-            out.setdefault(k, float(v))
+    t = resp or ""
+
+    def add(k, v):
+        try:
+            out.setdefault(k.lower(), float(v.replace(",", "").replace("$", "").replace(" ", "")))
+        except ValueError:
+            pass
+
+    for pat in (r'name=["\'](\w+)["\'][^>]*?value=["\']\s*' + _NUM,          # <input name=total value="123">
+                r'(?:id|class|data-[\w-]+)=["\'](\w+)["\'][^>]*>\s*' + _NUM,  # <span id="total">123</span>
+                r'>\s*([A-Za-z]\w*)\s*:?\s*</t[dh]>\s*<t[dh][^>]*>\s*' + _NUM,  # <td>Total</td><td>$123</td>
+                r'["\']?([A-Za-z]\w*)["\']?\s*[:=]\s*["\']?\s*' + _NUM):      # Total: $123  /  total="123
+        for k, v in re.findall(pat, t, re.I):
+            add(k, v)
     return out
 
 
@@ -174,6 +193,17 @@ def _collect_priv(resp):
         walk(json.loads(resp or ""))
     except Exception:
         pass
+    if not out:                                         # HTML/text fallback: a rendered privilege field
+        t = resp or ""
+        for key in _PRIV_KEYS:
+            for pat in (rf'name=["\']{key}["\'][^>]*?value=["\']([^"\'>]+)',        # <input name=role value="admin">
+                        rf'(?:id|class|data-[\w-]+)=["\']{key}["\'][^>]*>\s*([^<\s][^<]*)',  # <span id=role>admin</span>
+                        rf'>\s*{key}\s*:?\s*</t[dh]>\s*<t[dh][^>]*>\s*([^<]+)',      # <td>role</td><td>admin</td>
+                        rf'\b{key}\b["\']?\s*[:=]\s*["\']?\s*(\w+)'):               # Role: admin  /  role="admin
+                m = re.search(pat, t, re.I)
+                if m:
+                    out.setdefault(key, m.group(1).strip())
+                    break
     return out
 
 

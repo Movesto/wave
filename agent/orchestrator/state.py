@@ -10,7 +10,7 @@ from dataclasses import asdict
 from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
-from . import registry, oracle, remediate, idor, exploit, dom_oracle
+from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast
 from . import auth as auth_mod
 from .models import Finding
 
@@ -47,7 +47,8 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
     if auth:
         print(f"[auth] synthesized session ({list(auth)[0]})", flush=True)
     model = Model()                                        # 14B: crafts exploits + patches
-    findings, deferred = [], []
+    canary = oast.Canary().start()                         # OAST: async/blind egress witness
+    findings, deferred, pending_oast = [], [], []
     try:
         for c in provable:
             if c.cwe == "CWE-79":                          # XSS -> DOM oracle (headless browser)
@@ -56,7 +57,8 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                 deferred.append((c, "no instrumented sink hook for this app's drivers"))
                 continue
             else:
-                v = oracle.prove_injection(rt, hook_list, c, routes, model, strikes=strikes, auth=auth)
+                v = oracle.prove_injection(rt, hook_list, c, routes, model, strikes=strikes,
+                                           auth=auth, canary=canary)
             if v.get("status") == "proven":
                 f = Finding(candidate=c, status="proven", evidence=v["evidence"], payload=v.get("payload", ""),
                             proven_request=v.get("proven_request"),
@@ -66,6 +68,8 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                 findings.append(f)
             else:
                 deferred.append((c, v.get("notes", "not proven at sink")))
+                if v.get("marker"):
+                    pending_oast.append((v["marker"], c))  # sweep for a LATE callback (async/2nd-order)
 
         # --- IDOR / authorization (differential oracle; model judges which id-routes are private) ---
         idor_routes = idor.flag_owned(model, idor.id_param_routes(routes))
@@ -80,7 +84,18 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                                         notes=f"{v['oracle']} via {v['request']} [owner-judgment: needs confirm]"))
             else:
                 deferred.append((c, v.get("notes", "idor not proven")))
+
+        # --- OAST async sweep: a callback that arrived AFTER the synchronous proving window (a
+        # second-order payload / a delayed worker egress) -- exactly what the sync sink poll misses. ---
+        for mk, c in pending_oast:
+            late = canary.hit(mk, wait=6)
+            if late:
+                findings.append(Finding(candidate=c, status="proven",
+                    evidence=f"delayed OAST callback at {late[0]['path']} from {late[0]['client']}",
+                    payload=mk, notes=f"OAST-canary (async) via {c.route_hint or c.loc()}"))
+                deferred[:] = [(dc, r) for (dc, r) in deferred if dc is not c]
     finally:
+        canary.stop()
         rt.down()                      # free the port before the patch phase re-provisions
 
     if fix and findings:

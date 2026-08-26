@@ -25,12 +25,14 @@ def _any_sink_hit(rt, hooks, marker):
     return None
 
 
-def prove_injection(rt, hooks, candidate, routes, model, strikes=1, auth=None):
+def prove_injection(rt, hooks, candidate, routes, model, strikes=1, auth=None, canary=None):
     """Model crafts attack requests embedding a unique marker; fire them and check ANY of the app's
-    instrumented sinks for that marker in an unsafe position. Trying all hooks (not one keyed on the
-    model's fuzzy CWE label) makes proof robust to mis-classification. Verdict dict."""
-    marker = "WZ" + secrets.token_hex(3)                   # unique per probe -> no cross-attribution
-    for r in exploit.craft_requests(model, candidate, routes, marker):
+    instrumented sinks for that marker in an unsafe position. If a `canary` is supplied, the marker is
+    an OAST token and egress payloads point at the canary -- a callback (now or later, async) is an
+    additional hard witness that catches egress the hooks miss. Verdict dict."""
+    marker = canary.new_token() if canary else "WZ" + secrets.token_hex(3)   # unique per probe
+    canary_url = canary.url(marker) if canary else None
+    for r in exploit.craft_requests(model, candidate, routes, marker, canary_url=canary_url):
         confirmations, evidence = 0, ""
         for _ in range(strikes):
             exploit.fire(rt.base_url, r["method"], r["path"], r["body"],
@@ -38,6 +40,9 @@ def prove_injection(rt, hooks, candidate, routes, model, strikes=1, auth=None):
             hit = None
             for _ in range(8):                             # poll: container stdout -> docker logs lags
                 hit = _any_sink_hit(rt, hooks, marker)
+                if not hit and canary and canary.hits.get(marker):
+                    c = canary.hits[marker][0]
+                    hit = f"OAST callback: app dialed the canary at {c['path']} from {c['client']}"
                 if hit:
                     break
                 time.sleep(0.4)
@@ -45,10 +50,11 @@ def prove_injection(rt, hooks, candidate, routes, model, strikes=1, auth=None):
                 confirmations += 1
                 evidence = hit
         if confirmations == strikes and confirmations > 0:
+            oname = "OAST-canary" if str(evidence).startswith("OAST") else "instrumented-sink"
             return {"status": "proven", "cwe": candidate.cwe, "payload": r["payload"],
-                    "request": f"{r['method']} {r['path']}", "evidence": evidence.strip()[:200],
-                    "oracle": "instrumented-sink", "proven_request": r}
-    return {"status": "not-proven", "cwe": candidate.cwe,
+                    "request": f"{r['method']} {r['path']}", "evidence": str(evidence).strip()[:200],
+                    "oracle": oname, "proven_request": r, "marker": marker}
+    return {"status": "not-proven", "cwe": candidate.cwe, "marker": marker,
             "notes": "no crafted payload observed unneutralized at the sink"}
 
 

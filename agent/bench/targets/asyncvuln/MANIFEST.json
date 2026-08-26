@@ -1,0 +1,7 @@
+{
+  "name": "asyncvuln",
+  "stack": "python/flask",
+  "vulns": [
+    {"cwe": "CWE-918", "route": "GET /webhook", "param": "url", "desc": "second-order / async blind SSRF (fires 6s later in a worker)"}
+  ]
+}

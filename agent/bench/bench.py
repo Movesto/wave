@@ -37,10 +37,15 @@ def run_target(tdir, fix=False):
     hit, extra, missed = truth & found, found - truth, truth - found
     recall = len(hit) / len(truth) if truth else 0.0
     prec = len(hit) / len(found) if found else 1.0
+    notes_by = {}
+    for f in findings:
+        notes_by.setdefault(f.candidate.cwe, f.notes)
     print(f"  truth={len(truth)}  proven-classes={len(found)}  recall={recall:.0%}  precision={prec:.0%}")
     for v in man["vulns"]:
-        mark = "PROVEN" if v["cwe"] in found else " MISS "
-        print(f"    [{mark}] {v['cwe']:9} {v['route']:16} {v['desc']}")
+        proven = v["cwe"] in found
+        mark = "PROVEN" if proven else " MISS "
+        tag = f"   [{notes_by.get(v['cwe'], '')}]" if proven else ""
+        print(f"    [{mark}] {v['cwe']:9} {v['route']:16} {v['desc']}{tag}")
     if extra:
         print(f"  extra classes proven (not in manifest): {sorted(extra)}")
     print(f"  summary: {res['summary']}")

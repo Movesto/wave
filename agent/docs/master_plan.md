@@ -505,5 +505,31 @@ classes are complete, and *before* general business logic.
   A literal vision model stays a separate, deferred option only for visual-only cues (canvas,
   CSS-hidden elements).
 
+### Business logic — the Tier-2 differential set (BUILT 2026-08-26, `agent/orchestrator/bizlogic.py`)
+
+The intuition layer opened the door to logic flaws; this is the first full Tier-2 *class family*, and it
+validated the whole two-tier bet in practice. **Pattern (the general business-logic recipe): the MODEL
+frames the surface/invariant, a deterministic DIFFERENTIAL proves the break by a server-confirmed,
+attacker-favorable state delta — flagged `logic-judgment: needs confirm`, never auto-fixed.** Five core
+classes, each shipped with a vulnerable target and a secure `safeapp` control:
+
+| CWE | Class | Proof (deterministic differential) |
+|-----|-------|-----------------------------------|
+| 472  | Parameter tampering | a response value tracks a client-supplied **price** field (qty held fixed) |
+| 915  | Mass assignment / privilege-via-param | an injected privilege (`role=admin`) **persists** vs a control account that never sent it |
+| 837  | Replay / missing idempotency | a balance-like value **stacks** monotonically across N replays |
+| 840  | Workflow / step-order bypass | the protected step succeeds for a **fresh id that skipped the prerequisite** (id-echo verified) |
+| 1284 | Negative quantity / numeric invariant | a monetary result **flips negative** for a negative quantity (buyer credited) |
+
+**Key discipline (learned the hard way — the `safeapp` control caught a real FP on four of the five):**
+never mistake a *legitimate* signal for the vuln. A quantity legitimately lowers a total; a transaction
+id legitimately increments; a route ignoring an unknown key legitimately falls back to a default. Each
+became a false positive until the differential was tightened to confirm the delta is **real** — value-
+only fields (not quantity/ids), quantity held fixed, id-echo on the protected step, a genuine sign-flip.
+This is exactly why Tier-2 needs a demonstration, not the model's word, and why the secure control is a
+first-class part of every oracle. The proofs are **model-free HTTP** (the model only frames the surface),
+so each is verifiable GPU-free. Extensions: amount-flow reversal (transfer/withdraw), integer overflow,
+model-composed multi-step workflows (current pairing is name-heuristic).
+
 ### One-paragraph summary for the reviewer
 Wave is a local, model-driven security agent built on one bet: **let the model hunt any vulnerability with total freedom, and let runtime demonstration — not the model's word — decide what counts.** The model works a target like a pentester — a closed observe→reason→act loop with a sandbox, search, and memory, guarded against spin by a request-hash backtrack — and confirms in two tiers: **Tier 1**, a pre-built deterministic oracle (instrumented sinks, differential execution, the DOM oracle, eBPF/L7 egress), gives *proven, zero-false-positive* findings; **Tier 2**, a check the model *composes from a shared toolkit of primitives*, gives *demonstrated, confidence-scored* findings for everything else — CSRF, business logic, open redirect, novel shapes — routed to human review. So the model is never limited in *what* it looks for, only in *how strongly* a result is guaranteed; Tier-1 fixes auto-verify through a functionality-preserving dual-gate or are rejected, Tier-2 goes to a human. It is deliberately *incomplete* but never *confidently wrong*, it is *measured* per-tier against a graded benchmark (Tier-1 precision pinned at 1.0, Tier-2 calibration tracked), and it *grows* by promoting reliable Tier-2 checks into hardened Tier-1 oracles.

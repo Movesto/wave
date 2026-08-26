@@ -35,10 +35,15 @@ _HONEST, _LOW = 100.0, 10.0                              # a 10x drop -> the tra
 
 
 def value_routes(routes):
-    """POST/PUT routes whose path suggests a value-bearing state change (a tampering surface)."""
+    """POST/PUT routes whose path suggests a value-bearing PURCHASE (a tampering / negative-qty
+    surface). Money-OUT routes (withdraw/transfer/payout) are EXCLUDED -- they are stateful mutations
+    (each call changes a persistent balance), which breaks the tampering oracle's idempotent-probe
+    assumption: ~10 sequential probes on a monotonically-draining balance eventually hit the expected
+    ratio by coincidence -> a false positive. Those routes are the fund-flow-reversal oracle's domain."""
     seen, out = set(), []
     for r in routes:
-        if r.method in ("POST", "PUT") and _VALUE_ROUTE.search(r.path) and r.path not in seen:
+        if (r.method in ("POST", "PUT") and _VALUE_ROUTE.search(r.path)
+                and not _FLOW_ROUTE.search(r.path) and r.path not in seen):
             seen.add(r.path)
             out.append(r)
     return out

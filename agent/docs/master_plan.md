@@ -364,16 +364,26 @@ Stated honestly so a reviewer can attack the real soft spots rather than redisco
 
 ---
 
-## 15. Build roadmap (dependency-ordered)
+## 15. Build roadmap (status-tracked)
 
-1. **Benchmark + eval harness (§13)** — with per-target fixtures + State Ledgers — so everything after is measured.
-2. **Sound injection loop end-to-end** — the instrumented-sink oracle (hybrid proxy + in-process, §5.5) inside the *agentic loop* (§3): observe→reason→act→confirm, stateful, on T1–T3 targets. Tightest provable win; exercises the whole spine.
-3. **Authz/IDOR** — differential oracle (5.2) + multi-user auth + fixture/ledger seeding (§6) → unlock T4, the first genuinely *complex* class.
-4. **Remediation with the functionality-preserving dual-gate** (§9) across T1–T4.
-5. **Stateful/chained/logic (T5)** — deepen the loop, lean on episodic memory + State Ledger + search.
-6. **Expand the oracle catalog** (SSRF, path traversal, …) one reviewable unit at a time.
-7. **Defer** the compiled pipeline (Joern CPG, ASan/TSan, angr) until a compiled target is actually in scope.
-8. **(Optional) Operating Mode 2 — Black-box DAST (§16)** — reuse the loop with external recon + self-registration + the external oracle toolkit (OAST canary, our browser, differential/timing). Ships the pentest-report output. Built after Mode 1 is solid, since it inherits the loop, memory, and two-tier machinery wholesale.
+**✅ DONE (grey-box Mode 1 spine + oracle catalog, verified):**
+- Self-contained `agent/` package; model decided (R1-Distill-14B, gate-zero spike); walking skeleton (VAmPI SQLi detect→prove→fix→verify).
+- Craft is model-DECIDES / code-ASSEMBLES (`exploit.assemble`) — fixed the URL-assembly defect.
+- **Oracle catalog: SQL, NoSQL, eval (code-inj), command, path-traversal, IDOR (differential)** — 6 of ~9 classes. Remediation dual-gate on Tier-1. Verified on VAmPI + NodeGoat.
+
+**🔨 NOW — finish the classes (complete the ~9-class Tier-1 catalog):**
+1. **SSRF** — grey-box: instrument the app's outbound HTTP client (a sink hook; marker/attacker-host in the outbound URL = proven). *(Black-box SSRF uses the OAST canary of §18 / §16.)*
+2. **Deserialization / SSTI** — per-engine hooks (e.g. `node-serialize` `unserialize`, template render fns) — the classes that did the real damage in the OpenAI→HuggingFace incident, so not "last".
+3. **XSS** — the DOM oracle: headless Playwright in its own serialized sub-phase (§5.6). The one genuinely infra-heavy class (new browser dependency).
+
+**➡️ THEN — the systemic/temporal intuition layer (§18) + business logic:**
+4. **§18 intuition additions** — async OAST canary (#4), missing-controls tests (#2), behavioral/latency signal (#3).
+5. **Business logic** — the Tier-2 `compose_check` frontier (§5.7), hardest and least sound; done after the provable catalog is complete.
+
+**🕗 LATER:**
+6. **Benchmark + eval harness (§13)** — graded targets + per-tier metrics; formalizes measurement (currently verifying per-target by hand).
+7. **Operating Mode 2 — Black-box DAST (§16)** — reuse the loop with external recon + self-registration + the external oracle toolkit.
+8. **Defer** the compiled pipeline (Joern CPG, ASan/TSan, angr) until a compiled target is in scope.
 
 ---
 
@@ -432,6 +442,37 @@ This plan is large, and the way a plan this size fails is by being built **bread
 **The one-line rule:** prove the model, prove one thread end-to-end, prove provisioning — *then* add breadth. Anything else risks building an elaborate machine around a core that was never going to work.
 
 ---
+
+## 18. Systemic / temporal intuition layer (post-class; from the `intuition.md` review)
+
+The class catalog (§5) models a pentester's *technical/logical* intuition. Three additions cover the
+*temporal/systemic* intuition it misses. **Guiding rule (do not violate): intuition informs what the
+model decides to TEST; a deterministic tool still PROVES.** Intuition-as-hint is fine; intuition-as-
+verdict reintroduces the model's weak discrimination + false positives. Built *after* the provable
+classes are complete, and *before* general business logic.
+
+- **#4 — Async / second-order (OAST canary) [highest value; adds a SOUND oracle].** The loop is
+  synchronous (`sink_flush_timeout` ~2 s), so it is structurally blind to **stored/blind XSS, blind
+  SSRF, second-order injection, deferred-worker triggers** — the "time bomb" class. Add a
+  `generate_oast_canary()` action: the model plants a unique callback marker in forms / DB fields /
+  profile settings and *moves on*; a background daemon listens, and a callback (minutes/hours later)
+  **interrupts** the loop with the ping. A callback is a **hard deterministic witness (Tier-1-grade)**.
+  Shares infrastructure with black-box SSRF/RCE (§16) — one build, many classes.
+- **#2 — Negative space / missing controls [best answer to the business-logic gap] — built as TESTS,
+  not prompts.** A curated table maps route shapes → mandatory controls (e.g. `POST /auth/reset` →
+  {rate-limit, old-password-check, session-invalidation}). Several are *provable*, not just hintable:
+  no-rate-limit → fire N, count `429`s; no-old-password-check → reset without it, observe success;
+  no-session-invalidation → old cookie still valid after reset. Perception injects the checklist; the
+  oracle runs the concrete differential/behavioral test. (As a pure prompt hint it is only Tier-2
+  vibes — build the tests.)
+- **#3 — Behavioral / latency delta [cheap observation signal; HINT only].** Track baseline
+  response time + length per route; a payload that returns `200` but spikes latency 10× or shifts
+  body size feeds `[Anomaly: 45ms→950ms]` into the observation bundle (§3). Signals **time-based
+  blind injection / ReDoS**. **Noisy** (GC/load/network) → never a proof, needs N-of-M reproduction;
+  most valuable in black-box Mode 2 (no internal sink) and for ReDoS (no other oracle).
+- **#1 — Developer-psychology (git-blame + `TODO`/`HACK` regex) [nice-to-have, deprioritized].**
+  Cheap prioritization hint (which candidate first), but *not* our bottleneck (discovery already
+  finds sinks; reaching/proving is the constraint). Add later, don't lead with it.
 
 ### One-paragraph summary for the reviewer
 Wave is a local, model-driven security agent built on one bet: **let the model hunt any vulnerability with total freedom, and let runtime demonstration — not the model's word — decide what counts.** The model works a target like a pentester — a closed observe→reason→act loop with a sandbox, search, and memory, guarded against spin by a request-hash backtrack — and confirms in two tiers: **Tier 1**, a pre-built deterministic oracle (instrumented sinks, differential execution, the DOM oracle, eBPF/L7 egress), gives *proven, zero-false-positive* findings; **Tier 2**, a check the model *composes from a shared toolkit of primitives*, gives *demonstrated, confidence-scored* findings for everything else — CSRF, business logic, open redirect, novel shapes — routed to human review. So the model is never limited in *what* it looks for, only in *how strongly* a result is guaranteed; Tier-1 fixes auto-verify through a functionality-preserving dual-gate or are rejected, Tier-2 goes to a human. It is deliberately *incomplete* but never *confidently wrong*, it is *measured* per-tier against a graded benchmark (Tier-1 precision pinned at 1.0, Tier-2 calibration tracked), and it *grows* by promoting reliable Tier-2 checks into hardened Tier-1 oracles.

@@ -267,7 +267,131 @@ except Exception as _e:
     print("WAVE-SINK-PATH:: (audit failed) %r" % _e, flush=True)
 ''')
 
-HOOKS = [_SQLALCHEMY, _MONGODB, _PG, _PSYCOPG2, _JS_EVAL, _JS_SHELL, _PY_AUDIT, _JS_FS, _PY_FS]
+# JS outbound HTTP (SSRF, CWE-918): a tracer in the destination host/url proves the attacker controls
+# where the server connects.
+_JS_SSRF = SinkHook(
+    name="js_ssrf", lang="js", detect=(), marker="WAVE-SINK-SSRF",
+    filename="_wave_sink_ssrf.js", kind="ssrf",
+    code='''// Instrumented-sink oracle for Node outbound HTTP (SSRF). Logs the destination before the request:
+// a tracer in the outbound URL/host proves the attacker controls the server's connection target.
+"use strict";
+try {
+  const http = require("http"), https = require("https");
+  function wrap(mod, name) {
+    const orig = mod.request;
+    if (typeof orig !== "function") return;
+    mod.request = function (a) {
+      try {
+        var u = (typeof a === "string") ? a
+              : (a && (a.href || ((a.protocol || "http:") + "//" + (a.hostname || a.host || "") + (a.path || "")))) || "";
+        console.log("WAVE-SINK-SSRF:: " + name + " " + String(u));
+      } catch (e) {}
+      return orig.apply(this, arguments);
+    };
+  }
+  wrap(http, "http"); wrap(https, "https");
+  if (typeof global.fetch === "function") {
+    const of = global.fetch;
+    global.fetch = function (u) {
+      try { console.log("WAVE-SINK-SSRF:: fetch " + String(u && u.url ? u.url : u)); } catch (e) {}
+      return of.apply(this, arguments);
+    };
+  }
+  console.log("WAVE-SINK-SSRF:: outbound-http instrumented");
+} catch (e) { console.log("WAVE-SINK-SSRF:: (instrumentation failed) " + e); }
+''')
+
+# Python outbound HTTP (SSRF): wrap http.client (requests/urllib3/urllib all funnel through it).
+_PY_SSRF = SinkHook(
+    name="py_ssrf", lang="py", detect=(), marker="WAVE-SINK-SSRF",
+    filename="_wave_sink_ssrf.py", kind="ssrf",
+    code='''"""Instrumented-sink oracle for Python outbound HTTP (SSRF). Wraps http.client.HTTPConnection so
+requests/urllib3/urllib funnel through: a tracer in the outbound host/url proves attacker-controlled
+server destination."""
+try:
+    import http.client as _h
+    _orig = _h.HTTPConnection.putrequest
+    def _wave_putrequest(self, method, url, *a, **k):
+        try:
+            print("WAVE-SINK-SSRF:: " + str(getattr(self, "host", "")) + " " + str(url), flush=True)
+        except Exception:
+            pass
+        return _orig(self, method, url, *a, **k)
+    _h.HTTPConnection.putrequest = _wave_putrequest
+    print("WAVE-SINK-SSRF:: outbound-http instrumented", flush=True)
+except Exception as _e:
+    print("WAVE-SINK-SSRF:: (instrumentation failed) %r" % _e, flush=True)
+''')
+
+# ---- DESERIALIZATION + SSTI (per-engine; dep-gated -- these raise no native audit event) ----------
+
+# Python SSTI (CWE-1336): Jinja2 -- a tracer in the TEMPLATE source (not the render context) proves
+# server-side template injection. (Jinja RCE was the Hugging Face zero-day.)
+_PY_JINJA = SinkHook(
+    name="py_jinja", lang="py", detect=("jinja2",), marker="WAVE-SINK-TEMPLATE",
+    filename="_wave_sink_jinja.py", kind="template",
+    code='''"""Instrumented-sink oracle for Jinja2 SSTI: logs the TEMPLATE SOURCE passed to from_string/Template.
+A tracer in the source (vs the render context) proves the attacker controls the template -> SSTI."""
+try:
+    import jinja2
+    _fs = jinja2.Environment.from_string
+    def _wave_from_string(self, source, *a, **k):
+        try: print("WAVE-SINK-TEMPLATE:: from_string " + repr(source)[:400], flush=True)
+        except Exception: pass
+        return _fs(self, source, *a, **k)
+    jinja2.Environment.from_string = _wave_from_string
+    _oinit = jinja2.Template.__new__
+    def _wave_new(cls, source=None, *a, **k):
+        try: print("WAVE-SINK-TEMPLATE:: Template " + repr(source)[:400], flush=True)
+        except Exception: pass
+        return _oinit(cls)
+    jinja2.Template.__new__ = staticmethod(_wave_new)
+    print("WAVE-SINK-TEMPLATE:: jinja2 instrumented", flush=True)
+except Exception as _e:
+    print("WAVE-SINK-TEMPLATE:: (instrumentation failed) %r" % _e, flush=True)
+''')
+
+# Node deserialization (CWE-502): node-serialize.unserialize -- a tracer in the deserialized blob
+# proves attacker-controlled data reaches the deserializer (node-serialize unserialize -> RCE).
+_JS_DESER = SinkHook(
+    name="js_deser", lang="js", detect=("node-serialize", "serialize-to-js", "funcster"),
+    marker="WAVE-SINK-DESER", filename="_wave_sink_deser.js", kind="deser",
+    code='''// Instrumented-sink oracle for node-serialize deserialization (SSJI/RCE). Logs the input blob.
+"use strict";
+try {
+  const ns = require("node-serialize");
+  const orig = ns.unserialize;
+  if (typeof orig === "function") {
+    ns.unserialize = function (s) {
+      try { console.log("WAVE-SINK-DESER:: unserialize " + String(s).slice(0, 400)); } catch (e) {}
+      return orig.apply(this, arguments);
+    };
+  }
+  console.log("WAVE-SINK-DESER:: node-serialize instrumented");
+} catch (e) { console.log("WAVE-SINK-DESER:: (not present) " + e); }
+''')
+
+# Python deserialization (CWE-502): PyYAML unsafe load -- a tracer in the loaded YAML proves
+# attacker-controlled data reaches yaml.load (yaml.Loader -> RCE via !!python tags).
+_PY_YAML = SinkHook(
+    name="py_yaml", lang="py", detect=("pyyaml", "yaml"), marker="WAVE-SINK-DESER",
+    filename="_wave_sink_yaml.py", kind="deser",
+    code='''"""Instrumented-sink oracle for PyYAML deserialization: logs the YAML text passed to yaml.load."""
+try:
+    import yaml
+    _load = yaml.load
+    def _wave_load(stream, *a, **k):
+        try: print("WAVE-SINK-DESER:: yaml.load " + repr(stream)[:400], flush=True)
+        except Exception: pass
+        return _load(stream, *a, **k)
+    yaml.load = _wave_load
+    print("WAVE-SINK-DESER:: pyyaml instrumented", flush=True)
+except Exception as _e:
+    print("WAVE-SINK-DESER:: (instrumentation failed) %r" % _e, flush=True)
+''')
+
+HOOKS = [_SQLALCHEMY, _MONGODB, _PG, _PSYCOPG2, _JS_EVAL, _JS_SHELL, _PY_AUDIT, _JS_FS, _PY_FS,
+         _JS_SSRF, _PY_SSRF, _PY_JINJA, _JS_DESER, _PY_YAML]
 
 
 def select(deps_text, lang):

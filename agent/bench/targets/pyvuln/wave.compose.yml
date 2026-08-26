@@ -1,0 +1,11 @@
+services:
+  wave-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.wave
+    container_name: wave-pyvuln
+    ports:
+      - "5000:5000"
+    environment:
+      - vulnerable=1
+      - tokentimetolive=3600

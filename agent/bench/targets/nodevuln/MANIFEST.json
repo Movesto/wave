@@ -1,0 +1,12 @@
+{
+  "name": "nodevuln",
+  "stack": "node/express",
+  "vulns": [
+    {"cwe": "CWE-95",  "route": "GET /calc",  "param": "expr", "desc": "code injection (eval)"},
+    {"cwe": "CWE-78",  "route": "GET /ping",  "param": "host", "desc": "OS command injection"},
+    {"cwe": "CWE-22",  "route": "GET /read",  "param": "file", "desc": "path traversal"},
+    {"cwe": "CWE-918", "route": "GET /fetch", "param": "url",  "desc": "SSRF"},
+    {"cwe": "CWE-502", "route": "POST /load", "param": "data", "desc": "deserialization (node-serialize)"},
+    {"cwe": "CWE-79",  "route": "GET /echo",  "param": "msg",  "desc": "reflected XSS"}
+  ]
+}

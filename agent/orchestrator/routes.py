@@ -137,6 +137,7 @@ def _flask_routes(target):
             if not m:
                 continue
             verb, path, methods = m.group(1), m.group(2), m.group(3)
+            path = re.sub(r"<(?:[^:>]+:)?([A-Za-z_]\w*)>", r"{\1}", path)   # Flask <int:id> / <id> -> {id}
             ms = ([verb.upper()] if verb != "route"
                   else [x.strip().strip("'\"").upper() for x in methods.split(",")] if methods
                   else ["GET"])

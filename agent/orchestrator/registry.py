@@ -409,6 +409,8 @@ def payload_in_sink(hook, logline, marker):
     SQL: marker interpolated into the STATEMENT (not bound in PARAMS). NoSQL: marker inside a
     `$where` clause or a `$`-operator (executable/query context), NOT a plain field value.
     """
+    if hook.kind == "ssrf":
+        return marker.lower() in logline.lower()               # HTTP clients lowercase the hostname
     if marker not in logline:
         return False
     if hook.kind == "sql":

@@ -148,6 +148,20 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                                         notes=f"{v['oracle']} via {v['request']} [logic-judgment: needs confirm]"))
             else:
                 deferred.append((c, v.get("notes", "idempotent / no stacking")))
+        for protected, prereqs in bizlogic.workflow_pairs(routes):   # workflow / step-order bypass (CWE-840)
+            c = bizlogic.candidate_for_workflow(protected)
+            v = {"status": "not-proven", "notes": "workflow enforced / no bypass"}
+            for q in prereqs:
+                r = bizlogic.prove_stepbypass(rt, q, protected, auth)
+                if r.get("status") == "proven":
+                    v = r
+                    break
+            if v.get("status") == "proven":
+                findings.append(Finding(candidate=c, status="proven", evidence=v["evidence"],
+                                        payload=v["payload"], proven_request=None,
+                                        notes=f"{v['oracle']} via {v['request']} [logic-judgment: needs confirm]"))
+            else:
+                deferred.append((c, v.get("notes", "workflow enforced")))
 
         # --- OAST async sweep: a callback that arrived AFTER the synchronous proving window (a
         # second-order payload / a delayed worker egress) -- exactly what the sync sink poll misses. ---

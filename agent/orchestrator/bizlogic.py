@@ -274,3 +274,78 @@ def candidate_for_replay(route):
                      family="business logic: replay / missing idempotency", detector="differential",
                      sink=f"{route.method} {route.path}", provable=True, rank=44,
                      route_hint=f"{route.method} {route.path}")
+
+
+# ---- Workflow / step bypass (CWE-840) -------------------------------------------------------------
+# The first class needing SEQUENCE reasoning: a protected step (confirm/ship/finalize) must succeed
+# only AFTER its prerequisite (pay/verify/authorize). The bug is a missing state-machine guard. Proven
+# by a differential over the SEQUENCE: complete the honest flow (prereq -> protected) to see the
+# protected step's success, then hit the protected step with a FRESH identity that skipped the
+# prerequisite. If the bypass succeeds the same way, the order is not enforced. A secure app blocks the
+# bypass (402/redirect/"payment required") -> the prerequisite matters -> DEFER.
+_PREREQ = re.compile(r"\bpay\b|payment|checkout|\bverify\b|\botp\b|authoriz|validate|add[-_]?to[-_]?cart|\bcart\b", re.I)
+_PROTECTED = re.compile(r"confirm|complete|finaliz|\bship\b|fulfil|deliver|\bplace\b|place[-_]?order|activate|"
+                        r"\bissue\b|approve|grant|checkout[-_]?complete", re.I)
+_STEP_KEYS = ["order", "order_id", "orderId", "id", "token", "cart", "cart_id", "reference", "ref",
+              "txn", "transaction", "booking", "invoice", "session"]
+_ERR = re.compile(r"\berror\b|denied|forbidden|unauthor|not allowed|not permitted|unpaid|not paid|"
+                  r"payment.{0,15}(require|need|first|pending|missing)|(require|need).{0,15}payment|"
+                  r"incomplete|invalid|\bmissing\b|please (pay|verify|complete|log)|must (pay|verify|complete)|"
+                  r"no (active|pending)|\brequired\b", re.I)
+
+
+def workflow_pairs(routes):
+    """Return (protected_route, [candidate prerequisite routes]) -- a later value step and the earlier
+    steps that should gate it. The heuristic infers the intended order from route names (model-composed
+    multi-step flows are the extension)."""
+    prereq = [r for r in routes if r.method in ("POST", "PUT") and _PREREQ.search(r.path)]
+    protected = [r for r in routes if r.method in ("POST", "PUT") and _PROTECTED.search(r.path)]
+    out = []
+    for p in protected:
+        qs = [q for q in prereq if q.path != p.path]
+        if qs:
+            out.append((p, qs))
+    return out
+
+
+def _success(st, body):
+    return st is not None and 200 <= st < 300 and not _ERR.search(body or "")
+
+
+def prove_stepbypass(rt, prereq, protected, auth=None):
+    """Differential over the sequence. For a shared resource key: run the honest flow (prereq then
+    protected) to confirm the protected step yields a success; then hit the protected step with a FRESH
+    resource that never did the prerequisite. Both succeed -> order not enforced (bypass). Fresh blocked
+    -> prerequisite gates the step -> DEFER."""
+    from secrets import token_hex
+    hdr = dict(auth or {})
+    for key in _STEP_KEYS:
+        r1, r2 = "wf" + token_hex(3), "wf" + token_hex(3)
+        pre_body = {"amount": 100, "quantity": 1, "price": 100, "email": f"{r1}@wave.test",
+                    "password": "Wave_123!", key: r1}
+        exploit.fire(rt.base_url, prereq.method, prereq.path, pre_body, headers=hdr)   # honest prerequisite
+        s_h, b_h = exploit.fire(rt.base_url, protected.method, protected.path, {key: r1}, headers=hdr)
+        # the key is only valid if the protected route actually USES it -- it must echo THIS resource id.
+        # Otherwise the route ignored the key and fell back to a default resource, and the "success" is
+        # meaningless (this is exactly how a polluted empty-default order produced a false bypass).
+        if not (_success(s_h, b_h) and r1 in (b_h or "")):
+            continue
+        s_b, b_b = exploit.fire(rt.base_url, protected.method, protected.path, {key: r2}, headers=hdr)  # skip prereq
+        if _success(s_b, b_b) and r2 in (b_b or ""):    # bypass recognized ITS distinct id and still succeeded
+            return {"status": "proven", "cwe": "CWE-840", "oracle": "differential",
+                    "payload": f"{protected.method} {protected.path} without {prereq.path}",
+                    "request": f"{protected.method} {protected.path}",
+                    "evidence": (f"'{protected.path}' succeeded (status {s_b}) for a fresh '{key}' that never "
+                                 f"completed the prerequisite '{prereq.path}' -- same success as the honest flow "
+                                 f"(status {s_h}); the step-order/state-machine guard is missing (step bypass)")}
+        return {"status": "not-proven", "cwe": "CWE-840",
+                "notes": f"'{protected.path}' blocked without '{prereq.path}' (status {s_b}) -- workflow enforced"}
+    return {"status": "not-proven", "cwe": "CWE-840",
+            "notes": f"could not establish an honest {prereq.path}->{protected.path} flow (no shared key succeeded)"}
+
+
+def candidate_for_workflow(route):
+    return Candidate(file=route.file, unit=route.function or "<handler>", line=0, cwe="CWE-840",
+                     family="business logic: workflow / step-order bypass", detector="differential",
+                     sink=f"{route.method} {route.path}", provable=True, rank=46,
+                     route_hint=f"{route.method} {route.path}")

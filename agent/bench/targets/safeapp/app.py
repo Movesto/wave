@@ -130,6 +130,26 @@ def claim():
     return {"username": u, "credited": 50, "balance": 50}
 
 
+_paidorders = set()
+
+
+@app.route("/pay", methods=["POST"])                    # workflow step 1 (prerequisite)
+def pay():
+    d = request.get_json(silent=True) or request.form
+    o = str(d.get("order", d.get("order_id", "")))
+    _paidorders.add(o)
+    return {"order": o, "paid": True}
+
+
+@app.route("/confirm", methods=["POST"])                # step-order-safe: requires prior payment
+def confirm():
+    d = request.get_json(silent=True) or request.form
+    o = str(d.get("order", d.get("order_id", "")))
+    if o not in _paidorders:                            # state-machine guard: no confirm before pay
+        return {"order": o, "error": "payment required"}, 402
+    return {"order": o, "shipped": True}
+
+
 @app.route("/")
 def index():
     return {"app": "safeapp"}

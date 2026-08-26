@@ -75,10 +75,28 @@ def claim():
     return {"username": u, "credited": 50, "balance": _wallet[u]}
 
 
+_paid = set()
+
+
+@app.route("/pay", methods=["POST"])                  # workflow step 1 (prerequisite)
+def pay():
+    d = request.get_json(silent=True) or request.form
+    o = str(d.get("order", d.get("order_id", "")))
+    _paid.add(o)
+    return {"order": o, "paid": True}
+
+
+@app.route("/confirm", methods=["POST"])              # CWE-840 step bypass: ships without checking payment
+def confirm():
+    d = request.get_json(silent=True) or request.form
+    o = str(d.get("order", d.get("order_id", "")))
+    return {"order": o, "status": "shipped", "shipped": True}   # <-- no payment/prerequisite check
+
+
 @app.route("/")
 def index():
     return {"app": "bizvuln",
-            "routes": ["/product/<id>", "/checkout (POST)", "/order/<id>", "/profile (POST)", "/claim (POST)"]}
+            "routes": ["/product/<id>", "/checkout", "/order/<id>", "/profile", "/claim", "/pay", "/confirm"]}
 
 
 _init()

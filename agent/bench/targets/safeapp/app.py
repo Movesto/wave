@@ -98,11 +98,11 @@ def doc(doc_id):
 _CATALOG = {1: 999.99, 2: 25.00, 3: 249.50}
 
 
-@app.route("/checkout", methods=["POST"])               # tamper-safe: price is server-authoritative
+@app.route("/checkout", methods=["POST"])               # tamper-safe AND quantity-validated
 def checkout():
     d = request.get_json(silent=True) or request.form
     pid = int(d.get("product_id", 1))
-    qty = int(d.get("quantity", 1))
+    qty = max(0, int(d.get("quantity", 1)))             # non-negativity enforced -> total can never go negative
     price = _CATALOG.get(pid, 0.0)                       # client-supplied `price` is IGNORED -- looked up server-side
     return {"order_id": 1, "product_id": pid, "quantity": qty, "total": round(price * qty, 2)}
 

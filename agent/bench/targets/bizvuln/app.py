@@ -40,6 +40,15 @@ def checkout():
     return {"order_id": oid, "product_id": pid, "quantity": qty, "total": total}
 
 
+@app.route("/order", methods=["POST"])                 # CWE-1284 no quantity validation -> negative total (credit)
+def order_create():
+    d = request.get_json(silent=True) or request.form
+    pid = int(d.get("product_id", 1))
+    qty = int(d.get("quantity", 1))                    # <-- accepts negatives; no floor at 0
+    unit = _CATALOG.get(pid, ("", 0.0))[1]             # server-side price (NOT client-tamperable)
+    return {"product_id": pid, "quantity": qty, "unit_price": unit, "total": unit * qty}
+
+
 @app.route("/order/<int:oid>")                         # readback
 def order(oid):
     with engine.begin() as c:

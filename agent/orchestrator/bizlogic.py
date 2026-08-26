@@ -349,3 +349,46 @@ def candidate_for_workflow(route):
                      family="business logic: workflow / step-order bypass", detector="differential",
                      sink=f"{route.method} {route.path}", provable=True, rank=46,
                      route_hint=f"{route.method} {route.path}")
+
+
+# ---- Negative quantity / numeric-invariant break (CWE-1284) ----------------------------------------
+# The mirror of tampering: here the QUANTITY is the attack vector. A quantity/amount field that should
+# be positive but accepts a NEGATIVE value can drive a monetary result NEGATIVE -- the buyer is CREDITED
+# instead of charged. Proven by a sign differential: a positive quantity yields a positive total, a
+# negative quantity flips it negative. A server that validates/clamps keeps the result >= 0 -> DEFER.
+_QTY = ["quantity", "qty", "count", "amount", "num", "units", "items", "number", "seats", "nights"]
+_NEG_RESULT = {"total", "amount", "charge", "charged", "subtotal", "grand_total", "cost", "balance",
+               "credit", "due", "payable", "sum", "price", "owed", "net"}
+
+
+def prove_negative(rt, route, auth=None, hint=None):
+    """Sign differential: for each quantity-like field, fire quantity=+2 then quantity=-2 (with a price
+    present so the total is nonzero). If a monetary result goes from positive to NEGATIVE, the non-
+    negativity invariant is unenforced (buyer credited). Validated/clamped result (>=0) -> DEFER."""
+    base = dict((hint or {}).get("body") or {})
+    base.setdefault("product_id", 1)
+    hdr = dict(auth or {})
+    for f in _QTY:
+        pos = {**base, "price": 100, "unit_price": 100, f: 2}
+        neg = {**base, "price": 100, "unit_price": 100, f: -2}
+        _, rp = exploit.fire(rt.base_url, route.method, route.path, pos, headers=hdr)
+        _, rn = exploit.fire(rt.base_url, route.method, route.path, neg, headers=hdr)
+        np_, nn = _nums(rp), _nums(rn)
+        for k, vp in np_.items():
+            if k.lower() in _NEG_RESULT and vp > 0:
+                vn = nn.get(k)
+                if vn is not None and vn < 0:
+                    return {"status": "proven", "cwe": "CWE-1284", "oracle": "differential",
+                            "payload": f"{f}: 2 -> -2", "request": f"{route.method} {route.path}",
+                            "evidence": (f"a negative '{f}' drove '{k}' NEGATIVE: {vp} -> {vn} -- no non-"
+                                         f"negativity validation, the buyer is CREDITED instead of charged "
+                                         f"(numeric-invariant break)")}
+    return {"status": "not-proven", "cwe": "CWE-1284",
+            "notes": "no monetary result went negative for a negative quantity -- validated/clamped"}
+
+
+def candidate_for_negative(route):
+    return Candidate(file=route.file, unit=route.function or "<handler>", line=0, cwe="CWE-1284",
+                     family="business logic: unvalidated quantity (negative -> credit)", detector="differential",
+                     sink=f"{route.method} {route.path}", provable=True, rank=45,
+                     route_hint=f"{route.method} {route.path}")

@@ -63,6 +63,20 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
         if dep_vulns:
             print(f"[reporter] dependency audit: {len(dep_vulns)} known-vulnerable dependency finding(s)", flush=True)
 
+    secrets_found = reporters.secret_scan(target)   # hardcoded credentials (CWE-798); offline, always on
+    for s in secrets_found:
+        loc = f"{s['file']}:{s['line']}"
+        subj = f"CWE-798 {s['type']} {loc}"
+        case.record("hypothesis", subj, "tool", "confirmed" if s["status"] == "confirmed" else "believed",
+                    provenance=loc, cwe="CWE-798", family=f"hardcoded secret ({s['type']})")
+        if s["status"] == "confirmed":
+            case.record("confirmation", subj, "oracle", "confirmed", provenance=loc, cwe="CWE-798",
+                        evidence=f"hardcoded {s['type']}: {s['snippet']}")
+    if secrets_found:
+        nconf = sum(1 for s in secrets_found if s["status"] == "confirmed")
+        print(f"[reporter] secret scan: {nconf} confirmed + {len(secrets_found) - nconf} suspected "
+              f"hardcoded secret(s)", flush=True)
+
     def _subj(c):
         return f"{c.cwe} {c.route_hint or c.loc()}"
 

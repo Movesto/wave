@@ -218,17 +218,34 @@ def _call_args(fn, marker, target_param=None):
 
 
 def _verdict_from_hits(tw, marker, cwe):
+    from urllib.parse import urlparse
     for kind, text, params in tw.hits:
         if kind == "sql" and marker in text and marker not in (params or ""):
             return ("proven", f"marker reached the SQL statement (not params): {text[:120]}")
-        if kind == "http" and marker in text:
-            return ("proven", f"marker reached the outbound URL: {text[:160]}")
+        if kind == "http":
+            # SSRF requires HOST control -- the marker must reach the outbound URL's HOSTNAME, not just a
+            # path segment appended to a fixed internal base (that is the app's normal fetch-by-id, not SSRF).
+            try:
+                host = urlparse(text if "://" in text else "//" + text, scheme="http").hostname or ""
+            except ValueError:
+                host = ""
+            if marker.lower() in host.lower():
+                return ("proven", f"marker controls the outbound HOST: {text[:160]}")
         if kind == "path" and marker in text and ("../" in text or text.strip().startswith("/")):
             return ("proven", f"marker reached a file path with traversal: {text[:160]}")
     # marker only in params (parameterized) -> safe, if a SQL sink was hit at all
     if cwe == "CWE-89" and any(k == "sql" and marker in (p or "") for k, t, p in tw.hits):
         return ("safe", "marker reached the SQL sink only as a bound parameter (parameterized)")
-    return ("unknown", f"no sink reached with the marker ({len(tw.hits)} sink hit(s))")
+    return ("unknown", f"no sink reached with the marker in an unsafe position ({len(tw.hits)} sink hit(s))")
+
+
+def _payload(cwe):
+    """(arg value, search marker). For SSRF the value is HOST-SHAPED so a genuine URL argument controls
+    the outbound HOST (real SSRF); a value that only lands in a path segment won't match the host."""
+    token = secrets.token_hex(4)
+    if cwe == "CWE-918":
+        return f"http://wz{token}.wave.test/", f"wz{token}.wave.test"
+    return "WZ" + token, "WZ" + token
 
 
 def _inproc(candidate, target_param=None) -> MicroResult:
@@ -238,7 +255,7 @@ def _inproc(candidate, target_param=None) -> MicroResult:
     func_name = unit.split("(")[0].strip() if unit else ""
     if not path.endswith(".py") or not func_name:
         return MicroResult("unknown", "no importable Python handler for this candidate")
-    marker = "WZ" + secrets.token_hex(4)
+    payload, marker = _payload(getattr(candidate, "cwe", ""))
     tw = _Tripwire()
     try:
         with _tripwires(tw):
@@ -247,7 +264,7 @@ def _inproc(candidate, target_param=None) -> MicroResult:
             if fn is None or not callable(fn):
                 return MicroResult("unknown", f"handler {func_name!r} not found/callable after import",
                                    stubs=getattr(tw, "_stubs", []))
-            for _tgt, args in _call_args(fn, marker, target_param):
+            for _tgt, args in _call_args(fn, payload, target_param):
                 with contextlib.suppress(Exception):
                     fn(**args)
                 v, why = _verdict_from_hits(tw, marker, getattr(candidate, "cwe", ""))
@@ -392,9 +409,9 @@ def micro_exec_container(candidate, target, timeout=150) -> MicroResult:
         return MicroResult("unknown", "no built image (wave.compose.yml missing) -- provision it first")
     if not func:
         return MicroResult("unknown", "no handler function for in-container micro-exec")
-    marker = "WZ" + secrets.token_hex(4)
+    payload, marker = _payload(getattr(candidate, "cwe", ""))
     modpath = _container_path(getattr(candidate, "file", ""), target)
-    driver = (_DRIVER.replace("__MARKER__", repr(marker)).replace("__MODPATH__", repr(modpath))
+    driver = (_DRIVER.replace("__MARKER__", repr(payload)).replace("__MODPATH__", repr(modpath))
               .replace("__FUNC__", repr(func)))
     cmd = ["docker", "compose", "-f", str(compose), "run", "--rm", "--no-deps", "-T",
            "--entrypoint", "python", "wave-app", "-c", driver]

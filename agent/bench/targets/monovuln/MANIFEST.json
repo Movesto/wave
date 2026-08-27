@@ -1,0 +1,7 @@
+{
+  "name": "monovuln",
+  "stack": "python/flask",
+  "vulns": [
+    {"cwe": "CWE-89", "route": "GET /search", "param": "q", "desc": "SQLi in a MONOREPO: compose in deploy/, app in app/; wave reuses the whole stack"}
+  ]
+}

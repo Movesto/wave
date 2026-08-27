@@ -63,33 +63,57 @@ def _detect_port(root, entry, default):
         return default
 
 
+_COMPOSE_NAMES = ("compose.local.yml", "docker-compose.local.yml", "compose.local.yaml",
+                  "docker-compose.yaml", "docker-compose.yml", "compose.yml", "compose.yaml")
+
+
 def _pick_compose(root):
     """Choose a compose file, PREFERRING one that builds the app from source (so the sink hook can be
-    injected) over one that pulls a prebuilt image (e.g. brokencrystals compose.yml vs compose.local.yml)."""
-    candidates = [str(p) for name in ("compose.local.yml", "docker-compose.local.yml", "compose.local.yaml",
-                                      "docker-compose.yaml", "docker-compose.yml", "compose.yml", "compose.yaml")
-                  for p in [Path(root) / name] if p.exists()]
+    injected). Searches the root first, then SUBDIRS (monorepos keep it in infrastructure/ / deploy/ /
+    docker/), so pointing at the repo root reuses the app's own multi-service stack."""
+    candidates = [str(Path(root) / n) for n in _COMPOSE_NAMES if (Path(root) / n).exists()]
+    if not candidates:
+        for n in _COMPOSE_NAMES:
+            for p in sorted(Path(root).rglob(n)):
+                if not any(s in p.parts for s in _SKIP):
+                    candidates.append(str(p))
     with_build = [c for c in candidates if _parse_compose(c)[0]]   # has a build service
     return (with_build or candidates or [""])[0]
 
 
+def _build_context(compose, build_svc):
+    """Absolute dir of the build service's context (where the app's manifest/code live)."""
+    try:
+        d = yaml.safe_load(Path(compose).read_text(encoding="utf-8")) or {}
+        b = (d.get("services", {}).get(build_svc, {}) or {}).get("build")
+        ctx = b if isinstance(b, str) else (b or {}).get("context", ".")
+        return str((Path(compose).parent / ctx).resolve())
+    except Exception:
+        return str(Path(compose).parent)
+
+
 def profile(target) -> TargetProfile:
-    root = str(target)
-    req = _find(root, ["requirements.txt"])
-    pkg = _find(root, ["package.json"])
+    root = str(target)                                     # ANALYSIS scope (whole repo); app may be a subdir
     compose = _pick_compose(root)
+    app_root = root
+    if compose:                                            # monorepo: profile the app from its BUILD CONTEXT,
+        bs, _, _ = _parse_compose(compose)                 # not from an unrelated manifest elsewhere in the repo
+        if bs:
+            app_root = _build_context(compose, bs)
+    req = _find(app_root, ["requirements.txt"])
+    pkg = _find(app_root, ["package.json"])
     if req and not pkg:
         deps = Path(req).read_text(encoding="utf-8", errors="replace")
         fw = ("connexion" if "connexion" in deps.lower() else "fastapi" if "fastapi" in deps.lower()
               else "flask" if "flask" in deps.lower() else "python")
-        entry = _detect_entry_py(root)
-        return TargetProfile(root, "py", fw, deps, entry, _detect_port(root, entry, 5000), compose,
+        entry = _detect_entry_py(app_root)
+        return TargetProfile(root, "py", fw, deps, entry, _detect_port(app_root, entry, 5000), compose,
                              [h.name for h in registry.select(deps, "py")])
     if pkg:
         deps = Path(pkg).read_text(encoding="utf-8", errors="replace")
         fw = "nestjs" if "@nestjs" in deps else "express" if "express" in deps else "node"
-        entry = "server.js" if (Path(root) / "server.js").exists() else "index.js"
-        return TargetProfile(root, "js", fw, deps, entry, _detect_port(root, entry, 3000), compose,
+        entry = "server.js" if (Path(app_root) / "server.js").exists() else "index.js"
+        return TargetProfile(root, "js", fw, deps, entry, _detect_port(app_root, entry, 3000), compose,
                              [h.name for h in registry.select(deps, "js")])
     raise SystemExit(f"profile: unrecognized stack at {target}")
 
@@ -100,11 +124,16 @@ def _parse_compose(path):
     services = d.get("services", {})
     build_svc = next((n for n, s in services.items() if isinstance(s, dict) and "build" in s), None)
     host, internal = None, None
-    for p in (services.get(build_svc, {}) or {}).get("ports", []) or []:
+    svc = services.get(build_svc, {}) or {}
+    for p in svc.get("ports", []) or []:
         parts = str(p).split(":")
         internal = int(parts[-1].split("/")[0])
         host = int(parts[0]) if len(parts) > 1 else internal
         break
+    if internal is None:                                       # apps often only `expose:` the port
+        for e in svc.get("expose", []) or []:
+            internal = int(str(e).split("/")[0])
+            break
     return build_svc, host, internal
 
 
@@ -317,9 +346,13 @@ def _provision_py_compose(prof, hooks, host_port):
         raise SystemExit("provision(py): the app compose has no build service (prebuilt image?)")
     internal = internal or prof.internal_port
     host = host_port or internal
-    workdir = _dockerfile_workdir(prof.root)
+    # write everything NEXT TO the original compose so its relative build contexts (../backend) resolve
+    compose_dir = Path(prof.compose_file).parent
+    b = (services.get(build_svc, {}) or {}).get("build")
+    ctx = b if isinstance(b, str) else (b or {}).get("context", ".")
+    workdir = _dockerfile_workdir((compose_dir / ctx).resolve())   # the build context's Dockerfile WORKDIR
 
-    hook_dir = Path(prof.root) / "_wave_hooks"          # bind-mounted at /wave_hooks (on PYTHONPATH)
+    hook_dir = compose_dir / "_wave_hooks"              # bind-mounted at /wave_hooks (on PYTHONPATH)
     hook_dir.mkdir(exist_ok=True)
     imports = []
     for h in hooks:
@@ -345,7 +378,7 @@ def _provision_py_compose(prof, hooks, host_port):
             s["volumes"] = (s.get("volumes") or []) + [f"{host_hooks}:/wave_hooks:ro"]
         else:
             s.pop("ports", None)                         # reach other services over the internal network
-    out = str(Path(prof.root) / "wave.compose.full.yml")
+    out = str(compose_dir / "wave.compose.full.yml")     # next to the original -> relative contexts resolve
     Path(out).write_text(yaml.safe_dump(d), encoding="utf-8")
     return RunningTarget(prof, [out], build_svc, host), [out]
 

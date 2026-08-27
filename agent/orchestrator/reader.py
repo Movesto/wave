@@ -107,8 +107,8 @@ def read_file(model, path):
         src = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return "", []
-    txt = model.generate(_READ_SYS, f"FILE {Path(path).name}\n\n{_numbered(src)}",
-                         max_new_tokens=3600, temperature=0.2)   # R1 needs room to think THEN emit the array
+    txt = model.generate(_READ_SYS, f"FILE {Path(path).name}\n\n{_numbered(src, limit=320)}",
+                         max_new_tokens=2000, temperature=0.2)   # bounded so a slow/wedged gen shows up fast
     hyps = _parse_hyps(txt)
     return f"read {Path(path).name}: {len(hyps)} hypothesis(es)", hyps
 
@@ -193,8 +193,11 @@ def read_iterative(model, target, seed_candidates=(), routes=(), budget=10, per_
             break
         hot = []
         for f in batch:
+            print(f"[reader] round {rounds}: reading {Path(f).name} "
+                  f"({len(read_set) + 1}/{budget}) ...", flush=True)
             read_set.add(str(f))
             summary, hyps = read_file(model, f)
+            print(f"[reader]   -> {len(hyps)} hypothesis(es)", flush=True)
             report.append((str(f), summary, hyps))
             for h in hyps:
                 cands.append(_to_candidate(f, h, routes))

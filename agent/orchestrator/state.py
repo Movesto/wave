@@ -11,7 +11,7 @@ from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
 from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls, behavioral
-from . import browser_recon, bizlogic, recorder, rung0
+from . import browser_recon, bizlogic, recorder, rung0, rung1
 from . import auth as auth_mod
 from .models import Finding
 
@@ -227,11 +227,23 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                     evidence=f"delayed OAST callback at {late[0]['path']} from {late[0]['client']}",
                     payload=mk, notes=f"OAST-canary (async) via {c.route_hint or c.loc()}"))
                 deferred[:] = [(dc, r) for (dc, r) in deferred if dc is not c]
-    except Exception as e:                                  # dynamic stage failed -> keep the STATIC verdicts
+    except Exception as e:                                  # dynamic stage failed -> Rung 1, then static verdicts
         case.record("blocked", "provisioning/runtime", "tool", "blocked", provenance=target,
                     note=f"could not run the app dynamically: {type(e).__name__}: {e}")
-        print(f"[loop] dynamic stage failed ({type(e).__name__}: {e}) -- returning static (Rung 0) "
-              f"verdicts only", flush=True)
+        print(f"[loop] dynamic stage failed ({type(e).__name__}: {e}) -- trying Rung 1 "
+              f"(micro-execution, no boot)", flush=True)
+        r1 = 0
+        for c in provable_runtime:                          # Rung 1: confirm WITHOUT booting the whole app
+            mr = rung1.micro_exec(c)
+            if mr.verdict == "proven":
+                findings.append(Finding(candidate=c, status="proven (rung1)", evidence=mr.evidence,
+                                        payload=mr.marker, proven_request=None,
+                                        notes=f"Rung1 micro-exec (stubs={mr.stubs})"))
+                r1 += 1
+            elif mr.verdict == "safe":
+                case.supersede(hyp[_ensure_hyp(c)], status="refuted", note=f"Rung1: {mr.reason}")
+        if r1:
+            print(f"[rung1] confirmed {r1} candidate(s) by micro-execution (no boot)", flush=True)
     finally:
         if canary is not None:
             canary.stop()

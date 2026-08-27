@@ -267,7 +267,7 @@ def provision(target, host_port=None, timeout=300) -> RunningTarget:
     cmd += ["up", "-d", "--build"]
     subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
-    for _ in range(90):                        # heavy multi-service apps (keycloak realm import, etc.)
+    for _ in range(40):                        # bounded (~2 min for a dead app; healthy apps pass in seconds)
         try:
             with urllib.request.urlopen(rt.base_url + "/", timeout=4) as r:
                 if r.status < 500:
@@ -278,4 +278,13 @@ def provision(target, host_port=None, timeout=300) -> RunningTarget:
         time.sleep(3)
     print(f"[provision] {'up' if rt.healthy else 'NOT healthy'} at {rt.base_url} "
           f"(instrumented: {[h.name for h in hooks]})", flush=True)
+    if not rt.healthy:                         # RAISE (don't return a dead target) -> the loop's non-fatal
+        try:                                   # path records `blocked` and keeps the static (Rung 0) verdicts
+            rt.down()
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"app did not become healthy at {rt.base_url} within the boot window "
+            f"({prof.framework}/{prof.lang}); likely a missing dependency (DB/service), a wrong "
+            f"entrypoint, or a crash on startup -- provisioning is a Rung-2 concern, static verdicts stand")
     return rt

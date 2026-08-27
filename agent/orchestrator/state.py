@@ -11,7 +11,7 @@ from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
 from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls, behavioral
-from . import browser_recon, bizlogic, recorder
+from . import browser_recon, bizlogic, recorder, rung0
 from . import auth as auth_mod
 from .models import Finding
 
@@ -38,29 +38,66 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
     the fast review model. Either way the oracle is what proves a candidate, so a missed/over-eager
     candidate costs recall, never a false result."""
     from .model import Model
+    target = str(target)
     routes = routes_mod.extract_routes(target)
     cands = disc.discover(target, model_driven=model_discover)
     provable = [c for c in cands if c.provable]
 
-    rt = prov.provision(target, host_port=host_port)
-    recon = browser_recon.recon(rt)                        # browser-as-eyes: live forms/links/egress (§18 #5)
-    if recon.get("routes"):                                # augment the static route table with what the app renders
-        known = {(r.method, r.path) for r in routes}
-        new = [r for r in recon["routes"] if (r.method, r.path) not in known]
-        if new:
-            print(f"[recon] +{len(new)} route(s) from the rendered DOM (forms/links)", flush=True)
-            routes = routes + new
-    if recon.get("egress"):
-        print(f"[recon] external hosts the app contacts: {recon['egress']}", flush=True)
-    hook_list = registry.select(rt.profile.deps_text, rt.profile.lang)   # the app's instrumented sinks
-    auth = auth_mod.synthesize(rt, routes)                 # session for routes behind login (or {})
-    if auth:
-        print(f"[auth] synthesized session ({list(auth)[0]})", flush=True)
-    model = Model()                                        # 14B: crafts exploits + patches
-    canary = oast.Canary().start()                         # OAST: async/blind egress witness
+    # --- Case File up front + Rung 0 STATIC pre-pass: settle what we can from the CODE before booting,
+    # so verdicts survive even if the app never provisions (investigation-loop plan, Rung 0). ---
+    case = recorder.CaseFile(target)
+    for r in routes:
+        case.record("route", f"{r.method} {r.path}", "tool", "confirmed", provenance=r.file or "")
+
+    def _subj(c):
+        return f"{c.cwe} {c.route_hint or c.loc()}"
+
+    hyp = {}                                                # subject -> its hypothesis entry id
+
+    def _ensure_hyp(c):
+        s = _subj(c)
+        if s not in hyp:
+            hyp[s] = case.record("hypothesis", s, "seed", "believed", provenance=c.loc(),
+                                 cwe=c.cwe, family=c.family).id
+        return s
+
+    provable_runtime, refuted = [], []
+    for c in provable:
+        _ensure_hyp(c)
+        a = rung0.assess(c)
+        if a.verdict == "safe":                             # proven-safe without running -> REFUTE
+            case.supersede(hyp[_subj(c)], status="refuted", note=f"Rung0: {a.reason}")
+            refuted.append((c, a.reason))
+        else:
+            if a.verdict == "reachable":                    # a stronger lead -> note it, still prove at runtime
+                case.record("evidence", _subj(c), "tool", "believed", provenance=c.loc(),
+                            cwe=c.cwe, note=f"Rung0 reachable: {a.reason}")
+            provable_runtime.append(c)
+    if refuted:
+        print(f"[rung0] cleared {len(refuted)} candidate(s) as proven-safe (no boot); "
+              f"{len(provable_runtime)} left for the runtime oracle", flush=True)
+
     findings, deferred, pending_oast = [], [], []
+    rt = canary = model = hook_list = None
+    auth = {}
     try:
-        for c in provable:
+        rt = prov.provision(target, host_port=host_port)
+        recon = browser_recon.recon(rt)                     # browser-as-eyes: live forms/links/egress (§18 #5)
+        if recon.get("routes"):                             # augment the static route table with what the app renders
+            known = {(r.method, r.path) for r in routes}
+            new = [r for r in recon["routes"] if (r.method, r.path) not in known]
+            if new:
+                print(f"[recon] +{len(new)} route(s) from the rendered DOM (forms/links)", flush=True)
+                routes = routes + new
+        if recon.get("egress"):
+            print(f"[recon] external hosts the app contacts: {recon['egress']}", flush=True)
+        hook_list = registry.select(rt.profile.deps_text, rt.profile.lang)   # the app's instrumented sinks
+        auth = auth_mod.synthesize(rt, routes)              # session for routes behind login (or {})
+        if auth:
+            print(f"[auth] synthesized session ({list(auth)[0]})", flush=True)
+        model = Model()                                     # 14B: crafts exploits + patches
+        canary = oast.Canary().start()                      # OAST: async/blind egress witness
+        for c in provable_runtime:
             if c.cwe == "CWE-79":                          # XSS -> DOM oracle (headless browser)
                 v = _prove_xss(rt, c, routes, model, auth)
             elif c.cwe == "CWE-1333":                      # ReDoS -> behavioral timing oracle
@@ -190,11 +227,18 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
                     evidence=f"delayed OAST callback at {late[0]['path']} from {late[0]['client']}",
                     payload=mk, notes=f"OAST-canary (async) via {c.route_hint or c.loc()}"))
                 deferred[:] = [(dc, r) for (dc, r) in deferred if dc is not c]
+    except Exception as e:                                  # dynamic stage failed -> keep the STATIC verdicts
+        case.record("blocked", "provisioning/runtime", "tool", "blocked", provenance=target,
+                    note=f"could not run the app dynamically: {type(e).__name__}: {e}")
+        print(f"[loop] dynamic stage failed ({type(e).__name__}: {e}) -- returning static (Rung 0) "
+              f"verdicts only", flush=True)
     finally:
-        canary.stop()
-        rt.down()                      # free the port before the patch phase re-provisions
+        if canary is not None:
+            canary.stop()
+        if rt is not None:
+            rt.down()                  # free the port before the patch phase re-provisions
 
-    if fix and findings:
+    if fix and findings and model is not None:
         for f in findings:
             if f.candidate.detector in ("differential", "behavioral") or f.candidate.cwe in ("CWE-79", "CWE-1333"):
                 f.status = "proven (fix-deferred)"          # IDOR / rate-limit / XSS / ReDoS fixes not automated
@@ -204,44 +248,29 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
             f.gate_a = r.get("gate_a", "")
             f.gate_b = r.get("gate_b", "")
             f.status = "fixed" if r.get("status") == "fixed" else "proven (" + r.get("status", "?") + ")"
-    model.unload()
+    if model is not None:
+        model.unload()
 
-    # --- Recorder (Phase 1): faithfully log what the loop did to the Case File (no behavior change).
-    # routes = confirmed structural facts; each candidate = a believed hypothesis; a PROVEN candidate
-    # gets a confirmed `confirmation`; a DEFERRED one gets `evidence` (still believed -- not a finding). ---
-    case = recorder.CaseFile(str(target))
-    for r in routes:
-        case.record("route", f"{r.method} {r.path}", "tool", "confirmed", provenance=r.file or "")
-
-    def _subj(c):
-        return f"{c.cwe} {c.route_hint or c.loc()}"
-
-    hyp = {}                                            # subject -> its hypothesis entry id
-
-    def _ensure_hyp(c):
-        s = _subj(c)
-        if s not in hyp:
-            hyp[s] = case.record("hypothesis", s, "seed", "believed", provenance=c.loc(),
-                                 cwe=c.cwe, family=c.family).id
-        return s
-
-    for f in findings:                                  # PROVEN: the belief transitions to confirmed
+    # --- record what the runtime stage proved/deferred into the Case File (hypotheses + Rung-0
+    # verdicts already recorded above). PROVEN -> the belief transitions to confirmed; DEFERRED ->
+    # evidence (still a believed hypothesis, never a finding). ---
+    for f in findings:
         s = _ensure_hyp(f.candidate)
         case.supersede(hyp[s], status="confirmed")
         case.record("confirmation", s, "oracle", "confirmed", provenance=f.candidate.loc(),
                     cwe=f.candidate.cwe, evidence=f.evidence, oracle=f.notes)
-    for c, reason in deferred:                          # DEFERRED: still a believed hypothesis, not a finding
+    for c, reason in deferred:
         s = _ensure_hyp(c)
         case.record("evidence", s, "tool", "believed", provenance=c.loc(), cwe=c.cwe, note=reason)
     print(f"[recorder] case file: {len(case.all())} entries -- {len(case.by_kind('route'))} routes, "
           f"{len(case.hypotheses())} hypotheses, {len(case.findings())} confirmed, "
-          f"{len(case.by_kind('evidence'))} deferred", flush=True)
+          f"{len(case.refuted())} refuted-safe, {len(case.by_kind('evidence'))} evidence", flush=True)
 
     return {
         "findings": findings,
         "deferred": deferred,
         "case": case,
         "summary": {"candidates": len(cands), "provable": len(provable),
-                    "proven": len(findings), "deferred": len(deferred),
-                    "fixed": sum(1 for f in findings if f.status == "fixed")},
+                    "refuted_static": len(refuted), "proven": len(findings),
+                    "deferred": len(deferred), "fixed": sum(1 for f in findings if f.status == "fixed")},
     }

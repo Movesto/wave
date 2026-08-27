@@ -14,7 +14,7 @@ from . import state as st
 
 def cmd_loop(args):
     res = st.run_loop(args.target, host_port=args.port, strikes=args.strikes, fix=args.fix,
-                      model_discover=args.model_discover)
+                      model_discover=args.model_discover, use_reader=args.reader)
     s = res["summary"]
     print(f"\n=== LOOP on {args.target} ===")
     print(f"  candidates={s['candidates']} provable={s['provable']} "
@@ -70,6 +70,8 @@ def main():
     lp.add_argument("--fix", action="store_true", help="generate a patch + dual-gate (loads the 14B)")
     lp.add_argument("--model-discover", action="store_true",
                     help="use the fast review model for discovery (default: deterministic patterns)")
+    lp.add_argument("--reader", action="store_true",
+                    help="Phase 4: the model READS prioritized files and forms its own hypotheses")
     lp.set_defaults(func=cmd_loop)
 
     args = ap.parse_args()

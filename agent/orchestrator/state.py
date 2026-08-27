@@ -11,7 +11,7 @@ from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
 from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls, behavioral
-from . import browser_recon, bizlogic, recorder, rung0, rung1
+from . import browser_recon, bizlogic, recorder, rung0, rung1, reader
 from . import auth as auth_mod
 from .models import Finding
 
@@ -30,7 +30,7 @@ def _prove_xss(rt, c, routes, model, auth):
     return {"status": "not-proven", "cwe": "CWE-79", "notes": "no crafted XSS executed in the DOM"}
 
 
-def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False):
+def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False, use_reader=False):
     """Full loop on `target`: discover -> provision -> (MODEL crafts exploits) prove, then (if fix)
     patch + dual-gate. The model drives exploitation and remediation; tools prove. Returns a dict.
 
@@ -57,9 +57,27 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
     def _ensure_hyp(c):
         s = _subj(c)
         if s not in hyp:
-            hyp[s] = case.record("hypothesis", s, "seed", "believed", provenance=c.loc(),
+            src = "model" if c.detector == "reader" else "seed"   # a Reader hypothesis vs a seed-pattern one
+            hyp[s] = case.record("hypothesis", s, src, "believed", provenance=c.loc(),
                                  cwe=c.cwe, family=c.family).id
         return s
+
+    model = None
+    if use_reader:                                          # Phase 4: the model READS prioritized files and
+        model = Model()                                     # forms its OWN hypotheses (believed leads, not findings)
+        reader_cands, reader_report = reader.read(model, target, provable, routes, budget=8)
+        for path, summary, _h in reader_report:
+            case.record("file_summary", path, "model", "believed", note=summary)
+        seen = {(c.file, c.cwe) for c in provable}
+        added = 0
+        for rc in reader_cands:                             # merge model hypotheses the seed pass missed
+            if rc.provable and (rc.file, rc.cwe) not in seen:
+                provable.append(rc)
+                seen.add((rc.file, rc.cwe))
+                added += 1
+        print(f"[reader] read {len(reader_report)} file(s) -> "
+              f"{sum(len(h) for _p, _s, h in reader_report)} hypotheses; "
+              f"+{added} candidate(s) beyond the seed pass", flush=True)
 
     provable_runtime, refuted = [], []
     for c in provable:
@@ -78,7 +96,7 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
               f"{len(provable_runtime)} left for the runtime oracle", flush=True)
 
     findings, deferred, pending_oast = [], [], []
-    rt = canary = model = hook_list = None
+    rt = canary = hook_list = None                          # model may already be loaded (Reader); else load in try
     auth = {}
     try:
         rt = prov.provision(target, host_port=host_port)
@@ -95,7 +113,8 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
         auth = auth_mod.synthesize(rt, routes)              # session for routes behind login (or {})
         if auth:
             print(f"[auth] synthesized session ({list(auth)[0]})", flush=True)
-        model = Model()                                     # 14B: crafts exploits + patches
+        if model is None:                                   # loaded early only when the Reader ran
+            model = Model()                                 # 14B: crafts exploits + patches
         canary = oast.Canary().start()                      # OAST: async/blind egress witness
         for c in provable_runtime:
             if c.cwe == "CWE-79":                          # XSS -> DOM oracle (headless browser)

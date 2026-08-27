@@ -91,9 +91,10 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
         return s
 
     model = None
-    if use_reader:                                          # Phase 4: the model READS prioritized files and
-        model = Model()                                     # forms its OWN hypotheses (believed leads, not findings)
-        reader_cands, reader_report = reader.read(model, target, provable, routes, budget=8)
+    if use_reader:                                          # Phase 4+7: the model READS prioritized files and
+        model = Model()                                     # forms its OWN hypotheses, REVISITING via import-leads
+        reader_cands, reader_report = reader.read_iterative(model, target, provable, routes,
+                                                            budget=10, per_round=4, max_rounds=3)
         for path, summary, _h in reader_report:
             case.record("file_summary", path, "model", "believed", note=summary)
         seen = {(c.file, c.cwe) for c in provable}

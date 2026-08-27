@@ -141,3 +141,68 @@ def read(model, target, seed_candidates=(), routes=(), budget=8):
         for h in hyps:
             cands.append(_to_candidate(f, h, routes))
     return cands, report
+
+
+# ---- Iterative revisit: follow leads via the import graph (the Architect, lightweight) ----------------
+_IMPORT = re.compile(r"^\s*(?:import|from)\s+([\w.]+)|require\(['\"]([^'\"]+)['\"]\)", re.M)
+
+
+def _imported_stems(src):
+    stems = set()
+    for m in _IMPORT.finditer(src or ""):
+        mod = (m.group(1) or m.group(2) or "").replace("./", "").replace("../", "")
+        stems.add(mod.split("/")[-1].split(".")[0])
+    return {s for s in stems if s}
+
+
+def _neighbors(target, hot_files):
+    """Files that IMPORT a hot file, or are IMPORTED BY one -- the import-graph neighbourhood of a lead."""
+    hot = [Path(f) for f in hot_files]
+    hot_stems = {p.stem for p in hot}
+    hot_imports = set()
+    for p in hot:
+        try:
+            hot_imports |= _imported_stems(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    out = set()
+    for f in _iter_files(target):
+        if f in hot:
+            continue
+        try:
+            src = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if (_imported_stems(src) & hot_stems) or (f.stem in hot_imports):
+            out.add(f)
+    return out
+
+
+def read_iterative(model, target, seed_candidates=(), routes=(), budget=10, per_round=4, max_rounds=3):
+    """Read in ROUNDS, following leads: after a round, the import-neighbours of files that yielded a
+    hypothesis are read next. TERMINATES on diminishing returns (a round finds nothing), max_rounds, or
+    the budget (total files read). Returns (reader Candidates, [(file, summary, hypotheses)])."""
+    ranked = prioritize_files(target, seed_candidates, budget=budget * 4)
+    read_set, cands, report, rounds = set(), [], [], 0
+    queue = list(ranked)
+    while queue and rounds < max_rounds and len(read_set) < budget:
+        rounds += 1
+        batch = [f for f in queue if str(f) not in read_set][:per_round]
+        batch = batch[:max(0, budget - len(read_set))]
+        if not batch:
+            break
+        hot = []
+        for f in batch:
+            read_set.add(str(f))
+            summary, hyps = read_file(model, f)
+            report.append((str(f), summary, hyps))
+            for h in hyps:
+                cands.append(_to_candidate(f, h, routes))
+            if hyps:
+                hot.append(f)
+        if not hot:                                     # diminishing returns: a whole round found nothing
+            break
+        nbrs = [f for f in _neighbors(target, hot) if str(f) not in read_set]   # follow the leads first
+        rest = [f for f in ranked if str(f) not in read_set and f not in nbrs]
+        queue = nbrs + rest
+    return cands, report

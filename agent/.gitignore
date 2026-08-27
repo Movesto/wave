@@ -10,3 +10,4 @@ Dockerfile.wave
 Dockerfile.otel
 wave.compose.yml
 wave.compose.full.yml
+casefile.json

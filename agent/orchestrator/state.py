@@ -11,7 +11,7 @@ from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
 from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls, behavioral
-from . import browser_recon, bizlogic
+from . import browser_recon, bizlogic, recorder
 from . import auth as auth_mod
 from .models import Finding
 
@@ -206,9 +206,41 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False)
             f.status = "fixed" if r.get("status") == "fixed" else "proven (" + r.get("status", "?") + ")"
     model.unload()
 
+    # --- Recorder (Phase 1): faithfully log what the loop did to the Case File (no behavior change).
+    # routes = confirmed structural facts; each candidate = a believed hypothesis; a PROVEN candidate
+    # gets a confirmed `confirmation`; a DEFERRED one gets `evidence` (still believed -- not a finding). ---
+    case = recorder.CaseFile(str(target))
+    for r in routes:
+        case.record("route", f"{r.method} {r.path}", "tool", "confirmed", provenance=r.file or "")
+
+    def _subj(c):
+        return f"{c.cwe} {c.route_hint or c.loc()}"
+
+    hyp = {}                                            # subject -> its hypothesis entry id
+
+    def _ensure_hyp(c):
+        s = _subj(c)
+        if s not in hyp:
+            hyp[s] = case.record("hypothesis", s, "seed", "believed", provenance=c.loc(),
+                                 cwe=c.cwe, family=c.family).id
+        return s
+
+    for f in findings:                                  # PROVEN: the belief transitions to confirmed
+        s = _ensure_hyp(f.candidate)
+        case.supersede(hyp[s], status="confirmed")
+        case.record("confirmation", s, "oracle", "confirmed", provenance=f.candidate.loc(),
+                    cwe=f.candidate.cwe, evidence=f.evidence, oracle=f.notes)
+    for c, reason in deferred:                          # DEFERRED: still a believed hypothesis, not a finding
+        s = _ensure_hyp(c)
+        case.record("evidence", s, "tool", "believed", provenance=c.loc(), cwe=c.cwe, note=reason)
+    print(f"[recorder] case file: {len(case.all())} entries -- {len(case.by_kind('route'))} routes, "
+          f"{len(case.hypotheses())} hypotheses, {len(case.findings())} confirmed, "
+          f"{len(case.by_kind('evidence'))} deferred", flush=True)
+
     return {
         "findings": findings,
         "deferred": deferred,
+        "case": case,
         "summary": {"candidates": len(cands), "provable": len(provable),
                     "proven": len(findings), "deferred": len(deferred),
                     "fixed": sum(1 for f in findings if f.status == "fixed")},

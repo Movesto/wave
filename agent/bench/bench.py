@@ -23,6 +23,10 @@ def run_target(tdir, fix=False):
     dt = time.time() - t0
     findings = res["findings"]
     found = {f.candidate.cwe for f in findings}
+    case = res.get("case")
+    if case is not None:                                   # the Case File IS the investigation report (plan §7)
+        case.save(tdir / "casefile.json")
+        print("\n" + case.report())
     print(f"\n{'=' * 68}\nTARGET {man['name']}  ({man['stack']})   [{dt:.0f}s]")
 
     if man.get("safe") or not truth:                       # SECURE control -> any finding is a FALSE POSITIVE

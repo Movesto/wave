@@ -11,7 +11,7 @@ from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
 from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls, behavioral
-from . import browser_recon, bizlogic, recorder, rung0, rung1, reader
+from . import browser_recon, bizlogic, recorder, rung0, rung1, reader, editor
 from . import auth as auth_mod
 from .models import Finding
 
@@ -30,7 +30,7 @@ def _prove_xss(rt, c, routes, model, auth):
     return {"status": "not-proven", "cwe": "CWE-79", "notes": "no crafted XSS executed in the DOM"}
 
 
-def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False, use_reader=False):
+def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False, use_reader=False, budget=80):
     """Full loop on `target`: discover -> provision -> (MODEL crafts exploits) prove, then (if fix)
     patch + dual-gate. The model drives exploitation and remediation; tools prove. Returns a dict.
 
@@ -79,7 +79,7 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
               f"{sum(len(h) for _p, _s, h in reader_report)} hypotheses; "
               f"+{added} candidate(s) beyond the seed pass", flush=True)
 
-    provable_runtime, refuted = [], []
+    provable_runtime, refuted, reachable_subjects = [], [], set()
     for c in provable:
         _ensure_hyp(c)
         a = rung0.assess(c)
@@ -88,12 +88,24 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
             refuted.append((c, a.reason))
         else:
             if a.verdict == "reachable":                    # a stronger lead -> note it, still prove at runtime
+                reachable_subjects.add(_subj(c))
                 case.record("evidence", _subj(c), "tool", "believed", provenance=c.loc(),
                             cwe=c.cwe, note=f"Rung0 reachable: {a.reason}")
             provable_runtime.append(c)
     if refuted:
         print(f"[rung0] cleared {len(refuted)} candidate(s) as proven-safe (no boot); "
               f"{len(provable_runtime)} left for the runtime oracle", flush=True)
+
+    # --- Editor (Phase 5): work the highest-value hypotheses first (severity x confidence x
+    # reachability) and BOUND the run with a budget -- the rest are recorded, not silently dropped. ---
+    provable_runtime = editor.prioritize(provable_runtime, reachable_subjects)
+    provable_runtime, budget_deferred = editor.apply_budget(provable_runtime, budget)
+    for c in budget_deferred:
+        case.record("evidence", _subj(c), "tool", "believed", provenance=c.loc(), cwe=c.cwe,
+                    note="deferred (budget) -- lower-priority, not worked this run")
+    if budget_deferred:
+        print(f"[editor] budget={budget}: working {len(provable_runtime)} highest-priority candidate(s), "
+              f"{len(budget_deferred)} deferred", flush=True)
 
     findings, deferred, pending_oast = [], [], []
     rt = canary = hook_list = None                          # model may already be loaded (Reader); else load in try
@@ -297,6 +309,7 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
     print(f"[recorder] case file: {len(case.all())} entries -- {len(case.by_kind('route'))} routes, "
           f"{len(case.hypotheses())} hypotheses, {len(case.findings())} confirmed, "
           f"{len(case.refuted())} refuted-safe, {len(case.by_kind('evidence'))} evidence", flush=True)
+    print(editor.summary(case, len(budget_deferred)), flush=True)
 
     return {
         "findings": findings,

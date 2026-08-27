@@ -126,6 +126,34 @@ def _iter_src(target, budget=500):
             yield f
 
 
+# ---- Dev-marker hints: TODO/FIXME/HACK near security-relevant code -- PRIORITIZATION signals ---------
+# Not findings -- a developer flagging "fix this / temporary / insecure" is a lead + a nudge to work the
+# nearby candidates first. Only SECURITY-flavoured markers are kept (a plain "TODO: rename var" is noise).
+_TODO = re.compile(r"(?i)\b(TODO|FIXME|HACK|XXX|BUG|INSECURE|WORKAROUND|NOSONAR)\b[:\s\-]{0,3}(.{0,120})")
+_SEC_HINT = re.compile(
+    r"(?i)inject|sanitiz|escap|\bauth\b|passwd|password|secret|token|unsafe|insecure|vulnerab|"
+    r"hardcod|temporar|remove before|do ?not|don'?t|dangerous|exploit|bypass|validate|permission|"
+    r"\bsql\b|\bxss\b|\bssrf\b|\bcsrf\b|priv")
+
+
+def todo_scan(target):
+    """Security-flavoured developer markers (TODO/FIXME/HACK/...) -- prioritization hints, not findings."""
+    out = []
+    for f in _iter_src(target):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            m = _TODO.search(line)
+            if not m:
+                continue
+            tag = m.group(1).upper()
+            if _SEC_HINT.search(line) or tag in ("HACK", "INSECURE", "XXX"):   # keep the security-relevant ones
+                out.append({"file": str(f), "line": i, "tag": tag, "text": (m.group(2) or "").strip()[:100]})
+    return out
+
+
 def secret_scan(target):
     """Hardcoded-credential findings (CWE-798). Known key formats -> confirmed; generic secret-shaped
     assignments -> believed (needs confirm). Offline + deterministic."""

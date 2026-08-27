@@ -25,16 +25,19 @@ def _subj(c):
     return f"{c.cwe} {c.route_hint or c.loc()}"
 
 
-def score(candidate, reachable=False):
+def score(candidate, reachable=False, hinted=False):
     sev = _SEVERITY.get(getattr(candidate, "cwe", ""), 5)
     conf = _CONFIDENCE.get(getattr(candidate, "detector", ""), 0.7)
     reach = 1.5 if reachable else 1.0                   # Rung 0 said user input provably reaches the sink
-    return sev * conf * reach
+    hint = 1.25 if hinted else 1.0                      # a developer left a security TODO/HACK in this file
+    return sev * conf * reach * hint
 
 
-def prioritize(candidates, reachable_subjects=frozenset()):
-    """Highest-value first: severity x confidence x reachability."""
-    return sorted(candidates, key=lambda c: score(c, _subj(c) in reachable_subjects), reverse=True)
+def prioritize(candidates, reachable_subjects=frozenset(), hint_files=frozenset()):
+    """Highest-value first: severity x confidence x reachability x dev-marker hint."""
+    return sorted(candidates,
+                  key=lambda c: score(c, _subj(c) in reachable_subjects, getattr(c, "file", "") in hint_files),
+                  reverse=True)
 
 
 def apply_budget(candidates, budget):

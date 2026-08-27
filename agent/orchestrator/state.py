@@ -77,6 +77,14 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
         print(f"[reporter] secret scan: {nconf} confirmed + {len(secrets_found) - nconf} suspected "
               f"hardcoded secret(s)", flush=True)
 
+    dev_markers = reporters.todo_scan(target)       # security-flavoured TODO/HACK -> prioritization hints
+    hint_files = {m["file"] for m in dev_markers}
+    for m in dev_markers:
+        case.record("evidence", f"dev-marker {m['tag']} {m['file']}:{m['line']}", "tool", "believed",
+                    provenance=f"{m['file']}:{m['line']}", note=f"{m['tag']}: {m['text']}")
+    if dev_markers:
+        print(f"[reporter] dev markers: {len(dev_markers)} security-flavoured TODO/HACK hint(s)", flush=True)
+
     def _subj(c):
         return f"{c.cwe} {c.route_hint or c.loc()}"
 
@@ -127,7 +135,7 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
 
     # --- Editor (Phase 5): work the highest-value hypotheses first (severity x confidence x
     # reachability) and BOUND the run with a budget -- the rest are recorded, not silently dropped. ---
-    provable_runtime = editor.prioritize(provable_runtime, reachable_subjects)
+    provable_runtime = editor.prioritize(provable_runtime, reachable_subjects, hint_files)
     provable_runtime, budget_deferred = editor.apply_budget(provable_runtime, budget)
     for c in budget_deferred:
         case.record("evidence", _subj(c), "tool", "believed", provenance=c.loc(), cwe=c.cwe,

@@ -199,12 +199,14 @@ _COMPOSE_PY = '''services:
 
 
 class RunningTarget:
-    def __init__(self, prof, compose_files, service, host_port):
+    def __init__(self, prof, compose_files, service, host_port, workdir="/app", code_root=None):
         self.profile = prof
         self.compose_files = list(compose_files)
         self.service = service
         self.base_url = f"http://localhost:{host_port}"
         self.healthy = False
+        self.workdir = workdir                          # where the app's code lives INSIDE the image
+        self.code_root = code_root or prof.root         # host dir that maps to workdir (for piece micro-exec)
 
     def _compose(self, *args):
         cmd = ["docker", "compose"]
@@ -380,7 +382,9 @@ def _provision_py_compose(prof, hooks, host_port):
             s.pop("ports", None)                         # reach other services over the internal network
     out = str(compose_dir / "wave.compose.full.yml")     # next to the original -> relative contexts resolve
     Path(out).write_text(yaml.safe_dump(d), encoding="utf-8")
-    return RunningTarget(prof, [out], build_svc, host), [out]
+    rt = RunningTarget(prof, [out], build_svc, host, workdir=workdir,
+                       code_root=str((compose_dir / ctx).resolve()))
+    return rt, [out]
 
 
 def _provision_js(prof, hooks, host_port):
@@ -425,32 +429,44 @@ def _provision_js(prof, hooks, host_port):
     return RunningTarget(prof, [out], build_svc, host), [out]
 
 
-def provision(target, host_port=None, timeout=300) -> RunningTarget:
-    prof = profile(target)
-    hooks = registry.select(prof.deps_text, prof.lang)
-    if not hooks:
-        raise SystemExit(f"provision: no Registry sink hook for {prof.framework}/{prof.lang}")
-
-    if prof.lang == "py":
-        rt, files = _provision_py_compose(prof, hooks, host_port) if prof.compose_file \
-            else _provision_py(prof, hooks, host_port)      # reuse the app's own multi-service compose if it ships one
-    else:
-        rt, files = _provision_js(prof, hooks, host_port)
-
-    print(f"[provision] building+booting {prof.framework}/{prof.lang} via {len(files)} compose file(s); "
-          f"hooks={[h.name for h in hooks]}", flush=True)
-    cmd = ["docker", "compose"]
-    for f in files:
-        cmd += ["-f", f]
-    cmd += ["up", "-d", "--build"]
-    # supply common defaults so a required-var compose (`${POSTGRES_PASSWORD:?}`) doesn't fail substitution
+def compose_env():
+    """docker-compose env with common defaults so a required-var compose (`${POSTGRES_PASSWORD:?}`)
+    doesn't fail variable substitution (used by both boot and per-piece micro-exec)."""
     import os as _os
     env = dict(_os.environ)
     for k, v in {"POSTGRES_PASSWORD": "wave", "POSTGRES_USER": "wave", "POSTGRES_DB": "wave",
                  "DB_PASSWORD": "wave", "MYSQL_ROOT_PASSWORD": "wave", "SECRET_KEY": "wave-secret"}.items():
         env.setdefault(k, v)
+    return env
+
+
+def prepare(target, host_port=None):
+    """Write the compose + Dockerfile + sink hooks WITHOUT booting. Returns (rt, files, prof) so the
+    loop can micro-execute pieces in the built image (`docker compose run --no-deps`) without ever
+    starting the whole stack -- run-by-piece, not run-the-whole-app."""
+    prof = profile(target)
+    hooks = registry.select(prof.deps_text, prof.lang)
+    if not hooks:
+        raise SystemExit(f"provision: no Registry sink hook for {prof.framework}/{prof.lang}")
+    if prof.lang == "py":
+        rt, files = _provision_py_compose(prof, hooks, host_port) if prof.compose_file \
+            else _provision_py(prof, hooks, host_port)      # reuse the app's own multi-service compose if it ships one
+    else:
+        rt, files = _provision_js(prof, hooks, host_port)
+    return rt, files, prof
+
+
+def provision(target, host_port=None, timeout=300) -> RunningTarget:
+    rt, files, prof = prepare(target, host_port)
+    hooks = prof.drivers
+    print(f"[provision] building+booting {prof.framework}/{prof.lang} via {len(files)} compose file(s); "
+          f"hooks={hooks}", flush=True)
+    cmd = ["docker", "compose"]
+    for f in files:
+        cmd += ["-f", f]
+    cmd += ["up", "-d", "--build"]
     subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                   timeout=timeout, env=env)
+                   timeout=timeout, env=compose_env())
 
     for _ in range(40):                        # bounded (~2 min for a dead app; healthy apps pass in seconds)
         try:
@@ -462,7 +478,7 @@ def provision(target, host_port=None, timeout=300) -> RunningTarget:
             pass
         time.sleep(3)
     print(f"[provision] {'up' if rt.healthy else 'NOT healthy'} at {rt.base_url} "
-          f"(instrumented: {[h.name for h in hooks]})", flush=True)
+          f"(instrumented: {hooks})", flush=True)
     if not rt.healthy:                         # RAISE (don't return a dead target) -> the loop's non-fatal
         try:                                   # path records `blocked` and keeps the static (Rung 0) verdicts
             rt.down()

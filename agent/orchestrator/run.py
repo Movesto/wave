@@ -15,7 +15,7 @@ from . import state as st
 def cmd_loop(args):
     res = st.run_loop(args.target, host_port=args.port, strikes=args.strikes, fix=args.fix,
                       model_discover=args.model_discover, use_reader=args.reader,
-                      audit_deps=not args.no_deps, budget=args.budget)
+                      audit_deps=not args.no_deps, budget=args.budget, dynamic=args.dynamic)
     s = res["summary"]
     print(f"\n=== LOOP on {args.target} ===")
     print(f"  candidates={s['candidates']} provable={s['provable']} "
@@ -87,6 +87,9 @@ def main():
                     help="skip the dependency-vulnerability audit (Phase 6 reporter)")
     lp.add_argument("--budget", type=int, default=80,
                     help="Editor budget: max candidates to work this run (default 80)")
+    lp.add_argument("--dynamic", action="store_true",
+                    help="boot the WHOLE app for Rung-2 + business-logic/IDOR differentials "
+                         "(default: run-by-piece micro-exec only, no whole-app boot)")
     lp.set_defaults(func=cmd_loop)
 
     args = ap.parse_args()

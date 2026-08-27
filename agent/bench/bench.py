@@ -19,7 +19,7 @@ def run_target(tdir, fix=False):
     man = json.loads((tdir / "MANIFEST.json").read_text(encoding="utf-8"))
     truth = {v["cwe"] for v in man["vulns"]}
     t0 = time.time()
-    res = state.run_loop(str(tdir), fix=fix)
+    res = state.run_loop(str(tdir), fix=fix, dynamic=True)   # the bench measures the FULL capability (boot + all oracles)
     dt = time.time() - t0
     findings = res["findings"]
     found = {f.candidate.cwe for f in findings}

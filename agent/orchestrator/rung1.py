@@ -394,29 +394,41 @@ def _container_path(candidate_file, target):
         return "/app/" + Path(candidate_file).name
 
 
-def micro_exec_container(candidate, target, timeout=150) -> MicroResult:
-    """Run the micro-exec driver INSIDE the built image (deps live there). Reuses the wave.compose.yml a
-    prior provision wrote; the app code is at /app. For real apps whose deps aren't importable on the host."""
+def _container_modpath(candidate_file, code_root, workdir):
+    from pathlib import Path
+    try:
+        rel = Path(candidate_file).resolve().relative_to(Path(code_root).resolve())
+        return workdir.rstrip("/") + "/" + str(rel).replace("\\", "/")
+    except Exception:
+        return workdir.rstrip("/") + "/" + Path(candidate_file).name
+
+
+def micro_exec_container(candidate, rt, timeout=180) -> MicroResult:
+    """Run the micro-exec driver INSIDE the app's built image (deps live there), with `--no-deps --build`
+    so it BUILDS the app image on demand but NEVER boots the stack -- run-by-piece for real apps. `rt` is
+    the prepared RunningTarget (compose file, build service, code_root -> workdir mapping)."""
     import json as _json
     import re as _re
     import subprocess
-    from pathlib import Path
+    from . import provision
 
-    compose = Path(target) / "wave.compose.yml"
     unit = getattr(candidate, "unit", "") or ""
     func = unit.split("(")[0].strip()
-    if not compose.exists():
-        return MicroResult("unknown", "no built image (wave.compose.yml missing) -- provision it first")
+    if rt is None or not rt.compose_files:
+        return MicroResult("unknown", "target not prepared (no compose) for in-container micro-exec")
     if not func:
         return MicroResult("unknown", "no handler function for in-container micro-exec")
     payload, marker = _payload(getattr(candidate, "cwe", ""))
-    modpath = _container_path(getattr(candidate, "file", ""), target)
+    modpath = _container_modpath(getattr(candidate, "file", ""), rt.code_root, rt.workdir)
     driver = (_DRIVER.replace("__MARKER__", repr(payload)).replace("__MODPATH__", repr(modpath))
               .replace("__FUNC__", repr(func)))
-    cmd = ["docker", "compose", "-f", str(compose), "run", "--rm", "--no-deps", "-T",
-           "--entrypoint", "python", "wave-app", "-c", driver]
+    cmd = ["docker", "compose"]
+    for f in rt.compose_files:
+        cmd += ["-f", f]
+    cmd += ["run", "--rm", "--no-deps", "--build", "-T", "--entrypoint", "python", rt.service, "-c", driver]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8",
+                           errors="replace", env=provision.compose_env())
     except Exception as e:
         return MicroResult("unknown", f"in-container micro-exec failed to run: {type(e).__name__}: {e}")
     out = (r.stdout or "") + (r.stderr or "")
@@ -430,14 +442,16 @@ def micro_exec_container(candidate, target, timeout=150) -> MicroResult:
     return MicroResult(v, why, marker=marker, evidence=why if v != "unknown" else "", stubs=["in-container"])
 
 
-def micro_exec(candidate, target_param=None, target=None) -> MicroResult:
-    """Confirm a candidate by micro-execution: try IN-PROCESS (fast; needs deps on the host), and if
-    that can't run (deps live only in the container), fall back to IN-CONTAINER when `target` is given."""
+def micro_exec(candidate, target_param=None, rt=None) -> MicroResult:
+    """Confirm a candidate by micro-execution: try IN-PROCESS (fast; needs deps on the host), and if that
+    can't run (deps live only in the image), fall back to IN-CONTAINER when a prepared `rt` is given."""
     mr = _inproc(candidate, target_param)
     if mr.verdict in ("proven", "safe"):
         return mr
-    if target is not None:
-        cres = micro_exec_container(candidate, target)
+    if rt is not None:
+        cres = micro_exec_container(candidate, rt)
         if cres.verdict in ("proven", "safe"):
+            return cres
+        if mr.verdict == "unknown" and cres.verdict != "unknown":
             return cres
     return mr

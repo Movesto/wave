@@ -31,7 +31,7 @@ def _prove_xss(rt, c, routes, model, auth):
 
 
 def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False, use_reader=False,
-             budget=80, audit_deps=True):
+             budget=80, audit_deps=True, dynamic=False):
     """Full loop on `target`: discover -> provision -> (MODEL crafts exploits) prove, then (if fix)
     patch + dual-gate. The model drives exploitation and remediation; tools prove. Returns a dict.
 
@@ -144,6 +144,53 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
         print(f"[editor] budget={budget}: working {len(provable_runtime)} highest-priority candidate(s), "
               f"{len(budget_deferred)} deferred", flush=True)
 
+    findings, deferred = [], []
+
+    if not dynamic:
+        # === RUN-BY-PIECE (default): micro-execute ONLY the pieces we're skeptical of. Scan the whole
+        # repo statically, but never boot the whole app to understand one function. Whole-app dynamic
+        # testing (Rung 2 + business-logic differentials) is opt-in via --dynamic. ===
+        prep_rt = None
+        try:
+            prep_rt, _pf, _pp = prov.prepare(target, host_port)   # write the compose/hooks; do NOT boot
+        except Exception as e:
+            case.record("blocked", "prepare", "tool", "blocked", provenance=str(target),
+                        note=f"could not prepare the image for micro-exec: {type(e).__name__}: {e}")
+        n_safe = 0
+        for c in provable_runtime:
+            mr = rung1.micro_exec(c, rt=prep_rt)               # run JUST this piece (in-process, else in-image)
+            s = _ensure_hyp(c)
+            if mr.verdict == "proven":
+                case.supersede(hyp[s], status="confirmed")
+                case.record("confirmation", s, "oracle", "confirmed", provenance=c.loc(), cwe=c.cwe,
+                            evidence=mr.evidence, oracle=f"Rung1 micro-exec (stubs={mr.stubs})")
+                findings.append(Finding(candidate=c, status="proven (rung1)", evidence=mr.evidence,
+                                        payload=mr.marker, proven_request=None, notes="Rung1 micro-exec (no boot)"))
+            elif mr.verdict == "safe":
+                case.supersede(hyp[s], status="refuted", note=f"Rung1: {mr.reason}")
+                n_safe += 1
+            else:
+                deferred.append((c, "micro-exec unsettled -- a lead for review (or run --dynamic to boot the app)"))
+        if prep_rt is not None:
+            try:
+                prep_rt.down()
+            except Exception:
+                pass
+        if model is not None:
+            model.unload()
+        for c, reason in deferred:
+            case.record("evidence", _ensure_hyp(c), "tool", "believed", provenance=c.loc(), cwe=c.cwe, note=reason)
+        print(f"[rung1] run-by-piece: {len(findings)} proven, {n_safe} refuted-safe, {len(deferred)} unsettled "
+              f"(no whole-app boot; use --dynamic for the differential/business-logic oracles)", flush=True)
+        print(f"[recorder] case file: {len(case.all())} entries -- {len(case.by_kind('route'))} routes, "
+              f"{len(case.hypotheses())} hypotheses, {len(case.findings())} confirmed, "
+              f"{len(case.refuted())} refuted-safe, {len(case.by_kind('evidence'))} evidence", flush=True)
+        print(editor.summary(case, len(budget_deferred)), flush=True)
+        return {"findings": findings, "deferred": deferred, "case": case,
+                "summary": {"candidates": len(cands), "provable": len(provable), "refuted_static": len(refuted),
+                            "proven": len(findings), "deferred": len(deferred), "fixed": 0}}
+
+    # === DYNAMIC (opt-in): boot the whole app -> Rung 2 craft + business-logic/IDOR differentials. ===
     findings, deferred, pending_oast = [], [], []
     rt = canary = hook_list = None                          # model may already be loaded (Reader); else load in try
     auth = {}

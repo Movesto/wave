@@ -225,13 +225,74 @@ def _write_py(prof, hooks):
     (root / "Dockerfile.wave").write_text(_DOCKERFILE_PY.format(entry=prof.entry), encoding="utf-8")
 
 
+# ---- DB sidecars: boot a real database alongside the app so DB-backed apps reach Rung 2. General by
+# the DECLARED driver -- an app needing Postgres/MySQL/Mongo gets one, wired via DATABASE_URL + the
+# common per-field env vars. No migrations needed: the sink hook logs the marker at execute time,
+# BEFORE the DB processes the query, so injection proves even against an empty schema. --------------
+_DB_SIDECARS = {
+    "postgres": {
+        "image": "postgres:16-alpine",
+        "env": {"POSTGRES_USER": "wave", "POSTGRES_PASSWORD": "wave", "POSTGRES_DB": "wave"},
+        "health": "pg_isready -U wave -d wave",
+        "app_env": {"DATABASE_URL": "postgresql://wave:wave@db:5432/wave",
+                    "POSTGRES_HOST": "db", "POSTGRES_PORT": "5432", "POSTGRES_USER": "wave",
+                    "POSTGRES_PASSWORD": "wave", "POSTGRES_DB": "wave",
+                    "DB_HOST": "db", "DB_PORT": "5432", "DB_USER": "wave", "DB_PASSWORD": "wave", "DB_NAME": "wave"},
+    },
+    "mysql": {
+        "image": "mysql:8",
+        "env": {"MYSQL_ROOT_PASSWORD": "wave", "MYSQL_DATABASE": "wave", "MYSQL_USER": "wave", "MYSQL_PASSWORD": "wave"},
+        "health": "mysqladmin ping -h 127.0.0.1 -u root -pwave",
+        "app_env": {"DATABASE_URL": "mysql+pymysql://root:wave@db:3306/wave",
+                    "DB_HOST": "db", "DB_PORT": "3306", "DB_USER": "root", "DB_PASSWORD": "wave", "DB_NAME": "wave",
+                    "MYSQL_HOST": "db", "MYSQL_USER": "root", "MYSQL_PASSWORD": "wave", "MYSQL_DATABASE": "wave"},
+    },
+    "mongo": {
+        "image": "mongo:7",
+        "env": {},
+        "health": "mongosh --quiet --eval \"db.runCommand({ping:1})\"",
+        "app_env": {"DATABASE_URL": "mongodb://db:27017/wave", "MONGO_URL": "mongodb://db:27017/wave",
+                    "MONGODB_URI": "mongodb://db:27017/wave", "DB_HOST": "db", "DB_PORT": "27017"},
+    },
+}
+
+
+def _detect_db(deps_text):
+    d = (deps_text or "").lower()
+    if any(x in d for x in ("psycopg", "asyncpg", "postgres")):
+        return "postgres"
+    if any(x in d for x in ("pymysql", "mysqlclient", "mysqldb", "aiomysql", "mysql-connector", "mariadb")):
+        return "mysql"
+    if any(x in d for x in ("pymongo", "motor")):
+        return "mongo"
+    return None
+
+
+def _compose_dict(name, host, internal, db):
+    app = {"build": {"context": ".", "dockerfile": "Dockerfile.wave"}, "container_name": name,
+           "ports": [f"{host}:{internal}"], "environment": ["vulnerable=1", "tokentimetolive=3600"]}
+    services = {"wave-app": app}
+    if db:
+        spec = _DB_SIDECARS[db]
+        services["db"] = {"image": spec["image"],
+                          "environment": [f"{k}={v}" for k, v in spec["env"].items()],
+                          "healthcheck": {"test": ["CMD-SHELL", spec["health"]], "interval": "3s",
+                                          "timeout": "5s", "retries": 25, "start_period": "5s"}}
+        app["environment"] += [f"{k}={v}" for k, v in spec["app_env"].items()]
+        app["depends_on"] = {"db": {"condition": "service_healthy"}}
+    return {"services": services}
+
+
 def _provision_py(prof, hooks, host_port):
     host_port = host_port or prof.internal_port
     name = "wave-" + Path(prof.root).name.lower()
     _write_py(prof, hooks)
+    db = _detect_db(prof.deps_text)
     compose = str(Path(prof.root) / "wave.compose.yml")
-    Path(compose).write_text(_COMPOSE_PY.format(name=name, host=host_port, internal=prof.internal_port),
-                             encoding="utf-8")
+    Path(compose).write_text(yaml.safe_dump(_compose_dict(name, host_port, prof.internal_port, db),
+                                            sort_keys=False), encoding="utf-8")
+    if db:
+        print(f"[provision] + {db} sidecar (the app declares a {db} driver)", flush=True)
     return RunningTarget(prof, [compose], "wave-app", host_port), [compose]
 
 

@@ -1,0 +1,7 @@
+{
+  "name": "pgvuln",
+  "stack": "python/flask",
+  "vulns": [
+    {"cwe": "CWE-89", "route": "GET /search", "param": "q", "desc": "SQL injection (Postgres-backed; needs the DB-sidecar to boot)"}
+  ]
+}

@@ -20,6 +20,8 @@ import yaml
 
 from . import registry
 
+_SKIP = {"node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build", "site-packages"}
+
 
 @dataclass
 class TargetProfile:
@@ -124,8 +126,10 @@ def _dockerfile_workdir(root):
 
 
 # ---- PY standalone build artifacts ------------------------------------------------------------
-_ENTRY_PY = '''"""wave entry shim: load sink hooks + disable reloaders, then run the app as __main__."""
-import sys, runpy
+_ENTRY_PY = '''"""wave entry shim: load sink hooks, then START THE APP the way its framework expects
+(ASGI apps -> uvicorn; Flask/WSGI -> run the module as __main__). Framework-agnostic so the same
+provisioner boots Flask, FastAPI/Starlette, etc. -- not just a Flask-style app.py."""
+import sys, runpy, os
 {imports}
 try:
     import flask
@@ -133,7 +137,14 @@ try:
     flask.Flask.run = lambda self, *a, **k: _o(self, *a, **{{**k, "use_reloader": False}})
 except Exception:
     pass
-runpy.run_path(sys.argv[1] if len(sys.argv) > 1 else "{entry}", run_name="__main__")
+_FW, _MOD, _APP = "{framework}", "{module}", "{appvar}"
+_PORT = int(os.environ.get("PORT", "{port}"))
+if _FW in ("fastapi", "starlette") and _MOD and _APP:
+    import uvicorn
+    _m = __import__(_MOD, fromlist=[_APP])
+    uvicorn.run(getattr(_m, _APP), host="0.0.0.0", port=_PORT)
+else:
+    runpy.run_path(sys.argv[1] if len(sys.argv) > 1 else "{entry}", run_name="__main__")
 '''
 _DOCKERFILE_PY = '''FROM python:3.11-alpine
 RUN apk add --no-cache bash g++
@@ -185,14 +196,32 @@ class RunningTarget:
         self._compose("down", "-v")
 
 
+def _detect_asgi(root):
+    """Find the ASGI app object (`app = FastAPI(...)`/`Starlette(...)`) as a top-level module:var so the
+    shim can serve it with uvicorn. Returns (module_stem, appvar) or ("", "")."""
+    for f in Path(root).rglob("*.py"):
+        if any(s in f.parts for s in _SKIP) or f.name.startswith("_wave_"):
+            continue
+        try:
+            src = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        m = re.search(r"^(\w+)\s*=\s*(?:FastAPI|Starlette)\(", src, re.M)
+        if m:
+            return f.stem, m.group(1)
+    return "", ""
+
+
 def _write_py(prof, hooks):
     root = Path(prof.root)
     imports = []
     for h in hooks:
         (root / h.filename).write_text(h.code, encoding="utf-8")
         imports.append(f"import {h.filename[:-3]}")
-    (root / "_wave_entry.py").write_text(_ENTRY_PY.format(imports="\n".join(imports), entry=prof.entry),
-                                         encoding="utf-8")
+    module, appvar = _detect_asgi(root) if prof.framework in ("fastapi", "starlette") else ("", "")
+    (root / "_wave_entry.py").write_text(
+        _ENTRY_PY.format(imports="\n".join(imports), entry=prof.entry, framework=prof.framework,
+                         module=module, appvar=appvar, port=prof.internal_port), encoding="utf-8")
     (root / "Dockerfile.wave").write_text(_DOCKERFILE_PY.format(entry=prof.entry), encoding="utf-8")
 
 

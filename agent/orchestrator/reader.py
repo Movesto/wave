@@ -71,6 +71,76 @@ def _clarify(model, h, snippets):
     return h
 
 
+_TRIAGE_QUERY_SYS = (
+    "A micro-execution of one handler was INCONCLUSIVE -- it neither proved nor cleared a suspected "
+    "vulnerability, likely because you don't know how a specific API/library/framework behaves at the "
+    "sink. Decide what to look up. Keep any reasoning BRIEF, then output ONLY a JSON object: "
+    '{"query":"<a concrete web search query that would resolve your doubt about whether this is '
+    'exploitable>"}. No prose after the JSON.')
+
+_TRIAGE_JUDGE_SYS = (
+    "You are judging whether a suspected vulnerability is REAL. Below: the code, the INCONCLUSIVE "
+    "micro-execution result, and WEB SEARCH results about the API/behaviour you were unsure of. Decide "
+    'using ONLY this evidence plus the code. Output ONLY JSON: {"verdict":"vulnerable"|"safe"|"unknown",'
+    '"why":"<one line>"}. "vulnerable" = the evidence shows this untrusted input can reach a dangerous '
+    'operation unsafely; "safe" = the API/framework neutralizes it or it is not reachable; "unknown" = '
+    "the evidence is insufficient to tell. No prose.")
+
+
+def _extract_query(txt, fallback):
+    """Pull the search query out of an R1 reply (which buries the answer after a long <think>).
+    Prefer a {"query": ...} object; fall back to a deterministic query so a rambling/empty reply
+    still searches something sensible rather than dumping reasoning text into the search box."""
+    after = (txt or "").split("</think>")[-1]
+    for scope in (after, txt or ""):
+        m = re.search(r'\{[^{}]*"query"[^{}]*\}', scope, re.S)
+        if m:
+            try:
+                q = json.loads(m.group(0)).get("query")
+                if q and str(q).strip():
+                    return str(q).strip()[:200]
+            except Exception:
+                pass
+    return fallback
+
+
+def triage_unknown(model, candidate, micro_reason, budget_box):
+    """Search-assisted triage of a micro-exec UNKNOWN: the model asks what it doesn't understand about
+    THIS piece, we look it up, and it judges. Returns {"verdict","why","query"} with verdict in
+    vulnerable|safe|unknown. NEVER a proof -- it can only refute a lead or flag it for review; the
+    oracle still owns confirmation. Spends one web search + two short model turns from the shared box."""
+    out = {"verdict": "unknown", "why": micro_reason, "query": ""}
+    if budget_box is None or budget_box[0] <= 0:
+        return out
+    budget_box[0] -= 1
+    code = (candidate.slice or candidate.sink or "")[:1600]
+    ctx = (f"CWE: {candidate.cwe}   SINK: {candidate.sink}\n"
+           f"MICRO-EXEC RESULT (inconclusive): {micro_reason}\n\nCODE:\n{code}")
+    fallback_q = f"{candidate.cwe} {candidate.sink} exploitable"
+    q = _extract_query(model.generate(_TRIAGE_QUERY_SYS, ctx, max_new_tokens=700, temperature=0.2),
+                       fallback_q)
+    out["query"] = q
+    print(f"[rung1]   ? unknown ({candidate.cwe} {candidate.unit}) -> web search: {q!r}", flush=True)
+    snippets = web_search(q)
+    if not snippets:
+        print("[rung1]     (no results / offline) -- staying a lead for review", flush=True)
+        return out
+    judge = model.generate(_TRIAGE_JUDGE_SYS, f"{ctx}\n\nWEB SEARCH for {q!r}:\n{snippets}\n\nDecide now.",
+                           max_new_tokens=500, temperature=0.2)
+    after = (judge or "").split("</think>")[-1]
+    m = re.search(r"\{.*\}", after, re.S)
+    if m:
+        try:
+            d = json.loads(m.group(0))
+            v = str(d.get("verdict", "")).lower()
+            if v in ("vulnerable", "safe", "unknown"):
+                out["verdict"], out["why"] = v, str(d.get("why") or micro_reason)
+        except Exception:
+            pass
+    print(f"[rung1]     -> {out['verdict']}: {out['why']}", flush=True)
+    return out
+
+
 def _resolve_doubts(model, hyps, budget_box):
     """For each LOW-confidence hypothesis (up to the shared search budget), spend one web-search +
     clarify turn. Mutates the list in place: revises confirmed ones, drops retracted ones."""

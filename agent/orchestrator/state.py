@@ -156,10 +156,13 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
         prep_rt = None
         try:
             prep_rt, _pf, _pp = prov.prepare(target, host_port)   # write the compose/hooks; do NOT boot
-        except Exception as e:
+        except (Exception, SystemExit) as e:                      # profile() raises SystemExit on an
+            # unrecognized stack -- non-fatal here: in-process micro-exec needs no image, so degrade to it
             case.record("blocked", "prepare", "tool", "blocked", provenance=str(target),
                         note=f"could not prepare the image for micro-exec: {type(e).__name__}: {e}")
+            print(f"[rung1] prepare skipped ({type(e).__name__}) -- in-process micro-exec only", flush=True)
         n_safe = 0
+        unknowns = []                                          # micro-exec couldn't settle -> maybe search-triage
         for c in provable_runtime:
             mr = rung1.micro_exec(c, rt=prep_rt)               # run JUST this piece (in-process, else in-image)
             s = _ensure_hyp(c)
@@ -173,7 +176,32 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
                 case.supersede(hyp[s], status="refuted", note=f"Rung1: {mr.reason}")
                 n_safe += 1
             else:
-                deferred.append((c, "micro-exec unsettled -- a lead for review (or run --dynamic to boot the app)"))
+                unknowns.append((c, mr.reason))
+
+        # A micro-exec UNKNOWN means the model ran a piece it doesn't fully understand. With --online it
+        # may SEARCH what it doesn't recognize and judge -- but a web judgment can only REFUTE a lead or
+        # ELEVATE it for review; it never mints a Tier-1 finding (the sink oracle still owns confirmation).
+        if online and unknowns:
+            from .model import Model
+            if model is None:
+                model = Model()
+            sb = [4]
+            print(f"[rung1] --online: search-triaging {len(unknowns)} unsettled piece(s)", flush=True)
+            for c, reason in unknowns:
+                s = _ensure_hyp(c)
+                t = reader.triage_unknown(model, c, reason, sb)
+                if t["verdict"] == "safe":
+                    case.supersede(hyp[s], status="refuted", note=f"search-triage: {t['why']}")
+                    n_safe += 1
+                elif t["verdict"] == "vulnerable":
+                    deferred.append((c, f"search-triage: LIKELY VULNERABLE -- {t['why']} "
+                                        f"(unproven; run --dynamic to confirm at the sink)"))
+                else:
+                    deferred.append((c, f"micro-exec unsettled; search-triage inconclusive -- {t['why']}"))
+        else:
+            for c, reason in unknowns:
+                deferred.append((c, "micro-exec unsettled -- a lead for review "
+                                    "(or run --dynamic to boot the app" + (", or --online to search" if not online else "") + ")"))
         if prep_rt is not None:
             try:
                 prep_rt.down()

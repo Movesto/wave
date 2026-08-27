@@ -19,7 +19,9 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import inspect
+import os
 import secrets
+import sys
 from dataclasses import dataclass, field
 
 
@@ -194,7 +196,22 @@ def _tripwires(tw):
                 setattr(obj, name, orig)
 
 
+def _pkg_root(path):
+    """Directory to put on sys.path so the module's OWN intra-repo imports resolve: walk up while an
+    __init__.py exists (so `import package.sibling` works), else the file's immediate directory."""
+    d = os.path.dirname(os.path.abspath(path))
+    while os.path.isfile(os.path.join(d, "__init__.py")):
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return d
+
+
 def _load_module(path):
+    root = _pkg_root(path)
+    if root not in sys.path:
+        sys.path.insert(0, root)                          # so sibling/intra-repo imports (not pip deps) resolve
     spec = importlib.util.spec_from_file_location(f"_wave_micro_{secrets.token_hex(3)}", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)                          # may run module-level code (patched sinks apply)

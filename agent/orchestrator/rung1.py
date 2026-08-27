@@ -57,6 +57,16 @@ class _FakeResult:
     def keys(self): return []
 
 
+def _url_of(a, k):
+    """Best-effort URL from an HTTP-client call's args (get(url) / request(method, url) / url=)."""
+    if k.get("url"):
+        return k["url"]
+    for x in a:
+        if isinstance(x, str) and ("://" in x or x.startswith("/")):
+            return x
+    return a[0] if a else ""
+
+
 @contextlib.contextmanager
 def _tripwires(tw):
     """Patch DB execute + outbound HTTP + file open to the tripwire; restore on exit. Records the stubs
@@ -123,16 +133,56 @@ def _tripwires(tw):
         applied.append("psycopg2")
     except Exception:
         pass
-    # requests outbound HTTP -> record the URL
-    try:
-        import requests
+    # raw MySQL drivers (pymysql / mysqlclient) -> fake conn with a tripwire cursor
+    for _mod in ("pymysql", "MySQLdb"):
+        try:
+            _m = __import__(_mod)
 
-        def _req(method, url, *a, **k):
-            tw.http(url)
-            raise RuntimeError("wave-rung1: outbound call stubbed after recording")
-        for m in ("get", "post", "put", "delete", "patch", "request", "head"):
-            patch(requests, m, (lambda mm: (lambda url=None, *a, **k: _req(mm, url, *a, **k)))(m))
-        applied.append("requests")
+            def _mysql_connect(*a, **k):
+                class _C:
+                    def execute(self, q, params=None):
+                        tw.sql(q, params)
+                        return self
+                    def fetchone(self): return None
+                    def fetchall(self): return []
+                    def __iter__(self): return iter([])
+                    def close(self): pass
+                    def __enter__(self): return self
+                    def __exit__(self, *x): pass
+
+                class _Cn:
+                    def cursor(self, *a, **k): return _C()
+                    def commit(self): pass
+                    def rollback(self): pass
+                    def close(self): pass
+                    def __enter__(self): return self
+                    def __exit__(self, *x): pass
+                return _Cn()
+            patch(_m, "connect", _mysql_connect)
+            applied.append(_mod)
+        except Exception:
+            pass
+    # outbound HTTP (requests / httpx / urllib) -> record the URL so an SSRF marker is observed
+    for _mod in ("requests", "httpx"):
+        try:
+            _m = __import__(_mod)
+
+            def _http(*a, **k):
+                tw.http(_url_of(a, k))
+                raise RuntimeError("wave-rung1: outbound call stubbed after recording")
+            for _fn in ("get", "post", "put", "delete", "patch", "request", "head"):
+                patch(_m, _fn, _http)
+            applied.append(_mod)
+        except Exception:
+            pass
+    try:
+        import urllib.request as _ur
+
+        def _urlopen(url=None, *a, **k):
+            tw.http(getattr(url, "full_url", url) or "")
+            raise RuntimeError("wave-rung1: urlopen stubbed after recording")
+        patch(_ur, "urlopen", _urlopen)
+        applied.append("urllib")
     except Exception:
         pass
     tw._stubs = applied
@@ -257,11 +307,44 @@ try:
     psycopg2.pool.ThreadedConnectionPool = _Pool
     psycopg2.pool.SimpleConnectionPool = _Pool
 except Exception: pass
+def _urlof(a, k):
+    if k.get("url"): return k["url"]
+    for x in a:
+        if isinstance(x, str) and ("://" in x or x.startswith("/")): return x
+    return a[0] if a else ""
+for _mod in ("requests", "httpx"):
+    try:
+        _m = __import__(_mod)
+        def _http_stub(*a, **k): _http(_urlof(a, k)); raise RuntimeError("stub")
+        for _fn in ("get","post","put","delete","patch","request","head"): setattr(_m, _fn, _http_stub)
+    except Exception: pass
 try:
-    import requests
-    def _rq(url=None, *a, **k): _http(url); raise RuntimeError("stub")
-    for _m in ("get", "post", "put", "delete", "patch", "request", "head"): setattr(requests, _m, _rq)
+    import urllib.request as _ur
+    def _uo(url=None, *a, **k): _http(getattr(url,"full_url",url) or ""); raise RuntimeError("stub")
+    _ur.urlopen = _uo
 except Exception: pass
+for _mod in ("pymysql", "MySQLdb"):
+    try:
+        _m = __import__(_mod)
+        def _myc(*a, **k):
+            class _C:
+                def execute(self,q,p=None): _sql(q,p); return self
+                def fetchone(self): return None
+                def fetchall(self): return []
+                def __iter__(self): return iter([])
+                def close(self): pass
+                def __enter__(self): return self
+                def __exit__(self,*x): pass
+            class _Cn:
+                def cursor(self,*a,**k): return _C()
+                def commit(self): pass
+                def rollback(self): pass
+                def close(self): pass
+                def __enter__(self): return self
+                def __exit__(self,*x): pass
+            return _Cn()
+        setattr(_m, "connect", _myc)
+    except Exception: pass
 MARKER = __MARKER__
 sys.path.insert(0, "/app")
 try:

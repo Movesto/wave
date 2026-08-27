@@ -11,7 +11,7 @@ from . import discover as disc
 from . import provision as prov
 from . import routes as routes_mod
 from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls, behavioral
-from . import browser_recon, bizlogic, recorder, rung0, rung1, reader, editor
+from . import browser_recon, bizlogic, recorder, rung0, rung1, reader, editor, reporters
 from . import auth as auth_mod
 from .models import Finding
 
@@ -30,7 +30,8 @@ def _prove_xss(rt, c, routes, model, auth):
     return {"status": "not-proven", "cwe": "CWE-79", "notes": "no crafted XSS executed in the DOM"}
 
 
-def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False, use_reader=False, budget=80):
+def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False, use_reader=False,
+             budget=80, audit_deps=True):
     """Full loop on `target`: discover -> provision -> (MODEL crafts exploits) prove, then (if fix)
     patch + dual-gate. The model drives exploitation and remediation; tools prove. Returns a dict.
 
@@ -48,6 +49,19 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
     case = recorder.CaseFile(target)
     for r in routes:
         case.record("route", f"{r.method} {r.path}", "tool", "confirmed", provenance=r.file or "")
+
+    # --- Reporter (Phase 6): dependency-vulnerability audit -- external intel, CONFIRMED by the advisory
+    # DB (Tier-1-grade), static so it runs even if the app never boots. General to any project. ---
+    if audit_deps:
+        dep_vulns = reporters.dependency_audit(target)
+        for d in dep_vulns:
+            subj = f"{d['id']} {d['package']}=={d['version']}"
+            case.record("hypothesis", subj, "tool", "confirmed", provenance=f"{d['package']}=={d['version']}",
+                        cwe=d["id"], family="vulnerable dependency")
+            case.record("confirmation", subj, "oracle", "confirmed", provenance=f"{d['package']}=={d['version']}",
+                        cwe=d["id"], evidence=f"advisory {d['id']} ({d['ecosystem']}): fix {d['fix']} -- {d['desc']}")
+        if dep_vulns:
+            print(f"[reporter] dependency audit: {len(dep_vulns)} known-vulnerable dependency finding(s)", flush=True)
 
     def _subj(c):
         return f"{c.cwe} {c.route_hint or c.loc()}"

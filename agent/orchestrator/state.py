@@ -31,7 +31,7 @@ def _prove_xss(rt, c, routes, model, auth):
 
 
 def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False, use_reader=False,
-             budget=80, audit_deps=True, dynamic=False):
+             budget=80, audit_deps=True, dynamic=False, online=False):
     """Full loop on `target`: discover -> provision -> (MODEL crafts exploits) prove, then (if fix)
     patch + dual-gate. The model drives exploitation and remediation; tools prove. Returns a dict.
 
@@ -102,7 +102,10 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
     if use_reader:                                          # Phase 4+7: the model READS prioritized files and
         model = Model()                                     # forms its OWN hypotheses, REVISITING via import-leads
         reader_cands, reader_report = reader.read_iterative(model, target, provable, routes,
-                                                            budget=6, per_round=3, max_rounds=2)
+                                                            budget=6, per_round=3, max_rounds=2,
+                                                            online=online)
+        if online:
+            print("[reader] --online: low-confidence hypotheses may spend a web-search lookup", flush=True)
         for path, summary, _h in reader_report:
             case.record("file_summary", path, "model", "believed", note=summary)
         seen = {(c.file, c.cwe) for c in provable}

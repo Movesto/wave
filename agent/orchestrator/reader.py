@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 
 from .models import Candidate
+from .search import web_search
 
 _SKIP = {"node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build", "test", "tests",
          "migrations", "vendor", "site-packages"}
@@ -34,8 +35,66 @@ _READ_SYS = (
     "neutralization (parameterization, escaping, an allow-list). Report only REAL, reachable issues; a "
     "parameterized query or an escaped value is NOT an issue. Output ONLY a JSON array (empty [] if "
     'none), each item: {"line": <int>, "function": "<name>", "cwe": "CWE-XX", "class": "<short>", '
-    '"input": "<the untrusted source>", "sink": "<the dangerous call>", "why": "<one line>"}. No prose. '
-    "Keep any reasoning BRIEF, then output the JSON array promptly -- do not overthink.")
+    '"input": "<the untrusted source>", "sink": "<the dangerous call>", "why": "<one line>", '
+    '"confidence": "high"|"low"}. Set "confidence":"low" ONLY when you cannot tell if it is exploitable '
+    "because you don't recognize an API, a library, or a framework's behaviour; then also add "
+    '"search":"<a concrete web query that would resolve your doubt>". Otherwise "confidence":"high". '
+    "No prose. Keep any reasoning BRIEF, then output the JSON array promptly -- do not overthink.")
+
+_CLARIFY_SYS = (
+    "You earlier flagged a POSSIBLE vulnerability but were UNSURE. Below is your hypothesis and WEB "
+    "SEARCH results about the thing you were unsure of. Using ONLY this evidence plus the hypothesis, "
+    "decide whether it is a REAL, reachable vulnerability. Output ONLY JSON, nothing else: the SAME "
+    'hypothesis object with an updated "confidence" ("high" if the evidence confirms it is exploitable, '
+    'else "low") and a corrected "why"; OR the literal [] if the evidence shows it is NOT a vulnerability '
+    "(safe/auto-escaping API, framework neutralizes it, etc.). No prose.")
+
+
+def _clarify(model, h, snippets):
+    """One grounded follow-up: feed the low-confidence hypothesis + web results back to the model.
+    Returns the revised hypothesis dict, or None if the model retracts it (evidence says it is safe)."""
+    user = (f"HYPOTHESIS: {json.dumps(h)}\n\nWEB SEARCH for {h.get('search') or '(sink behaviour)'!r}:\n"
+            f"{snippets}\n\nDecide now.")
+    txt = model.generate(_CLARIFY_SYS, user, max_new_tokens=700, temperature=0.2)
+    after = (txt or "").split("</think>")[-1]
+    if re.search(r"(?<!\w)\[\s*\]", after):             # explicit retraction -> drop the hypothesis
+        return None
+    m = re.search(r"\{.*\}", after, re.S) or re.search(r"\{.*\}", txt or "", re.S)
+    if not m:
+        return h                                        # unparseable -> keep the original, unchanged
+    try:
+        d = json.loads(m.group(0))
+        if isinstance(d, dict) and d.get("cwe"):
+            return d
+    except Exception:
+        pass
+    return h
+
+
+def _resolve_doubts(model, hyps, budget_box):
+    """For each LOW-confidence hypothesis (up to the shared search budget), spend one web-search +
+    clarify turn. Mutates the list in place: revises confirmed ones, drops retracted ones."""
+    kept = []
+    for h in hyps:
+        low = str(h.get("confidence", "")).lower() == "low" or bool(h.get("search"))
+        if not (low and budget_box[0] > 0):
+            kept.append(h)
+            continue
+        budget_box[0] -= 1
+        q = h.get("search") or f"{h.get('cwe')} {h.get('sink')} exploitable"
+        print(f"[reader]   ? unsure ({h.get('cwe')} {h.get('sink')}) -> web search: {q!r}", flush=True)
+        ctx = web_search(q)
+        if not ctx:
+            print("[reader]     (no search results / offline) -- keeping as low-confidence lead", flush=True)
+            kept.append(h)
+            continue
+        revised = _clarify(model, h, ctx)
+        if revised is None:
+            print("[reader]     -> evidence says SAFE, hypothesis dropped", flush=True)
+            continue
+        print(f"[reader]     -> confidence now {str(revised.get('confidence', '?'))}", flush=True)
+        kept.append(revised)
+    return kept
 
 
 def _parse_hyps(txt):
@@ -101,8 +160,9 @@ def _numbered(src, limit=520):
     return "\n".join(f"{i + 1}: {ln}" for i, ln in enumerate(lines))
 
 
-def read_file(model, path):
-    """Model reads one file -> (short summary, [hypothesis dicts])."""
+def read_file(model, path, search_budget=None):
+    """Model reads one file -> (short summary, [hypothesis dicts]). If `search_budget` is a
+    [remaining] box and --online is on, low-confidence hypotheses spend a web-search + clarify turn."""
     try:
         src = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -110,6 +170,8 @@ def read_file(model, path):
     txt = model.generate(_READ_SYS, f"FILE {Path(path).name}\n\n{_numbered(src, limit=320)}",
                          max_new_tokens=2000, temperature=0.2)   # bounded so a slow/wedged gen shows up fast
     hyps = _parse_hyps(txt)
+    if search_budget is not None and search_budget[0] > 0:
+        hyps = _resolve_doubts(model, hyps, search_budget)
     return f"read {Path(path).name}: {len(hyps)} hypothesis(es)", hyps
 
 
@@ -131,12 +193,13 @@ def _to_candidate(path, h, routes):
                      route_hint=route_hint, slice=str(h.get("why") or ""))
 
 
-def read(model, target, seed_candidates=(), routes=(), budget=8):
+def read(model, target, seed_candidates=(), routes=(), budget=8, online=False, search_budget=4):
     """Read the top-priority files; return (reader Candidates, [(file, summary, hypotheses)])."""
     files = prioritize_files(target, seed_candidates, budget)
+    sb = [search_budget] if online else None
     cands, report = [], []
     for f in files:
-        summary, hyps = read_file(model, f)
+        summary, hyps = read_file(model, f, search_budget=sb)
         report.append((str(f), summary, hyps))
         for h in hyps:
             cands.append(_to_candidate(f, h, routes))
@@ -178,11 +241,14 @@ def _neighbors(target, hot_files):
     return out
 
 
-def read_iterative(model, target, seed_candidates=(), routes=(), budget=10, per_round=4, max_rounds=3):
+def read_iterative(model, target, seed_candidates=(), routes=(), budget=10, per_round=4, max_rounds=3,
+                   online=False, search_budget=4):
     """Read in ROUNDS, following leads: after a round, the import-neighbours of files that yielded a
     hypothesis are read next. TERMINATES on diminishing returns (a round finds nothing), max_rounds, or
-    the budget (total files read). Returns (reader Candidates, [(file, summary, hypotheses)])."""
+    the budget (total files read). Returns (reader Candidates, [(file, summary, hypotheses)]).
+    With `online`, low-confidence hypotheses spend up to `search_budget` web-search + clarify turns."""
     ranked = prioritize_files(target, seed_candidates, budget=budget * 4)
+    sb = [search_budget] if online else None
     read_set, cands, report, rounds = set(), [], [], 0
     queue = list(ranked)
     while queue and rounds < max_rounds and len(read_set) < budget:
@@ -196,7 +262,7 @@ def read_iterative(model, target, seed_candidates=(), routes=(), budget=10, per_
             print(f"[reader] round {rounds}: reading {Path(f).name} "
                   f"({len(read_set) + 1}/{budget}) ...", flush=True)
             read_set.add(str(f))
-            summary, hyps = read_file(model, f)
+            summary, hyps = read_file(model, f, search_budget=sb)
             print(f"[reader]   -> {len(hyps)} hypothesis(es)", flush=True)
             report.append((str(f), summary, hyps))
             for h in hyps:

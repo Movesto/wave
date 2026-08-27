@@ -15,7 +15,8 @@ from . import state as st
 def cmd_loop(args):
     res = st.run_loop(args.target, host_port=args.port, strikes=args.strikes, fix=args.fix,
                       model_discover=args.model_discover, use_reader=args.reader,
-                      audit_deps=not args.no_deps, budget=args.budget, dynamic=args.dynamic)
+                      audit_deps=not args.no_deps, budget=args.budget, dynamic=args.dynamic,
+                      online=args.online)
     s = res["summary"]
     print(f"\n=== LOOP on {args.target} ===")
     print(f"  candidates={s['candidates']} provable={s['provable']} "
@@ -83,6 +84,9 @@ def main():
                     help="use the fast review model for discovery (default: deterministic patterns)")
     lp.add_argument("--reader", action="store_true",
                     help="Phase 4: the model READS prioritized files and forms its own hypotheses")
+    lp.add_argument("--online", action="store_true",
+                    help="allow the Reader to WEB-SEARCH when a hypothesis is low-confidence "
+                         "(sends queries off-box; off by default -- the system is otherwise local)")
     lp.add_argument("--no-deps", action="store_true",
                     help="skip the dependency-vulnerability audit (Phase 6 reporter)")
     lp.add_argument("--budget", type=int, default=80,

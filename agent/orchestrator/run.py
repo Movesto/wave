@@ -34,6 +34,16 @@ def cmd_loop(args):
                     print(f"      | {pl}")
     for c, why in res["deferred"]:
         print(f"  [DEFER  {c.cwe}] {c.loc()} -- {why}")
+    case = res.get("case")                                  # the full investigation report (Case File)
+    if case is not None:
+        import os
+        out = os.path.join(str(args.target), "casefile.json")
+        try:
+            case.save(out)
+            print(f"\n[case file saved -> {out}]")
+        except OSError:
+            pass
+        print("\n" + case.report())
 
 
 def cmd_discover(args):

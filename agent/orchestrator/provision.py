@@ -296,6 +296,60 @@ def _provision_py(prof, hooks, host_port):
     return RunningTarget(prof, [compose], "wave-app", host_port), [compose]
 
 
+_SITECUSTOMIZE = '''"""wave sitecustomize: auto-imported at interpreter startup (via PYTHONPATH) so the
+sink hooks load regardless of the app's entrypoint (uvicorn / gunicorn / python ...)."""
+try:
+{imports}
+except Exception as _e:
+    import sys
+    print("wave: sink-hook load failed:", _e, file=sys.stderr)
+'''
+
+
+def _provision_py_compose(prof, hooks, host_port):
+    """Reuse the app's OWN multi-service compose (app + db + other services). Inject the sink hooks via a
+    bind-mounted sitecustomize.py + PYTHONPATH on the build service -- entrypoint-agnostic, so it works
+    with the app's real Dockerfile CMD. Other services keep their host ports dropped to avoid clashes."""
+    d = yaml.safe_load(Path(prof.compose_file).read_text(encoding="utf-8")) or {}
+    services = d.get("services", {})
+    build_svc, _, internal = _parse_compose(prof.compose_file)
+    if not build_svc:
+        raise SystemExit("provision(py): the app compose has no build service (prebuilt image?)")
+    internal = internal or prof.internal_port
+    host = host_port or internal
+    workdir = _dockerfile_workdir(prof.root)
+
+    hook_dir = Path(prof.root) / "_wave_hooks"          # bind-mounted at /wave_hooks (on PYTHONPATH)
+    hook_dir.mkdir(exist_ok=True)
+    imports = []
+    for h in hooks:
+        (hook_dir / h.filename).write_text(h.code, encoding="utf-8")
+        imports.append(f"    import {h.filename[:-3]}")
+    (hook_dir / "sitecustomize.py").write_text(_SITECUSTOMIZE.format(imports="\n".join(imports) or "    pass"),
+                                               encoding="utf-8")
+    host_hooks = str(hook_dir.resolve()).replace("\\", "/")
+
+    for n, s in services.items():
+        if not isinstance(s, dict):
+            continue
+        if n == build_svc:
+            pp = f"/wave_hooks:{workdir}"
+            env = s.get("environment")
+            if isinstance(env, list):
+                s["environment"] = [e for e in env if not str(e).startswith("PYTHONPATH")] + [f"PYTHONPATH={pp}"]
+            else:
+                env = dict(env or {})
+                env["PYTHONPATH"] = pp
+                s["environment"] = env
+            s["ports"] = [f"{host}:{internal}"]
+            s["volumes"] = (s.get("volumes") or []) + [f"{host_hooks}:/wave_hooks:ro"]
+        else:
+            s.pop("ports", None)                         # reach other services over the internal network
+    out = str(Path(prof.root) / "wave.compose.full.yml")
+    Path(out).write_text(yaml.safe_dump(d), encoding="utf-8")
+    return RunningTarget(prof, [out], build_svc, host), [out]
+
+
 def _provision_js(prof, hooks, host_port):
     if not prof.compose_file:
         raise SystemExit("provision(js): no app compose (standalone JS not implemented)")
@@ -345,7 +399,8 @@ def provision(target, host_port=None, timeout=300) -> RunningTarget:
         raise SystemExit(f"provision: no Registry sink hook for {prof.framework}/{prof.lang}")
 
     if prof.lang == "py":
-        rt, files = _provision_py(prof, hooks, host_port)
+        rt, files = _provision_py_compose(prof, hooks, host_port) if prof.compose_file \
+            else _provision_py(prof, hooks, host_port)      # reuse the app's own multi-service compose if it ships one
     else:
         rt, files = _provision_js(prof, hooks, host_port)
 
@@ -355,7 +410,14 @@ def provision(target, host_port=None, timeout=300) -> RunningTarget:
     for f in files:
         cmd += ["-f", f]
     cmd += ["up", "-d", "--build"]
-    subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    # supply common defaults so a required-var compose (`${POSTGRES_PASSWORD:?}`) doesn't fail substitution
+    import os as _os
+    env = dict(_os.environ)
+    for k, v in {"POSTGRES_PASSWORD": "wave", "POSTGRES_USER": "wave", "POSTGRES_DB": "wave",
+                 "DB_PASSWORD": "wave", "MYSQL_ROOT_PASSWORD": "wave", "SECRET_KEY": "wave-secret"}.items():
+        env.setdefault(k, v)
+    subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                   timeout=timeout, env=env)
 
     for _ in range(40):                        # bounded (~2 min for a dead app; healthy apps pass in seconds)
         try:

@@ -11,3 +11,4 @@ Dockerfile.otel
 wave.compose.yml
 wave.compose.full.yml
 casefile.json
+_wave_hooks/

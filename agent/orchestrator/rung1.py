@@ -181,8 +181,8 @@ def _verdict_from_hits(tw, marker, cwe):
     return ("unknown", f"no sink reached with the marker ({len(tw.hits)} sink hit(s))")
 
 
-def micro_exec(candidate, target_param=None) -> MicroResult:
-    """Import the candidate's handler with sinks tripwired and call it with a marked payload."""
+def _inproc(candidate, target_param=None) -> MicroResult:
+    """Import the candidate's handler IN-PROCESS with sinks tripwired and call it with a marked payload."""
     path = getattr(candidate, "file", "")
     unit = getattr(candidate, "unit", "") or ""
     func_name = unit.split("(")[0].strip() if unit else ""
@@ -208,3 +208,136 @@ def micro_exec(candidate, target_param=None) -> MicroResult:
                            stubs=getattr(tw, "_stubs", []))
     v, why = _verdict_from_hits(tw, marker, getattr(candidate, "cwe", ""))
     return MicroResult(v, why, marker=marker, evidence=why if v != "unknown" else "", stubs=getattr(tw, "_stubs", []))
+
+
+# ---- In-CONTAINER micro-execution: run the same driver inside the built image, where the target's
+# real deps (fastapi/psycopg2/...) live -- for real apps whose deps are NOT importable on the host. ----
+_DRIVER = r'''
+import sys, json, inspect, importlib.util
+_HITS = []
+def _sql(s, p=None): _HITS.append(("sql", str(s), repr(p)))
+def _http(u): _HITS.append(("http", str(u), ""))
+try:
+    import sqlalchemy.engine as _sae
+    def _e(self, statement, *a, **k):
+        _sql(statement, a[0] if a else k.get("parameters"))
+        class _R:
+            def fetchone(s): return None
+            def fetchall(s): return []
+            def scalar(s): return None
+            def __iter__(s): return iter([])
+        return _R()
+    _sae.Connection.execute = _e
+    _sae.Connection.exec_driver_sql = _e
+except Exception: pass
+try:
+    import psycopg2, psycopg2.pool
+    class _Cur:
+        description = None; rowcount = -1
+        def execute(self, q, p=None): _sql(q, p); return self
+        def fetchone(self): return None
+        def fetchall(self): return []
+        def __iter__(self): return iter([])
+        def close(self): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+    class _Conn:
+        def cursor(self, *a, **k): return _Cur()
+        def commit(self): pass
+        def rollback(self): pass
+        def close(self): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+    class _Pool:
+        def __init__(self, *a, **k): pass
+        def getconn(self, *a, **k): return _Conn()
+        def putconn(self, *a, **k): pass
+        def closeall(self): pass
+    psycopg2.connect = lambda *a, **k: _Conn()
+    psycopg2.pool.ThreadedConnectionPool = _Pool
+    psycopg2.pool.SimpleConnectionPool = _Pool
+except Exception: pass
+try:
+    import requests
+    def _rq(url=None, *a, **k): _http(url); raise RuntimeError("stub")
+    for _m in ("get", "post", "put", "delete", "patch", "request", "head"): setattr(requests, _m, _rq)
+except Exception: pass
+MARKER = __MARKER__
+sys.path.insert(0, "/app")
+try:
+    _spec = importlib.util.spec_from_file_location("_wt", __MODPATH__)
+    _mod = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_mod)
+    _fn = getattr(_mod, __FUNC__, None)
+    if _fn is None: raise RuntimeError("no func " + __FUNC__)
+    _sig = inspect.signature(_fn)
+    _ps = [n for n, p in _sig.parameters.items() if n not in ("self", "cls")]
+    for _tgt in (_ps or [None]):
+        _args = {}
+        for n, p in _sig.parameters.items():
+            if n in ("self", "cls"): continue
+            _args[n] = MARKER if n == _tgt else ("1" if "id" in n.lower() else "")
+        try: _fn(**_args)
+        except Exception: pass
+        if any(MARKER in h[1] for h in _HITS): break
+except Exception as _e2:
+    print("WAVE_MICRO_ERR::" + type(_e2).__name__ + ": " + str(_e2))
+print("WAVE_MICRO_RESULT::" + json.dumps({"hits": _HITS}))
+'''
+
+
+def _container_path(candidate_file, target):
+    from pathlib import Path
+    try:
+        rel = Path(candidate_file).resolve().relative_to(Path(target).resolve())
+        return "/app/" + str(rel).replace("\\", "/")
+    except Exception:
+        return "/app/" + Path(candidate_file).name
+
+
+def micro_exec_container(candidate, target, timeout=150) -> MicroResult:
+    """Run the micro-exec driver INSIDE the built image (deps live there). Reuses the wave.compose.yml a
+    prior provision wrote; the app code is at /app. For real apps whose deps aren't importable on the host."""
+    import json as _json
+    import re as _re
+    import subprocess
+    from pathlib import Path
+
+    compose = Path(target) / "wave.compose.yml"
+    unit = getattr(candidate, "unit", "") or ""
+    func = unit.split("(")[0].strip()
+    if not compose.exists():
+        return MicroResult("unknown", "no built image (wave.compose.yml missing) -- provision it first")
+    if not func:
+        return MicroResult("unknown", "no handler function for in-container micro-exec")
+    marker = "WZ" + secrets.token_hex(4)
+    modpath = _container_path(getattr(candidate, "file", ""), target)
+    driver = (_DRIVER.replace("__MARKER__", repr(marker)).replace("__MODPATH__", repr(modpath))
+              .replace("__FUNC__", repr(func)))
+    cmd = ["docker", "compose", "-f", str(compose), "run", "--rm", "--no-deps", "-T",
+           "--entrypoint", "python", "wave-app", "-c", driver]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+    except Exception as e:
+        return MicroResult("unknown", f"in-container micro-exec failed to run: {type(e).__name__}: {e}")
+    out = (r.stdout or "") + (r.stderr or "")
+    m = _re.search(r"WAVE_MICRO_RESULT::(\{.*\})", out)
+    if not m:
+        err = _re.search(r"WAVE_MICRO_ERR::(.*)", out)
+        return MicroResult("unknown", f"in-container micro-exec: no result ({err.group(1) if err else out[-160:]})")
+    tw = _Tripwire()
+    tw.hits = [tuple(h) for h in _json.loads(m.group(1)).get("hits", [])]
+    v, why = _verdict_from_hits(tw, marker, getattr(candidate, "cwe", ""))
+    return MicroResult(v, why, marker=marker, evidence=why if v != "unknown" else "", stubs=["in-container"])
+
+
+def micro_exec(candidate, target_param=None, target=None) -> MicroResult:
+    """Confirm a candidate by micro-execution: try IN-PROCESS (fast; needs deps on the host), and if
+    that can't run (deps live only in the container), fall back to IN-CONTAINER when `target` is given."""
+    mr = _inproc(candidate, target_param)
+    if mr.verdict in ("proven", "safe"):
+        return mr
+    if target is not None:
+        cres = micro_exec_container(candidate, target)
+        if cres.verdict in ("proven", "safe"):
+            return cres
+    return mr

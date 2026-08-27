@@ -252,8 +252,9 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
         print(f"[loop] dynamic stage failed ({type(e).__name__}: {e}) -- trying Rung 1 "
               f"(micro-execution, no boot)", flush=True)
         r1 = 0
-        for c in provable_runtime:                          # Rung 1: confirm WITHOUT booting the whole app
-            mr = rung1.micro_exec(c)
+        for i, c in enumerate(provable_runtime):            # Rung 1: confirm WITHOUT booting (in-process, or
+            allow_container = i < 10                        # in-container -- bounded, it starts a container each)
+            mr = rung1.micro_exec(c, target=target if allow_container else None)
             if mr.verdict == "proven":
                 findings.append(Finding(candidate=c, status="proven (rung1)", evidence=mr.evidence,
                                         payload=mr.marker, proven_request=None,

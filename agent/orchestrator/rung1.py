@@ -5,14 +5,18 @@ import the candidate's handler, and CALL IT DIRECTLY with a marked payload. If t
 sink in an unsafe position (SQL statement not params / outbound URL), the vuln is confirmed WITHOUT an
 HTTP server or a real backend -- the rung that decouples proof from full provisioning.
 
-This module runs micro-exec IN-PROCESS (the target's deps must be importable here). For real apps whose
-deps live only in the container, the same driver runs inside the built image (Rung-1 in-container -- the
-documented next step). Rung-1 confirmations rank WEAKER than Rung 2 (a function out of context can
-differ from the running app) and record the stubs used.
+ARCHITECTURE (evidence-grounded plan, Phase 1): the work is split into two roles behind a seam, so more
+languages and evidence sources slot in without touching the rest:
+  * an EXECUTOR runs the candidate's function in its runtime with sinks tripwired and returns an
+    Observation -- the RAW FACTS (which sinks were hit, with what text/params), never a verdict.
+  * an OBSERVER (`_verdict_from_hits`, the canary-in-sink observer) interprets those facts into a
+    verdict. Today the executor is Python-only; a NodeExecutor (Phase 2) is just another implementation
+    of the same interface, dispatched by the candidate's language.
 
-SOUNDNESS: a confirmation requires the marker to reach the sink in an unsafe position -- exactly the
-runtime oracle's predicate. If the handler can't be imported/called, or nothing reaches a sink, the
-verdict is UNKNOWN (never a finding, never a clear).
+Rung-1 confirmations rank WEAKER than Rung 2 (a function out of context can differ from the running app)
+and record the stubs used. SOUNDNESS: a confirmation requires the marker to reach the sink in an unsafe
+position -- exactly the runtime oracle's predicate. If the handler can't be imported/called, or nothing
+reaches a sink, the verdict is UNKNOWN (never a finding, never a clear).
 """
 from __future__ import annotations
 
@@ -33,6 +37,16 @@ class MicroResult:
     evidence: str = ""
     stubs: list = field(default_factory=list)
     rung: int = 1
+
+
+@dataclass
+class Observation:
+    """The RAW FACTS from one micro-execution -- what the sinks saw, whether the handler ran, and why it
+    couldn't (if it couldn't). Carries NO verdict: an Observer turns this into a MicroResult."""
+    sink_hits: list = field(default_factory=list)   # [(kind, text, params_repr)] captured by the tripwire
+    ran: bool = False                               # the handler was actually imported + called
+    error: str = ""                                 # why it couldn't run (import failure / no handler)
+    stubs: list = field(default_factory=list)       # which sink stubs applied
 
 
 class _Tripwire:
@@ -234,9 +248,11 @@ def _call_args(fn, marker, target_param=None):
     return variants
 
 
-def _verdict_from_hits(tw, marker, cwe):
+def _verdict_from_hits(hits, marker, cwe):
+    """The CANARY-IN-SINK observer: given the raw sink hits from an Observation, decide whether the
+    marker reached a sink in an UNSAFE position. Facts in, verdict out -- the model never touches this."""
     from urllib.parse import urlparse
-    for kind, text, params in tw.hits:
+    for kind, text, params in hits:
         if kind == "sql" and marker in text and marker not in (params or ""):
             return ("proven", f"marker reached the SQL statement (not params): {text[:120]}")
         if kind == "http":
@@ -251,9 +267,18 @@ def _verdict_from_hits(tw, marker, cwe):
         if kind == "path" and marker in text and ("../" in text or text.strip().startswith("/")):
             return ("proven", f"marker reached a file path with traversal: {text[:160]}")
     # marker only in params (parameterized) -> safe, if a SQL sink was hit at all
-    if cwe == "CWE-89" and any(k == "sql" and marker in (p or "") for k, t, p in tw.hits):
+    if cwe == "CWE-89" and any(k == "sql" and marker in (p or "") for k, t, p in hits):
         return ("safe", "marker reached the SQL sink only as a bound parameter (parameterized)")
-    return ("unknown", f"no sink reached with the marker in an unsafe position ({len(tw.hits)} sink hit(s))")
+    return ("unknown", f"no sink reached with the marker in an unsafe position ({len(hits)} sink hit(s))")
+
+
+def _observe(obs, marker, cwe) -> MicroResult:
+    """Apply the canary observer to an Observation -> MicroResult. An Observation that couldn't run is
+    UNKNOWN with its own reason; otherwise the sink hits decide proven/safe/unknown."""
+    if obs.error:
+        return MicroResult("unknown", obs.error, stubs=obs.stubs)
+    v, why = _verdict_from_hits(obs.sink_hits, marker, cwe)
+    return MicroResult(v, why, marker=marker, evidence=why if v != "unknown" else "", stubs=obs.stubs)
 
 
 def _payload(cwe):
@@ -265,33 +290,32 @@ def _payload(cwe):
     return "WZ" + token, "WZ" + token
 
 
-def _inproc(candidate, target_param=None) -> MicroResult:
-    """Import the candidate's handler IN-PROCESS with sinks tripwired and call it with a marked payload."""
-    path = getattr(candidate, "file", "")
-    unit = getattr(candidate, "unit", "") or ""
-    func_name = unit.split("(")[0].strip() if unit else ""
-    if not path.endswith(".py") or not func_name:
-        return MicroResult("unknown", "no importable Python handler for this candidate")
-    payload, marker = _payload(getattr(candidate, "cwe", ""))
-    tw = _Tripwire()
-    try:
-        with _tripwires(tw):
-            mod = _load_module(path)
-            fn = getattr(mod, func_name, None)
-            if fn is None or not callable(fn):
-                return MicroResult("unknown", f"handler {func_name!r} not found/callable after import",
-                                   stubs=getattr(tw, "_stubs", []))
-            for _tgt, args in _call_args(fn, payload, target_param):
-                with contextlib.suppress(Exception):
-                    fn(**args)
-                v, why = _verdict_from_hits(tw, marker, getattr(candidate, "cwe", ""))
-                if v == "proven":
-                    return MicroResult("proven", why, marker=marker, evidence=why, stubs=getattr(tw, "_stubs", []))
-    except Exception as e:
-        return MicroResult("unknown", f"micro-exec could not run in-process: {type(e).__name__}: {e}",
-                           stubs=getattr(tw, "_stubs", []))
-    v, why = _verdict_from_hits(tw, marker, getattr(candidate, "cwe", ""))
-    return MicroResult(v, why, marker=marker, evidence=why if v != "unknown" else "", stubs=getattr(tw, "_stubs", []))
+class PythonExecutor:
+    """EXECUTOR for Python candidates: import the handler IN-PROCESS with sinks tripwired, call it with a
+    marked payload across arg-variants, and return the raw sink hits as an Observation (no verdict)."""
+    lang = "py"
+
+    def run(self, candidate, payload, target_param=None) -> Observation:
+        path = getattr(candidate, "file", "")
+        unit = getattr(candidate, "unit", "") or ""
+        func_name = unit.split("(")[0].strip() if unit else ""
+        if not path.endswith(".py") or not func_name:
+            return Observation(error="no importable Python handler for this candidate")
+        tw = _Tripwire()
+        try:
+            with _tripwires(tw):
+                mod = _load_module(path)
+                fn = getattr(mod, func_name, None)
+                if fn is None or not callable(fn):
+                    return Observation(error=f"handler {func_name!r} not found/callable after import",
+                                       stubs=getattr(tw, "_stubs", []))
+                for _tgt, args in _call_args(fn, payload, target_param):
+                    with contextlib.suppress(Exception):
+                        fn(**args)                            # hits accumulate in the tripwire across variants
+                return Observation(sink_hits=list(tw.hits), ran=True, stubs=getattr(tw, "_stubs", []))
+        except Exception as e:
+            return Observation(error=f"micro-exec could not run in-process: {type(e).__name__}: {e}",
+                               stubs=getattr(tw, "_stubs", []))
 
 
 # ---- In-CONTAINER micro-execution: run the same driver inside the built image, where the target's
@@ -420,55 +444,76 @@ def _container_modpath(candidate_file, code_root, workdir):
         return workdir.rstrip("/") + "/" + Path(candidate_file).name
 
 
-def micro_exec_container(candidate, rt, timeout=180) -> MicroResult:
-    """Run the micro-exec driver INSIDE the app's built image (deps live there), with `--no-deps --build`
-    so it BUILDS the app image on demand but NEVER boots the stack -- run-by-piece for real apps. `rt` is
-    the prepared RunningTarget (compose file, build service, code_root -> workdir mapping)."""
-    import json as _json
-    import re as _re
-    import subprocess
-    from . import provision
+class PythonContainerExecutor:
+    """EXECUTOR for Python candidates whose deps live only in the app image: run the driver INSIDE the
+    built image with `--no-deps --build` (builds on demand, never boots the stack). Returns the raw sink
+    hits as an Observation. `rt` is the prepared RunningTarget (compose file, build service, code_root)."""
 
-    unit = getattr(candidate, "unit", "") or ""
-    func = unit.split("(")[0].strip()
-    if rt is None or not rt.compose_files:
-        return MicroResult("unknown", "target not prepared (no compose) for in-container micro-exec")
-    if not func:
-        return MicroResult("unknown", "no handler function for in-container micro-exec")
+    def run(self, candidate, payload, rt, timeout=180) -> Observation:
+        import json as _json
+        import re as _re
+        import subprocess
+        from . import provision
+
+        unit = getattr(candidate, "unit", "") or ""
+        func = unit.split("(")[0].strip()
+        if rt is None or not rt.compose_files:
+            return Observation(error="target not prepared (no compose) for in-container micro-exec")
+        if not func:
+            return Observation(error="no handler function for in-container micro-exec")
+        modpath = _container_modpath(getattr(candidate, "file", ""), rt.code_root, rt.workdir)
+        driver = (_DRIVER.replace("__MARKER__", repr(payload)).replace("__MODPATH__", repr(modpath))
+                  .replace("__FUNC__", repr(func)))
+        cmd = ["docker", "compose"]
+        for f in rt.compose_files:
+            cmd += ["-f", f]
+        cmd += ["run", "--rm", "--no-deps", "--build", "-T", "--entrypoint", "python", rt.service, "-c", driver]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8",
+                               errors="replace", env=provision.compose_env())
+        except Exception as e:
+            return Observation(error=f"in-container micro-exec failed to run: {type(e).__name__}: {e}")
+        out = (r.stdout or "") + (r.stderr or "")
+        m = _re.search(r"WAVE_MICRO_RESULT::(\{.*\})", out)
+        if not m:
+            err = _re.search(r"WAVE_MICRO_ERR::(.*)", out)
+            return Observation(error=f"in-container micro-exec: no result "
+                                     f"({err.group(1) if err else out[-160:]})")
+        hits = [tuple(h) for h in _json.loads(m.group(1)).get("hits", [])]
+        return Observation(sink_hits=hits, ran=True, stubs=["in-container"])
+
+
+def micro_exec_container(candidate, rt, timeout=180) -> MicroResult:
+    """Backward-compatible wrapper: run the in-container executor and observe the result."""
     payload, marker = _payload(getattr(candidate, "cwe", ""))
-    modpath = _container_modpath(getattr(candidate, "file", ""), rt.code_root, rt.workdir)
-    driver = (_DRIVER.replace("__MARKER__", repr(payload)).replace("__MODPATH__", repr(modpath))
-              .replace("__FUNC__", repr(func)))
-    cmd = ["docker", "compose"]
-    for f in rt.compose_files:
-        cmd += ["-f", f]
-    cmd += ["run", "--rm", "--no-deps", "--build", "-T", "--entrypoint", "python", rt.service, "-c", driver]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8",
-                           errors="replace", env=provision.compose_env())
-    except Exception as e:
-        return MicroResult("unknown", f"in-container micro-exec failed to run: {type(e).__name__}: {e}")
-    out = (r.stdout or "") + (r.stderr or "")
-    m = _re.search(r"WAVE_MICRO_RESULT::(\{.*\})", out)
-    if not m:
-        err = _re.search(r"WAVE_MICRO_ERR::(.*)", out)
-        return MicroResult("unknown", f"in-container micro-exec: no result ({err.group(1) if err else out[-160:]})")
-    tw = _Tripwire()
-    tw.hits = [tuple(h) for h in _json.loads(m.group(1)).get("hits", [])]
-    v, why = _verdict_from_hits(tw, marker, getattr(candidate, "cwe", ""))
-    return MicroResult(v, why, marker=marker, evidence=why if v != "unknown" else "", stubs=["in-container"])
+    obs = PythonContainerExecutor().run(candidate, payload, rt, timeout=timeout)
+    return _observe(obs, marker, getattr(candidate, "cwe", ""))
+
+
+# Executor dispatch by candidate language. Only Python today; NodeExecutor (Phase 2) registers here as
+# {"js": NodeExecutor()} and everything else -- the observer, the verdict, the loop -- stays unchanged.
+_PY_EXEC = PythonExecutor()
+_EXECUTORS = {"py": _PY_EXEC}
+
+
+def _lang_of(candidate):
+    return "py" if (getattr(candidate, "file", "") or "").endswith(".py") else ""
 
 
 def micro_exec(candidate, target_param=None, rt=None) -> MicroResult:
-    """Confirm a candidate by micro-execution: try IN-PROCESS (fast; needs deps on the host), and if that
-    can't run (deps live only in the image), fall back to IN-CONTAINER when a prepared `rt` is given."""
-    mr = _inproc(candidate, target_param)
+    """Confirm a candidate by micro-execution. Dispatch an EXECUTOR by language to run the function and
+    return raw facts; the canary OBSERVER renders the verdict. Try IN-PROCESS first (fast; needs deps on
+    the host), then fall back to IN-CONTAINER when a prepared `rt` is given (deps live in the image)."""
+    cwe = getattr(candidate, "cwe", "")
+    payload, marker = _payload(cwe)
+    executor = _EXECUTORS.get(_lang_of(candidate), _PY_EXEC)   # unknown lang -> Python (yields its own error)
+    mr = _observe(executor.run(candidate, payload, target_param), marker, cwe)
     if mr.verdict in ("proven", "safe"):
         return mr
     if rt is not None:
-        cres = micro_exec_container(candidate, rt)
-        if cres.verdict in ("proven", "safe"):
-            return cres
-        if mr.verdict == "unknown" and cres.verdict != "unknown":
-            return cres
+        cmr = _observe(PythonContainerExecutor().run(candidate, payload, rt), marker, cwe)
+        if cmr.verdict in ("proven", "safe"):
+            return cmr
+        if mr.verdict == "unknown" and cmr.verdict != "unknown":
+            return cmr
     return mr

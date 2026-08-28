@@ -26,6 +26,10 @@ class Model:
     def __init__(self, model_id=None, max_new_tokens=1500):
         self.model_id = model_id or os.environ.get("WAVE_MODEL", _DEFAULT)
         self.max_new_tokens = max_new_tokens
+        # WAVE_NO_THINK=1 disables a Qwen3-family model's <think> phase (enable_thinking=False): the
+        # reasoning never terminates into the reader's JSON within budget, so answer-only is the usable
+        # mode -- the discrimination lives in the weights, not the visible chain. No-op for R1 etc.
+        self.no_think = os.environ.get("WAVE_NO_THINK") == "1"
         self._tok = None
         self._model = None
 
@@ -47,8 +51,13 @@ class Model:
         self._load()
         import torch
         msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        inputs = self._tok.apply_chat_template(msgs, add_generation_prompt=True,
-                                               return_tensors="pt", return_dict=True).to("cuda")
+        kw = {"enable_thinking": False} if self.no_think else {}
+        try:
+            inputs = self._tok.apply_chat_template(msgs, add_generation_prompt=True,
+                                                   return_tensors="pt", return_dict=True, **kw).to("cuda")
+        except TypeError:                                   # tokenizer doesn't accept enable_thinking
+            inputs = self._tok.apply_chat_template(msgs, add_generation_prompt=True,
+                                                   return_tensors="pt", return_dict=True).to("cuda")
         plen = inputs["input_ids"].shape[1]
         with torch.no_grad():
             out = self._model.generate(**inputs, max_new_tokens=max_new_tokens or self.max_new_tokens,

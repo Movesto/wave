@@ -288,12 +288,15 @@ def _to_candidate(path, h, routes):
 
 
 def read(model, target, seed_candidates=(), routes=(), budget=8, online=False, search_budget=4):
-    """Read the top-priority files; return (reader Candidates, [(file, summary, hypotheses)])."""
+    """Read the top-`budget` security-surface files LINEARLY (no lead-following, no early stop) -- the
+    whole-repo pass. Returns (reader Candidates, [(file, summary, hypotheses)])."""
     files = prioritize_files(target, seed_candidates, budget)
     sb = [search_budget] if online else None
     cands, report = [], []
-    for f in files:
+    for i, f in enumerate(files, 1):
+        print(f"[reader] reading {Path(f).name} ({i}/{len(files)}) ...", flush=True)
         summary, hyps = read_file(model, f, search_budget=sb)
+        print(f"[reader]   -> {len(hyps)} hypothesis(es)", flush=True)
         report.append((str(f), summary, hyps))
         for h in hyps:
             cands.append(_to_candidate(f, h, routes))

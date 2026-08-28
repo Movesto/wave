@@ -31,7 +31,7 @@ def _prove_xss(rt, c, routes, model, auth):
 
 
 def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False, use_reader=False,
-             budget=80, audit_deps=True, dynamic=False, online=False):
+             budget=80, audit_deps=True, dynamic=False, online=False, reader_budget=6):
     """Full loop on `target`: discover -> provision -> (MODEL crafts exploits) prove, then (if fix)
     patch + dual-gate. The model drives exploitation and remediation; tools prove. Returns a dict.
 
@@ -101,11 +101,18 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
     model = None
     if use_reader:                                          # Phase 4+7: the model READS prioritized files and
         model = Model()                                     # forms its OWN hypotheses, REVISITING via import-leads
-        reader_cands, reader_report = reader.read_iterative(model, target, provable, routes,
-                                                            budget=6, per_round=3, max_rounds=2,
-                                                            online=online)
         if online:
             print("[reader] --online: low-confidence hypotheses may spend a web-search lookup", flush=True)
+        if reader_budget > 12:
+            # whole-repo intent: read the top-`reader_budget` surface files LINEARLY (no early stop)
+            print(f"[reader] whole-repo pass: up to {reader_budget} files", flush=True)
+            reader_cands, reader_report = reader.read(model, target, provable, routes,
+                                                      budget=reader_budget, online=online,
+                                                      search_budget=max(4, reader_budget // 4))
+        else:
+            reader_cands, reader_report = reader.read_iterative(model, target, provable, routes,
+                                                                budget=reader_budget, per_round=3,
+                                                                max_rounds=2, online=online)
         for path, summary, _h in reader_report:
             case.record("file_summary", path, "model", "believed", note=summary)
         seen = {(c.file, c.cwe) for c in provable}

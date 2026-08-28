@@ -230,18 +230,42 @@ def _numbered(src, limit=520):
     return "\n".join(f"{i + 1}: {ln}" for i, ln in enumerate(lines))
 
 
+# This GPU wedges (stuck CUDA kernel, 100% util at ~60W) on LONG generate() sequences -- verified: a
+# ~320-line file hangs, ~150 lines is safe. So read a file in <=_MAX_CHUNKS windows of _WINDOW lines
+# rather than one big prompt (preserves coverage of large files without the wedge). _READ_TOKENS gives
+# R1 enough room to finish its <think> AND emit the JSON (too few -> the array is cut off = 0 hyps).
+_WINDOW = 150
+_MAX_CHUNKS = 2
+_READ_TOKENS = 3000
+
+
+def _windows(src, window=_WINDOW, max_chunks=_MAX_CHUNKS):
+    """Line-numbered windows (1-based numbers preserved so a hypothesis's `line` stays correct)."""
+    lines = src.splitlines()
+    out = []
+    for start in range(0, min(len(lines), window * max_chunks), window):
+        chunk = lines[start:start + window]
+        out.append((start + 1, "\n".join(f"{start + i + 1}: {ln}" for i, ln in enumerate(chunk))))
+    return out or [(1, "")]
+
+
 def read_file(model, path, search_budget=None):
-    """Model reads one file -> (short summary, [hypothesis dicts]). If `search_budget` is a
-    [remaining] box and --online is on, low-confidence hypotheses spend a web-search + clarify turn."""
+    """Model reads one file -> (short summary, [hypothesis dicts]). Long files are read in windows to
+    dodge the long-sequence GPU wedge. If `search_budget` is a [remaining] box and --online is on,
+    low-confidence hypotheses spend a web-search + clarify turn."""
     try:
         src = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return "", []
-    txt = model.generate(_READ_SYS, f"FILE {Path(path).name}\n\n{_numbered(src, limit=320)}",
-                         max_new_tokens=2000, temperature=0.2)   # bounded so a slow/wedged gen shows up fast
-    hyps = _parse_hyps(txt)
-    if search_budget is not None and search_budget[0] > 0:
-        hyps = _resolve_doubts(model, hyps, search_budget)
+    wins = _windows(src)
+    hyps = []
+    for start_line, body in wins:
+        tag = f"FILE {Path(path).name}" + (f" (lines {start_line}-{start_line + _WINDOW - 1})" if len(wins) > 1 else "")
+        txt = model.generate(_READ_SYS, f"{tag}\n\n{body}", max_new_tokens=_READ_TOKENS, temperature=0.2)
+        w_hyps = _parse_hyps(txt)
+        if search_budget is not None and search_budget[0] > 0:
+            w_hyps = _resolve_doubts(model, w_hyps, search_budget)
+        hyps.extend(w_hyps)
     return f"read {Path(path).name}: {len(hyps)} hypothesis(es)", hyps
 
 

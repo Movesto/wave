@@ -26,7 +26,8 @@ def cmd_loop(args):
     res = st.run_loop(args.target, host_port=args.port, strikes=args.strikes, fix=args.fix,
                       model_discover=args.model_discover, use_reader=args.reader,
                       audit_deps=not args.no_deps, budget=args.budget, dynamic=args.dynamic,
-                      online=args.online, reader_budget=args.reader_budget, reader_all=args.reader_all)
+                      online=args.online, reader_budget=args.reader_budget, reader_all=args.reader_all,
+                      investigate=args.investigate, investigate_budget=args.investigate_budget)
     s = res["summary"]
     print(f"\n=== LOOP on {args.target} ===")
     print(f"  candidates={s['candidates']} provable={s['provable']} "
@@ -100,6 +101,12 @@ def main():
     lp.add_argument("--reader-all", action="store_true",
                     help="the model reads EVERY source file in the repo (not just the security-surface "
                          "ones) -- a true full-repo scan; slowest, one model read per file")
+    lp.add_argument("--investigate", action="store_true",
+                    help="the model RUNS code in a sandbox to prove/refute micro-exec unknowns (any "
+                         "language) -- the general tool-use prover; confirms only with an observed effect")
+    lp.add_argument("--investigate-budget", type=int, default=3, metavar="N",
+                    help="max unsettled candidates the investigator works per run (default 3; each is "
+                         "several model turns + sandbox runs)")
     lp.add_argument("--online", action="store_true",
                     help="allow the Reader to WEB-SEARCH when a hypothesis is low-confidence "
                          "(sends queries off-box; off by default -- the system is otherwise local)")

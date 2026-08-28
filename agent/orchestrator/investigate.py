@@ -30,7 +30,16 @@ _AGENT_SYS = (
     "RULES: (1) You may only CONFIRM after you have RUN something and OBSERVED the effect that proves it; "
     "reasoning alone is 'believed', never 'confirmed'. (2) 'refuted' means you ran it and saw it is safe. "
     "(3) 'blocked' means you could not run what you needed. (4) Keep commands self-contained; the target's "
-    "code is under the working directory. Keep any reasoning BRIEF, then output ONLY the json object."
+    "code is under the working directory. Keep any reasoning BRIEF, then output ONLY the json object.\n"
+    "HOW TO RUN CODE: each action is exactly ONE shell command. Do NOT run a file you have not created. "
+    "Either run it INLINE, e.g. command \"python3 -c 'import app; app.f(\\\"; id\\\")'\", or CREATE the "
+    "file first in one command with a heredoc, e.g. \"cat > t.py <<'EOF'\\n...\\nEOF\\npython3 t.py\". "
+    "If a command fails, READ the error and try a DIFFERENT approach -- never repeat the same failing "
+    "command.\n"
+    "READING THE PROOF: when you inject a command (e.g. `; id`, `; echo WAVE-PWNED`), the OUTPUT of that "
+    "injected command IS the proof -- a `uid=...` line, your marker, a file listing means it executed. "
+    "The moment you see it, CONCLUDE 'confirmed' and cite that exact output as the evidence; do not keep "
+    "poking."
 )
 
 
@@ -94,7 +103,12 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
             ran += 1
             print(f"[investigate] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
                   + (" TIMEOUT" if res.timed_out else ""), flush=True)
-            trail.append((cmd, res.summary()))
+            summ = res.summary()
+            # nudge a stuck model: it just repeated a command that already failed -> tell it to change tack
+            if not res.ok() and any(pc == cmd and "exit 0" not in ps for pc, ps in trail):
+                summ += ("\nNOTE: you already ran this exact command and it failed. Do NOT repeat it -- try "
+                         "a DIFFERENT approach (create the file first with a heredoc, or run inline with -c).")
+            trail.append((cmd, summ))
         elif kind == "conclude":
             verdict = str(act.get("verdict", "believed")).lower()
             why = str(act.get("why", ""))

@@ -6,6 +6,7 @@ points as remediate.py / model.py land. Precision-first: only oracle-PROVEN cand
 findings; provable candidates the oracle can't confirm are DEFERRED with a reason.
 """
 from dataclasses import asdict
+from pathlib import Path
 
 from . import discover as disc
 from . import provision as prov
@@ -13,7 +14,49 @@ from . import routes as routes_mod
 from . import registry, oracle, remediate, idor, exploit, dom_oracle, oast, missing_controls, behavioral
 from . import browser_recon, bizlogic, recorder, rung0, rung1, reader, editor, reporters
 from . import auth as auth_mod
+from . import investigate as invmod
 from .models import Finding
+
+
+def _code_window(path, line, ctx=22):
+    """Line-numbered source around the candidate's sink -- the code the model investigates."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    lo, hi = max(0, (line or 1) - 1 - ctx), min(len(lines), (line or 1) + ctx)
+    return "\n".join(f"{i + 1}: {lines[i]}" for i in range(lo, hi))
+
+
+def _rel(path, target):
+    try:
+        return str(Path(path).resolve().relative_to(Path(target).resolve())).replace("\\", "/")
+    except Exception:
+        return Path(path).name
+
+
+def _image_for(path):
+    """A runtime image that can run this candidate's language (the model can install more if it needs)."""
+    p = (path or "").lower()
+    if p.endswith((".js", ".mjs", ".ts", ".jsx", ".tsx")):
+        return "node:20-slim"
+    if p.endswith(".php"):
+        return "php:8.2-cli"
+    if p.endswith(".rb"):
+        return "ruby:3-slim"
+    if p.endswith(".go"):
+        return "golang:1-alpine"
+    return "python:3.12-slim"
+
+
+def _brief_for(candidate, target, reason):
+    rel = _rel(candidate.file, target)
+    code = _code_window(candidate.file, getattr(candidate, "line", 0))
+    return (f"File: {rel} (mounted at /work/{rel}). Function: {candidate.unit}.\n"
+            f"Suspected {candidate.cwe} ({candidate.family}); sink: {candidate.sink}.\n"
+            f"A quick automatic check was inconclusive ({reason}).\n\nCode around the sink:\n{code}\n\n"
+            f"The whole repository is mounted at your working directory (/work). Prove or refute whether "
+            f"this is a REAL, exploitable {candidate.cwe} by running code.")
 
 
 def _prove_xss(rt, c, routes, model, auth):
@@ -32,7 +75,7 @@ def _prove_xss(rt, c, routes, model, auth):
 
 def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False, use_reader=False,
              budget=80, audit_deps=True, dynamic=False, online=False, reader_budget=6,
-             reader_all=False):
+             reader_all=False, investigate=False, investigate_budget=3):
     """Full loop on `target`: discover -> provision -> (MODEL crafts exploits) prove, then (if fix)
     patch + dual-gate. The model drives exploitation and remediation; tools prove. Returns a dict.
 
@@ -194,9 +237,41 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
             else:
                 unknowns.append((c, mr.reason))
 
-        # A micro-exec UNKNOWN means the model ran a piece it doesn't fully understand. With --online it
-        # may SEARCH what it doesn't recognize and judge -- but a web judgment can only REFUTE a lead or
-        # ELEVATE it for review; it never mints a Tier-1 finding (the sink oracle still owns confirmation).
+        # A micro-exec UNKNOWN is a piece the cheap oracle couldn't settle. With --investigate, hand it to
+        # the MODEL to prove: it drives the execute() sandbox (runs code, in any language) and concludes,
+        # under the grounding rule (a `confirmed` must cite an effect it actually caused + observed). This
+        # is the general prover -- it settles non-Python candidates the sink oracle can't touch.
+        if investigate and unknowns:
+            from .model import Model
+            if model is None:
+                model = Model()
+            n = min(investigate_budget, len(unknowns))
+            print(f"[investigate] the model will RUN code to settle {n} unsettled piece(s) "
+                  f"(of {len(unknowns)})", flush=True)
+            done = []
+            for c, reason in unknowns[:n]:
+                s = _ensure_hyp(c)
+                v = invmod.investigate(model, _brief_for(c, target, reason), image=_image_for(c.file),
+                                       mount=target, network="none", max_steps=5, step_timeout=45)
+                ev = (v.evidence or v.why)[:400]
+                if v.verdict == "confirmed":
+                    case.supersede(hyp[s], status="confirmed")
+                    case.record("confirmation", s, "model", "confirmed", provenance=c.loc(), cwe=c.cwe,
+                                evidence=ev, oracle=f"investigate: model ran {v.ran} cmd(s), evidence-grounded")
+                    findings.append(Finding(candidate=c, status="confirmed (investigated)", evidence=ev,
+                                            payload="", proven_request=None,
+                                            notes=f"model-investigated ({v.ran} run(s)) -- evidence-backed, review"))
+                elif v.verdict == "refuted":
+                    case.supersede(hyp[s], status="refuted", note=f"investigate: {v.why[:200]}")
+                    n_safe += 1
+                elif v.verdict == "believed":
+                    deferred.append((c, f"investigate: LIKELY VULNERABLE -- {v.why[:200]} "
+                                        f"(model-reasoned, evidence-backed; review)"))
+                else:
+                    deferred.append((c, f"investigate: blocked -- {v.why[:160]}"))
+                done.append(c)
+            unknowns = [(c, r) for (c, r) in unknowns if c not in done]
+
         if online and unknowns:
             from .model import Model
             if model is None:

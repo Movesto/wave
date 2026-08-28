@@ -6,7 +6,17 @@ More stages (provision, auth, exploit, oracle, remediate) land as the loop is bu
 """
 import argparse
 import json
+import sys
 from dataclasses import asdict
+
+# The model can emit non-cp1252 Unicode (e.g. a non-breaking hyphen U+2011); a bare print() of it to a
+# Windows cp1252 console raises UnicodeEncodeError and kills the whole run. Force UTF-8 (replace on any
+# stray char) so a model's output can never crash the loop.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 from . import discover as disc
 from . import state as st

@@ -16,7 +16,7 @@ def cmd_loop(args):
     res = st.run_loop(args.target, host_port=args.port, strikes=args.strikes, fix=args.fix,
                       model_discover=args.model_discover, use_reader=args.reader,
                       audit_deps=not args.no_deps, budget=args.budget, dynamic=args.dynamic,
-                      online=args.online, reader_budget=args.reader_budget)
+                      online=args.online, reader_budget=args.reader_budget, reader_all=args.reader_all)
     s = res["summary"]
     print(f"\n=== LOOP on {args.target} ===")
     print(f"  candidates={s['candidates']} provable={s['provable']} "
@@ -87,6 +87,9 @@ def main():
     lp.add_argument("--reader-budget", type=int, default=6, metavar="N",
                     help="how many files the Reader reads (default 6, lead-following); >12 switches to "
                          "a LINEAR whole-repo pass over the top-N security-surface files (slow on this GPU)")
+    lp.add_argument("--reader-all", action="store_true",
+                    help="the model reads EVERY source file in the repo (not just the security-surface "
+                         "ones) -- a true full-repo scan; slowest, one model read per file")
     lp.add_argument("--online", action="store_true",
                     help="allow the Reader to WEB-SEARCH when a hypothesis is low-confidence "
                          "(sends queries off-box; off by default -- the system is otherwise local)")

@@ -31,7 +31,8 @@ def _prove_xss(rt, c, routes, model, auth):
 
 
 def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False, use_reader=False,
-             budget=80, audit_deps=True, dynamic=False, online=False, reader_budget=6):
+             budget=80, audit_deps=True, dynamic=False, online=False, reader_budget=6,
+             reader_all=False):
     """Full loop on `target`: discover -> provision -> (MODEL crafts exploits) prove, then (if fix)
     patch + dual-gate. The model drives exploitation and remediation; tools prove. Returns a dict.
 
@@ -103,7 +104,15 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
         model = Model()                                     # forms its OWN hypotheses, REVISITING via import-leads
         if online:
             print("[reader] --online: low-confidence hypotheses may spend a web-search lookup", flush=True)
-        if reader_budget > 12:
+        if reader_all:
+            # FULL-repo scan: read EVERY source file, not just the surface ones -- the model decides
+            # what matters (vulns don't only sit on routes). Slow: one model read per file.
+            nfiles = len(reader.prioritize_files(target, provable, budget=10 ** 9, include_all=True))
+            print(f"[reader] FULL-repo scan: reading all {nfiles} source file(s) -- this is slow", flush=True)
+            reader_cands, reader_report = reader.read(model, target, provable, routes, budget=10 ** 9,
+                                                      online=online, search_budget=max(6, nfiles // 4),
+                                                      include_all=True)
+        elif reader_budget > 12:
             # whole-repo intent: read the top-`reader_budget` surface files LINEARLY (no early stop)
             print(f"[reader] whole-repo pass: up to {reader_budget} files", flush=True)
             reader_cands, reader_report = reader.read(model, target, provable, routes,

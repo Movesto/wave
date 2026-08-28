@@ -205,8 +205,10 @@ def _iter_files(target):
             yield f
 
 
-def prioritize_files(target, seed_candidates=(), budget=8):
-    """Rank source files by security-surface density (boosted if the seed pass flagged them); top N."""
+def prioritize_files(target, seed_candidates=(), budget=8, include_all=False):
+    """Rank source files by security-surface density (boosted if the seed pass flagged them); top N.
+    With include_all, keep EVERY readable source file (zero-signal ones ranked last) so a full-repo
+    pass reads the whole project, not just the obvious surface -- the model decides what matters."""
     seeded = {str(Path(c.file).resolve()) for c in seed_candidates}
     scored = []
     for f in _iter_files(target):
@@ -219,7 +221,7 @@ def prioritize_files(target, seed_candidates=(), budget=8):
         score = len(_SURFACE.findall(src))
         if str(f.resolve()) in seeded:
             score += 50                                 # the seed pass already smelled something here
-        if score:
+        if score or include_all:
             scored.append((score, f))
     scored.sort(key=lambda t: t[0], reverse=True)
     return [f for _s, f in scored[:budget]]
@@ -287,10 +289,12 @@ def _to_candidate(path, h, routes):
                      route_hint=route_hint, slice=str(h.get("why") or ""))
 
 
-def read(model, target, seed_candidates=(), routes=(), budget=8, online=False, search_budget=4):
+def read(model, target, seed_candidates=(), routes=(), budget=8, online=False, search_budget=4,
+         include_all=False):
     """Read the top-`budget` security-surface files LINEARLY (no lead-following, no early stop) -- the
-    whole-repo pass. Returns (reader Candidates, [(file, summary, hypotheses)])."""
-    files = prioritize_files(target, seed_candidates, budget)
+    whole-repo pass. With include_all, read EVERY source file, not just the surface ones.
+    Returns (reader Candidates, [(file, summary, hypotheses)])."""
+    files = prioritize_files(target, seed_candidates, budget, include_all=include_all)
     sb = [search_budget] if online else None
     cands, report = [], []
     for i, f in enumerate(files, 1):

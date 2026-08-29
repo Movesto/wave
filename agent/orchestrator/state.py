@@ -35,11 +35,15 @@ def _rel(path, target):
         return Path(path).name
 
 
+def _is_js(path):
+    return (path or "").lower().endswith((".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"))
+
+
 def _image_for(path):
     """A runtime image that can run this candidate's language (the model can install more if it needs)."""
-    p = (path or "").lower()
-    if p.endswith((".js", ".mjs", ".ts", ".jsx", ".tsx")):
+    if _is_js(path):
         return "node:20-slim"
+    p = (path or "").lower()
     if p.endswith(".php"):
         return "php:8.2-cli"
     if p.endswith(".rb"):
@@ -52,11 +56,17 @@ def _image_for(path):
 def _brief_for(candidate, target, reason):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
+    extra = ""
+    if _is_js(candidate.file):
+        extra = ("\nThis is JavaScript/TypeScript. `tsx` is installed: run a .ts file or inline TS with "
+                 "`tsx -e \"...\"` or `tsx <file>.ts`; the repo's node_modules ARE installed so its "
+                 "require/import dependencies resolve. Load the exported function and call it with your "
+                 "payload (e.g. `node -e \"require('/work/app').f('; id')\"` or the tsx equivalent).")
     return (f"File: {rel} (mounted at /work/{rel}). Function: {candidate.unit}.\n"
             f"Suspected {candidate.cwe} ({candidate.family}); sink: {candidate.sink}.\n"
             f"A quick automatic check was inconclusive ({reason}).\n\nCode around the sink:\n{code}\n\n"
             f"The whole repository is mounted at your working directory (/work). Prove or refute whether "
-            f"this is a REAL, exploitable {candidate.cwe} by running code.")
+            f"this is a REAL, exploitable {candidate.cwe} by running code.{extra}")
 
 
 def _prove_xss(rt, c, routes, model, auth):
@@ -246,13 +256,20 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
             if model is None:
                 model = Model()
             n = min(investigate_budget, len(unknowns))
+            work = unknowns[:n]
             print(f"[investigate] the model will RUN code to settle {n} unsettled piece(s) "
                   f"(of {len(unknowns)})", flush=True)
+            js_image = None
+            if any(_is_js(c.file) for c, _ in work):        # JS/TS provisioning: tsx runner + node_modules, once
+                from . import js_env
+                js_image = js_env.prepare(target)
             done = []
-            for c, reason in unknowns[:n]:
+            for c, reason in work:
                 s = _ensure_hyp(c)
-                v = invmod.investigate(model, _brief_for(c, target, reason), image=_image_for(c.file),
-                                       mount=target, network="none", max_steps=8, step_timeout=45)
+                img = js_image if (_is_js(c.file) and js_image) else _image_for(c.file)
+                step_to = 90 if _is_js(c.file) else 45      # tsx/node startup is slower than python -c
+                v = invmod.investigate(model, _brief_for(c, target, reason), image=img,
+                                       mount=target, network="none", max_steps=8, step_timeout=step_to)
                 ev = (v.evidence or v.why)[:400]
                 if v.verdict == "confirmed":
                     case.supersede(hyp[s], status="confirmed")

@@ -77,11 +77,19 @@ def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
                      f"Supply ONLY the payload; the scaffold owns the browser/module glue.")
         else:
             extra = (f"\nA reproduction scaffold is ready at {cont} -- it loads this module and calls "
-                     f"{fn}(YOUR_PAYLOAD), then prints WAVE_RESULT (the return value) plus any side effects. "
-                     f"Run it with your payload, e.g.:\n  {run_hint}\nInject a marker (e.g. `; id` for shell, "
-                     f"an <img onerror> for HTML) and read WAVE_RESULT / the output for the effect. Supply "
-                     f"ONLY the payload; the scaffold owns the module-loading glue. You may still write your "
-                     f"own script if the scaffold doesn't fit (e.g. the tainted arg isn't the first).")
+                     f"{fn}(ARG), printing WAVE_RESULT + WAVE_CALL_ERROR. The ARG is parsed as JSON if it can "
+                     f"be, so the taint can flow through a PROPERTY -- match the function's signature:\n"
+                     f"  - takes a string:  {run_hint.replace('<payload>', '; id')}\n"
+                     f"  - takes an object: {run_hint.replace('<payload>', chr(39) + '{{\"path\": \"; id\"}}' + chr(39))}\n"
+                     f"  - takes a URL:     pass {chr(39)}{{\"href\":\"https://x/; id\",\"hash\":\"\",\"search\":\"\","
+                     f"\"pathname\":\"/x\"}}{chr(39)}\n"
+                     f"For OS-command injection the injected command's output is often NOT returned -- inject a "
+                     f"MARKER side effect into /work (which persists; each command runs in a fresh container so "
+                     f"/tmp does NOT persist). Best: do it in ONE command, e.g. run the scaffold with a payload "
+                     f"like `; touch /work/wave_HIT` then `; sleep 1; ls -l /work/wave_HIT` appended -- if the "
+                     f"file exists it executed = confirmed. For SQLi/path/etc. read "
+                     f"WAVE_RESULT. Supply ONLY the arg; the scaffold owns the module-loading glue. You may still "
+                     f"write your own script if it doesn't fit.")
     elif candidate.cwe in _XSS_CWES:
         extra = (
             "\nThis is a possible XSS. A headless browser is available. To PROVE it, RENDER the vulnerable "

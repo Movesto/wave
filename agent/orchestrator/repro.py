@@ -45,8 +45,13 @@ async function loadFn() {{
     console.log("WAVE_OUTPUT:", html.slice(0, 400));
     await b.close();
   }} else {{
+    // the arg may be a JSON value (object/array/string) so the taint can flow through a PROPERTY
+    // (e.g. {{"path":"; id"}} or a URL-like {{"href":"https://x/; id","hash":"","search":"","pathname":"/x"}});
+    // if it isn't valid JSON, treat it as a raw string (fn("; id")).
+    let arg;
+    try {{ arg = JSON.parse(payload); }} catch {{ arg = payload; }}
     try {{
-      const out = await fn(payload);
+      const out = await fn(arg);
       console.log("WAVE_RESULT:", typeof out === "string" ? out.slice(0, 800) : JSON.stringify(out).slice(0, 800));
     }} catch (e) {{ console.log("WAVE_CALL_ERROR:", e && e.message); }}
   }}
@@ -54,17 +59,21 @@ async function loadFn() {{
 '''
 
 _PY = '''\
-import sys, importlib.util
+import sys, json, importlib.util
 sys.path.insert(0, {root!r})
 _spec = importlib.util.spec_from_file_location("_wave_t", {target!r})
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 _fn = getattr(_mod, {func!r}, None)
 _payload = sys.argv[1] if len(sys.argv) > 1 else ""
+try:            # JSON arg lets the taint flow through a property (e.g. {{"cmd":"; id"}}); else raw string
+    _arg = json.loads(_payload)
+except Exception:
+    _arg = _payload
 if _fn is None:
     print("WAVE_LOAD_ERROR: no function", {func!r}); sys.exit(2)
 try:
-    print("WAVE_RESULT:", str(_fn(_payload))[:800])
+    print("WAVE_RESULT:", str(_fn(_arg))[:800])
 except Exception as _e:
     print("WAVE_CALL_ERROR:", type(_e).__name__, _e)
 '''

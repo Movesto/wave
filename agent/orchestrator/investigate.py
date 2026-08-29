@@ -39,8 +39,16 @@ _AGENT_SYS = (
     "READING THE PROOF: when you inject a command (e.g. `; id`, `; echo WAVE-PWNED`), the OUTPUT of that "
     "injected command IS the proof -- a `uid=...` line, your marker, a file listing means it executed. "
     "The moment you see it, CONCLUDE 'confirmed' and cite that exact output as the evidence; do not keep "
-    "poking."
+    "poking.\n"
+    "FILL IN REAL VALUES -- never copy the literal placeholder text above (not the string "
+    "'confirmed|refuted|believed|blocked', not '<...>'). Example of a good FIRST action:\n"
+    "  {\"action\":\"run\",\"command\":\"node -e \\\"require('/work/app').pingHost('; id')\\\"\","
+    "\"why\":\"inject id; a uid= line proves it ran\"}\n"
+    "and later, if you saw uid=:  {\"action\":\"conclude\",\"verdict\":\"confirmed\",\"cwe\":\"CWE-78\","
+    "\"why\":\"the injected id ran\",\"evidence\":\"uid=0(root) gid=0(root)\"}"
 )
+
+_VERDICTS = {"confirmed", "refuted", "believed", "blocked"}
 
 
 @dataclass
@@ -114,6 +122,13 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
         elif kind == "conclude":
             verdict = str(act.get("verdict", "believed")).lower()
             why = str(act.get("why", ""))
+            # reject a parroted schema/placeholder (e.g. verdict "confirmed|refuted|believed|blocked", or a
+            # "<...>" why) -- an invalid verdict is not a conclusion; nudge and keep going.
+            if verdict not in _VERDICTS or "<" in why or "|" in verdict:
+                trail.append(("(invalid conclude)", "you copied the placeholder text instead of real "
+                              "values, or gave an invalid verdict -- RUN a command and OBSERVE before "
+                              "concluding, then use a real verdict (confirmed/refuted/believed/blocked)"))
+                continue
             if verdict == "confirmed" and ran == 0:        # GROUNDING RULE: no observation -> can't confirm
                 verdict = "believed"
                 why = "(downgraded from confirmed: no command was ever run to observe the effect) " + why

@@ -89,7 +89,12 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
     tools = [_RUN_TOOL, _CONCLUDE_TOOL]
     trail, ran = [], 0
     for step in range(max_steps):
-        msg = model.chat(messages, tools=tools, temperature=0.2)
+        try:
+            msg = model.chat(messages, tools=tools, temperature=0.2)
+        except Exception as e:                              # API down/500 after retries -> degrade, never crash
+            print(f"[investigate:native] API error, stopping this candidate: {type(e).__name__}", flush=True)
+            return Verdict("blocked", f"model API error after retries: {type(e).__name__}: {e}",
+                           ran=ran, trail=trail)
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:                                  # model answered in prose -> steer it back to tools
             messages.append({"role": "assistant", "content": msg.get("content") or ""})
@@ -118,7 +123,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
             ran += 1
             print(f"[investigate:native] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
                   + (" TIMEOUT" if res.timed_out else ""), flush=True)
-            summ = res.summary()
+            summ = res.summary(limit=1200)                  # bound context growth (many cat/grep dumps -> 500s)
             trail.append((cmd, summ))
             messages.append({"role": "tool", "tool_call_id": tc.get("id"), "content": summ})
     return Verdict("blocked", f"step budget ({max_steps}) spent without a conclusion", ran=ran, trail=trail)

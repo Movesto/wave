@@ -72,18 +72,28 @@ class Model:
         print("[model] loaded", flush=True)
 
     def _api_chat(self, messages, tools=None, temperature=0.2, max_tokens=None, timeout=300):
-        """One call to the OpenAI-compatible endpoint -> the assistant message dict {content, tool_calls}."""
+        """One call to the OpenAI-compatible endpoint -> the assistant message dict {content, tool_calls}.
+        Retries a couple times on a transient server error (ollama occasionally 500s under context load)."""
+        import time
+
         import requests
         body = {"model": self.model_id, "messages": messages, "temperature": temperature, "stream": False}
         if tools:
             body["tools"] = tools
         if max_tokens:
             body["max_tokens"] = max_tokens
-        r = requests.post(self.api_base.rstrip("/") + "/chat/completions",
-                          headers={"Authorization": "Bearer local", "Content-Type": "application/json"},
-                          json=body, timeout=timeout)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]
+        url = self.api_base.rstrip("/") + "/chat/completions"
+        last = None
+        for attempt in range(3):
+            try:
+                r = requests.post(url, headers={"Authorization": "Bearer local",
+                                                "Content-Type": "application/json"}, json=body, timeout=timeout)
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]
+            except Exception as e:                          # transient 500 / timeout / connection blip -> retry
+                last = e
+                time.sleep(2 * (attempt + 1))
+        raise last
 
     def chat(self, messages, tools=None, temperature=0.2, max_tokens=None):
         """Native chat, optionally with tools -> the assistant message dict (content + tool_calls).

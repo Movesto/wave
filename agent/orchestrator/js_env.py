@@ -26,13 +26,15 @@ _DOCKERFILE = "FROM node:20-slim\nRUN npm install -g tsx@4 >/dev/null 2>&1 || np
 # model RENDER a payload in a real headless browser and observe whether it executed as script.
 BROWSER_IMAGE = "wave-js-browser:latest"
 _BROWSER_PW = "v1.48.0"
+# playwright/tsx live here; the scaffold loads playwright via createRequire(PW_PREFIX) since ESM import
+# ignores NODE_PATH. PATH gets the tsx binary; NODE_PATH covers plain require().
+PW_PREFIX = "/opt/wave"
 _BROWSER_DOCKERFILE = (
     f"FROM mcr.microsoft.com/playwright:{_BROWSER_PW}-jammy\n"
-    # local install in a fixed dir -> reliable require() resolution (global + NODE_PATH is flaky here)
-    "RUN mkdir -p /opt/wave && cd /opt/wave && npm init -y >/dev/null 2>&1 && "
+    f"RUN mkdir -p {PW_PREFIX} && cd {PW_PREFIX} && npm init -y >/dev/null 2>&1 && "
     "npm install tsx playwright@1.48.0\n"
-    "ENV NODE_PATH=/opt/wave/node_modules\n"
-    "ENV PATH=/opt/wave/node_modules/.bin:$PATH\n"
+    f"ENV NODE_PATH={PW_PREFIX}/node_modules\n"
+    f"ENV PATH={PW_PREFIX}/node_modules/.bin:$PATH\n"
 )
 
 

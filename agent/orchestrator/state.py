@@ -56,11 +56,33 @@ def _image_for(path):
     return "python:3.12-slim"
 
 
-def _brief_for(candidate, target, reason):
+def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
+    fn = str(candidate.unit).split("(")[0].strip()
     extra = ""
-    if candidate.cwe in _XSS_CWES:
+    if scaffold:
+        cont, run_hint = scaffold
+        if mode == "render":
+            ex = run_hint.replace("<payload>", "<img src=x onerror=window.__wave=1>")
+            extra = (f"\nA reproduction scaffold is ready at {cont} -- it loads this module, calls "
+                     f"{fn}(YOUR_PAYLOAD), renders the output in headless chromium, and prints "
+                     f"WAVE_RENDER_CANARY and WAVE_OUTPUT. Use this EXACT canary payload (no quotes, so the "
+                     f"shell can't mangle it, and an event handler because setContent won't run <script>):"
+                     f"\n  {ex}\n"
+                     f"If WAVE_RENDER_CANARY prints 1, the payload EXECUTED -> conclude confirmed. If it "
+                     f"prints 'none', LOOK AT WAVE_OUTPUT: if your <img tag appears RAW/unescaped there, the "
+                     f"output IS reflected unescaped = still XSS (the canary just misfired -- that is enough "
+                     f"to confirm). Only conclude refuted if WAVE_OUTPUT shows it ESCAPED (e.g. &lt;img). "
+                     f"Supply ONLY the payload; the scaffold owns the browser/module glue.")
+        else:
+            extra = (f"\nA reproduction scaffold is ready at {cont} -- it loads this module and calls "
+                     f"{fn}(YOUR_PAYLOAD), then prints WAVE_RESULT (the return value) plus any side effects. "
+                     f"Run it with your payload, e.g.:\n  {run_hint}\nInject a marker (e.g. `; id` for shell, "
+                     f"an <img onerror> for HTML) and read WAVE_RESULT / the output for the effect. Supply "
+                     f"ONLY the payload; the scaffold owns the module-loading glue. You may still write your "
+                     f"own script if the scaffold doesn't fit (e.g. the tainted arg isn't the first).")
+    elif candidate.cwe in _XSS_CWES:
         extra = (
             "\nThis is a possible XSS. A headless browser is available. To PROVE it, RENDER the vulnerable "
             "output with a CANARY payload and check whether it EXECUTED as script. Here is a COMPLETE, "
@@ -291,6 +313,7 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
                 if any(c.cwe in _XSS_CWES for c, _ in work):    # XSS classes need a real browser to prove
                     browser_image = js_env.ensure_browser_runner()
                     js_env.ensure_deps(target)
+            from . import repro
             done = []
             for c, reason in work:
                 s = _ensure_hyp(c)
@@ -301,8 +324,14 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
                 else:
                     img = _image_for(c.file)
                 step_to = 120 if c.cwe in _XSS_CWES else (90 if _is_js(c.file) else 45)
-                v = invmod.investigate(model, _brief_for(c, target, reason), image=img,
-                                       mount=target, network="none", max_steps=8, step_timeout=step_to)
+                mode = "render" if c.cwe in _XSS_CWES else "call"
+                scaffold = repro.build(c, target, mode=mode)   # harness owns the glue; model supplies the payload
+                try:
+                    v = invmod.investigate(model, _brief_for(c, target, reason, scaffold=scaffold, mode=mode),
+                                           image=img, mount=target, network="none", max_steps=8,
+                                           step_timeout=step_to)
+                finally:
+                    repro.remove(target)
                 ev = (v.evidence or v.why)[:400]
                 if v.verdict == "confirmed":
                     case.supersede(hyp[s], status="confirmed")

@@ -50,6 +50,79 @@ _AGENT_SYS = (
 
 _VERDICTS = {"confirmed", "refuted", "believed", "blocked"}
 
+# --- Native tool-calling path (for a tool-tuned model behind an OpenAI-compatible API: ollama etc.) ---
+# The model returns structured tool_calls instead of our text JSON; the enum on `verdict` makes parroting
+# impossible. Same grounding rule, same execute() sandbox -- just the model's native interface.
+_NATIVE_SYS = (
+    "You are a security investigator with a real sandbox. Investigate the hypothesis by CALLING "
+    "run_command to actually run code and OBSERVE the result -- never guess, never invent output. You "
+    "may only conclude 'confirmed' AFTER a run_command whose output shows the effect (e.g. an injected "
+    "`id` prints a uid= line, your marker appears). The target repo is mounted at /work. When you are "
+    "done, call conclude. To run an exported function, require/import it (e.g. "
+    "node -e \"require('/work/app').f('; id')\" or python3 -c \"import app; app.f('; id')\")."
+)
+
+_RUN_TOOL = {"type": "function", "function": {
+    "name": "run_command",
+    "description": "Run one shell command in the sandbox; returns its stdout, stderr, and exit code.",
+    "parameters": {"type": "object", "properties": {
+        "command": {"type": "string", "description": "the shell command to run in the target's environment"},
+        "image": {"type": "string", "description": "optional docker image, e.g. node:20-slim or python:3.12-slim"},
+        "network": {"type": "string", "enum": ["none", "host"], "description": "network access (default none)"},
+    }, "required": ["command"]}}}
+
+_CONCLUDE_TOOL = {"type": "function", "function": {
+    "name": "conclude",
+    "description": "Give the final verdict once you have run enough to decide.",
+    "parameters": {"type": "object", "properties": {
+        "verdict": {"type": "string", "enum": ["confirmed", "refuted", "believed", "blocked"]},
+        "cwe": {"type": "string"},
+        "why": {"type": "string", "description": "why, citing what you observed"},
+        "evidence": {"type": "string", "description": "the concrete observed effect"},
+    }, "required": ["verdict", "why"]}}}
+
+
+def _investigate_native(model, brief, *, image, mount, container, network, max_steps, step_timeout):
+    """Tool-calling loop over the model's NATIVE tools interface (structured tool_calls)."""
+    import json as _json
+    messages = [{"role": "system", "content": _NATIVE_SYS}, {"role": "user", "content": brief}]
+    tools = [_RUN_TOOL, _CONCLUDE_TOOL]
+    trail, ran = [], 0
+    for step in range(max_steps):
+        msg = model.chat(messages, tools=tools, temperature=0.2)
+        tool_calls = msg.get("tool_calls") or []
+        if not tool_calls:                                  # model answered in prose -> steer it back to tools
+            messages.append({"role": "assistant", "content": msg.get("content") or ""})
+            messages.append({"role": "user", "content": "Call run_command to test it, or conclude with a verdict."})
+            continue
+        messages.append(msg)                                # the assistant turn (carries the tool_calls)
+        for tc in tool_calls:
+            fn = tc.get("function", {}) or {}
+            name = fn.get("name")
+            try:
+                args = _json.loads(fn.get("arguments") or "{}")
+            except Exception:
+                args = {}
+            if name == "conclude":
+                verdict = str(args.get("verdict", "believed")).lower()
+                why = str(args.get("why", ""))
+                if verdict == "confirmed" and ran == 0:     # GROUNDING RULE
+                    verdict = "believed"
+                    why = "(downgraded from confirmed: no command was run to observe the effect) " + why
+                print(f"[investigate:native] concluded: {verdict} after {ran} run(s)", flush=True)
+                return Verdict(verdict if verdict in _VERDICTS else "believed", why,
+                               str(args.get("evidence", "")), str(args.get("cwe", "")), ran, trail)
+            cmd = str(args.get("command", "")).strip()
+            res = execute(cmd, image=str(args.get("image") or image), mount=mount, container=container,
+                          network=str(args.get("network") or network), timeout=step_timeout)
+            ran += 1
+            print(f"[investigate:native] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
+                  + (" TIMEOUT" if res.timed_out else ""), flush=True)
+            summ = res.summary()
+            trail.append((cmd, summ))
+            messages.append({"role": "tool", "tool_call_id": tc.get("id"), "content": summ})
+    return Verdict("blocked", f"step budget ({max_steps}) spent without a conclusion", ran=ran, trail=trail)
+
 
 @dataclass
 class Verdict:
@@ -89,7 +162,11 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
                 network="none", max_steps=6, step_timeout=60, max_new_tokens=2000) -> Verdict:
     """Let the model investigate `brief` (a hypothesis + the relevant code) by running commands in a
     sandbox, until it concludes or the step budget is spent. `mount` binds the target dir into the box;
-    `container` runs inside the app's own container instead."""
+    `container` runs inside the app's own container instead. A tool-calling model (WAVE_API_BASE) drives
+    the NATIVE tools loop; a local text model uses the JSON-action protocol below."""
+    if getattr(model, "supports_tools", False):
+        return _investigate_native(model, brief, image=image, mount=mount, container=container,
+                                   network=network, max_steps=max_steps, step_timeout=step_timeout)
     trail = []
     ran = 0
     for step in range(max_steps):

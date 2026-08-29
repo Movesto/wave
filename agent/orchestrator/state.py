@@ -252,7 +252,7 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
             for c, reason in unknowns[:n]:
                 s = _ensure_hyp(c)
                 v = invmod.investigate(model, _brief_for(c, target, reason), image=_image_for(c.file),
-                                       mount=target, network="none", max_steps=5, step_timeout=45)
+                                       mount=target, network="none", max_steps=8, step_timeout=45)
                 ev = (v.evidence or v.why)[:400]
                 if v.verdict == "confirmed":
                     case.supersede(hyp[s], status="confirmed")

@@ -6,6 +6,7 @@ is tight). Reuses the load recipe verified in the Juliet spike. Env WAVE_MODEL o
 """
 import os
 import re
+from pathlib import Path
 
 _DEFAULT = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
 
@@ -30,24 +31,72 @@ class Model:
         # reasoning never terminates into the reader's JSON within budget, so answer-only is the usable
         # mode -- the discrimination lives in the weights, not the visible chain. No-op for R1 etc.
         self.no_think = os.environ.get("WAVE_NO_THINK") == "1"
+        self.adapter = os.environ.get("WAVE_ADAPTER")   # a trained LoRA adapter dir (base read from its config)
+        # WAVE_API_BASE (e.g. http://localhost:11434/v1 for a local ollama server) -> talk to an
+        # OpenAI-compatible endpoint instead of loading local weights. This is how we run a GGUF /
+        # tool-calling model: the server owns native tool-calls; we just call the API. Local, no egress.
+        self.api_base = os.environ.get("WAVE_API_BASE")
         self._tok = None
         self._model = None
+
+    @property
+    def supports_tools(self):
+        """True when a native tool-calling backend is available (the API path)."""
+        return bool(self.api_base)
 
     def _load(self):
         if self._model is not None:
             return
+        import json as _json
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-        print(f"[model] loading {self.model_id} (4-bit)...", flush=True)
         bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                  bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
-        self._tok = AutoTokenizer.from_pretrained(self.model_id)
-        self._model = AutoModelForCausalLM.from_pretrained(
-            self.model_id, quantization_config=bnb, device_map="cuda", low_cpu_mem_usage=True)
+        if self.adapter:
+            # WAVE_ADAPTER: a trained LoRA adapter dir -> load its base (from adapter_config) 4-bit, then
+            # stack the adapter. Tokenizer + chat template come from the adapter dir (the trained format).
+            cfg = _json.loads((Path(self.adapter) / "adapter_config.json").read_text(encoding="utf-8"))
+            base = cfg.get("base_model_name_or_path") or self.model_id
+            print(f"[model] loading adapter {self.adapter} on {base} (4-bit)...", flush=True)
+            from peft import PeftModel
+            self._tok = AutoTokenizer.from_pretrained(self.adapter)
+            b = AutoModelForCausalLM.from_pretrained(base, quantization_config=bnb, device_map="cuda",
+                                                     low_cpu_mem_usage=True)
+            self._model = PeftModel.from_pretrained(b, self.adapter)
+        else:
+            print(f"[model] loading {self.model_id} (4-bit)...", flush=True)
+            self._tok = AutoTokenizer.from_pretrained(self.model_id)
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self.model_id, quantization_config=bnb, device_map="cuda", low_cpu_mem_usage=True)
         self._model.eval()
         print("[model] loaded", flush=True)
 
+    def _api_chat(self, messages, tools=None, temperature=0.2, max_tokens=None, timeout=300):
+        """One call to the OpenAI-compatible endpoint -> the assistant message dict {content, tool_calls}."""
+        import requests
+        body = {"model": self.model_id, "messages": messages, "temperature": temperature, "stream": False}
+        if tools:
+            body["tools"] = tools
+        if max_tokens:
+            body["max_tokens"] = max_tokens
+        r = requests.post(self.api_base.rstrip("/") + "/chat/completions",
+                          headers={"Authorization": "Bearer local", "Content-Type": "application/json"},
+                          json=body, timeout=timeout)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]
+
+    def chat(self, messages, tools=None, temperature=0.2, max_tokens=None):
+        """Native chat, optionally with tools -> the assistant message dict (content + tool_calls).
+        Requires an API backend (WAVE_API_BASE); local transformers models use generate() instead."""
+        if not self.api_base:
+            raise RuntimeError("Model.chat(tools=...) needs an API backend -- set WAVE_API_BASE")
+        return self._api_chat(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
+
     def generate(self, system, user, max_new_tokens=None, temperature=0.4):
+        if self.api_base:                                   # API backend: no local weights, just call the endpoint
+            msg = self._api_chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
+                                 temperature=temperature, max_tokens=max_new_tokens)
+            return msg.get("content") or ""
         self._load()
         import torch
         msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]

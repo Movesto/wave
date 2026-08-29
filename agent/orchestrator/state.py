@@ -214,10 +214,14 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
             print("[reader] --online: low-confidence hypotheses may spend a web-search lookup", flush=True)
         if reader_all:
             # FULL-repo scan: read EVERY source file, not just the surface ones -- the model decides
-            # what matters (vulns don't only sit on routes). Slow: one model read per file.
-            nfiles = len(reader.prioritize_files(target, provable, budget=10 ** 9, include_all=True))
-            print(f"[reader] FULL-repo scan: reading all {nfiles} source file(s) -- this is slow", flush=True)
-            reader_cands, reader_report = reader.read(model, target, provable, routes, budget=10 ** 9,
+            # what matters (vulns don't only sit on routes). Capped so a huge monorepo can't hang the
+            # run (one model read per file); surface-ranked so the most-relevant files are read first.
+            _CAP = 80
+            avail = len(reader.prioritize_files(target, provable, budget=10 ** 9, include_all=True))
+            nfiles = min(avail, _CAP)
+            note = f" (capped from {avail}; too large for a full read)" if avail > _CAP else ""
+            print(f"[reader] FULL-repo scan: reading {nfiles} source file(s){note}", flush=True)
+            reader_cands, reader_report = reader.read(model, target, provable, routes, budget=nfiles,
                                                       online=online, search_budget=max(6, nfiles // 4),
                                                       include_all=True)
         elif reader_budget > 12:

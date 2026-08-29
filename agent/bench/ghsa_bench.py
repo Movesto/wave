@@ -69,8 +69,10 @@ def fetch_extract(row, workdir):
 
 def run_wave(repo_dir, timeout):
     """Run the loop as a subprocess; return the set of proven files (repo-relative)."""
+    # --reader-all: these are LIBRARIES (no web request->sink surface), so read every file, not just the
+    # surface-scored ones -- otherwise prioritize_files reads 0 files and there's nothing to investigate.
     cmd = [sys.executable, "-u", "-m", "agent.orchestrator.run", "loop", str(repo_dir),
-           "--reader", "--investigate", "--investigate-budget", "5"]
+           "--reader", "--reader-all", "--investigate", "--investigate-budget", "5"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(_ROOT),
                            encoding="utf-8", errors="replace")

@@ -24,7 +24,7 @@ from . import state as st
 
 def cmd_loop(args):
     res = st.run_loop(args.target, host_port=args.port, strikes=args.strikes, fix=args.fix,
-                      model_discover=args.model_discover, use_reader=args.reader,
+                      model_discover=args.model_discover, use_reader=args.reader or args.reader_all,
                       audit_deps=not args.no_deps, budget=args.budget, dynamic=args.dynamic,
                       online=args.online, reader_budget=args.reader_budget, reader_all=args.reader_all,
                       investigate=args.investigate, investigate_budget=args.investigate_budget)

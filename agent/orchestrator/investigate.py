@@ -104,10 +104,12 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
             print(f"[investigate] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
                   + (" TIMEOUT" if res.timed_out else ""), flush=True)
             summ = res.summary()
-            # nudge a stuck model: it just repeated a command that already failed -> tell it to change tack
-            if not res.ok() and any(pc == cmd and "exit 0" not in ps for pc, ps in trail):
-                summ += ("\nNOTE: you already ran this exact command and it failed. Do NOT repeat it -- try "
-                         "a DIFFERENT approach (create the file first with a heredoc, or run inline with -c).")
+            # nudge a stuck model: it repeated a command it ALREADY ran (whether it failed OR succeeded --
+            # a zombie loop re-running a passing command never reads its own output). Push it to move on.
+            if any(pc == cmd for pc, _ps in trail):
+                summ += ("\nNOTE: you already ran this EXACT command. Do NOT repeat it -- READ the output "
+                         "above and either CONCLUDE now (if it proves or refutes the issue) or try a "
+                         "DIFFERENT command.")
             trail.append((cmd, summ))
         elif kind == "conclude":
             verdict = str(act.get("verdict", "believed")).lower()

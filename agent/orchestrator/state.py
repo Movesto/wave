@@ -39,6 +39,9 @@ def _is_js(path):
     return (path or "").lower().endswith((".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"))
 
 
+_XSS_CWES = {"CWE-79", "CWE-80", "CWE-83", "CWE-116"}   # classes that need a real browser to PROVE (render + observe)
+
+
 def _image_for(path):
     """A runtime image that can run this candidate's language (the model can install more if it needs)."""
     if _is_js(path):
@@ -57,7 +60,29 @@ def _brief_for(candidate, target, reason):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
     extra = ""
-    if _is_js(candidate.file):
+    if candidate.cwe in _XSS_CWES:
+        extra = (
+            "\nThis is a possible XSS. A headless browser is available. To PROVE it, RENDER the vulnerable "
+            "output with a CANARY payload and check whether it EXECUTED as script. Here is a COMPLETE, "
+            "WORKING script -- write it to a file and run `node /tmp/x.js`, only adapting (a) the require "
+            "path/module system, (b) which function you call to build the output, (c) the payload:\n"
+            "```js\n"
+            "const { chromium } = require('playwright');\n"
+            "const mod = require('/work/" + rel + "');   // if it uses `export`, use `await import(...)` instead\n"
+            "(async () => {\n"
+            "  const html = mod." + str(candidate.unit).split('(')[0].strip() + "('<img src=x onerror=\"window.__wave=1\">');  // build output WITH the payload\n"
+            "  const b = await chromium.launch({ args: ['--no-sandbox'] });\n"
+            "  const p = await b.newPage();\n"
+            "  await p.setContent(String(html));\n"
+            "  await new Promise(r => setTimeout(r, 300));\n"
+            "  console.log('CANARY:', await p.evaluate(() => window.__wave || 'none'));\n"
+            "  await b.close();\n"
+            "})();\n"
+            "```\n"
+            "If CANARY prints 1, the payload EXECUTED -> conclude confirmed (evidence: the canary fired). "
+            "If it prints 'none' (the output was escaped), the code is safe -> conclude refuted. The repo's "
+            "node_modules and tsx are installed; write the script to a file to avoid shell-quoting issues.")
+    elif _is_js(candidate.file):
         extra = ("\nThis is JavaScript/TypeScript. `tsx` is installed: run a .ts file or inline TS with "
                  "`tsx -e \"...\"` or `tsx <file>.ts`; the repo's node_modules ARE installed so its "
                  "require/import dependencies resolve. Load the exported function and call it with your "
@@ -259,15 +284,23 @@ def run_loop(target, host_port=None, strikes=1, fix=False, model_discover=False,
             work = unknowns[:n]
             print(f"[investigate] the model will RUN code to settle {n} unsettled piece(s) "
                   f"(of {len(unknowns)})", flush=True)
-            js_image = None
+            js_image = browser_image = None
             if any(_is_js(c.file) for c, _ in work):        # JS/TS provisioning: tsx runner + node_modules, once
                 from . import js_env
                 js_image = js_env.prepare(target)
+                if any(c.cwe in _XSS_CWES for c, _ in work):    # XSS classes need a real browser to prove
+                    browser_image = js_env.ensure_browser_runner()
+                    js_env.ensure_deps(target)
             done = []
             for c, reason in work:
                 s = _ensure_hyp(c)
-                img = js_image if (_is_js(c.file) and js_image) else _image_for(c.file)
-                step_to = 90 if _is_js(c.file) else 45      # tsx/node startup is slower than python -c
+                if c.cwe in _XSS_CWES and browser_image:
+                    img = browser_image
+                elif _is_js(c.file) and js_image:
+                    img = js_image
+                else:
+                    img = _image_for(c.file)
+                step_to = 120 if c.cwe in _XSS_CWES else (90 if _is_js(c.file) else 45)
                 v = invmod.investigate(model, _brief_for(c, target, reason), image=img,
                                        mount=target, network="none", max_steps=8, step_timeout=step_to)
                 ev = (v.evidence or v.why)[:400]

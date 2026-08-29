@@ -21,6 +21,20 @@ from pathlib import Path
 RUNNER_IMAGE = "wave-js-runner:latest"
 _DOCKERFILE = "FROM node:20-slim\nRUN npm install -g tsx@4 >/dev/null 2>&1 || npm install -g tsx\n"
 
+# Browser sandbox for XSS/DOM classes: Microsoft's Playwright image (chromium + all deps preinstalled)
+# + tsx + a global playwright, with NODE_PATH so a script anywhere can `require('playwright')`. Lets the
+# model RENDER a payload in a real headless browser and observe whether it executed as script.
+BROWSER_IMAGE = "wave-js-browser:latest"
+_BROWSER_PW = "v1.48.0"
+_BROWSER_DOCKERFILE = (
+    f"FROM mcr.microsoft.com/playwright:{_BROWSER_PW}-jammy\n"
+    # local install in a fixed dir -> reliable require() resolution (global + NODE_PATH is flaky here)
+    "RUN mkdir -p /opt/wave && cd /opt/wave && npm init -y >/dev/null 2>&1 && "
+    "npm install tsx playwright@1.48.0\n"
+    "ENV NODE_PATH=/opt/wave/node_modules\n"
+    "ENV PATH=/opt/wave/node_modules/.bin:$PATH\n"
+)
+
 
 def _docker_mount(host_path: str) -> str:
     """Host path in Docker-bind-mount form (Windows C:\\x -> //c/x)."""
@@ -49,6 +63,27 @@ def ensure_runner(timeout: int = 600) -> str | None:
         print(f"[js_env] runner build failed -- falling back to node:20-slim", flush=True)
         return None
     return RUNNER_IMAGE
+
+
+def ensure_browser_runner(timeout: int = 1800) -> str | None:
+    """Build the Playwright/chromium browser image once (cached); return its tag, or None if unavailable.
+    Large (~2GB) and slow the first time -- worth it: it's the only way to PROVE XSS (render + observe)."""
+    import shutil
+    if shutil.which("docker") is None:
+        return None
+    if subprocess.run(["docker", "image", "inspect", BROWSER_IMAGE], capture_output=True).returncode == 0:
+        return BROWSER_IMAGE
+    print(f"[js_env] building {BROWSER_IMAGE} (playwright + chromium) -- one time, large download ...", flush=True)
+    try:
+        r = subprocess.run(["docker", "build", "-t", BROWSER_IMAGE, "-"], input=_BROWSER_DOCKERFILE,
+                           text=True, capture_output=True, timeout=timeout)
+    except Exception as e:
+        print(f"[js_env] browser image build failed ({type(e).__name__})", flush=True)
+        return None
+    if r.returncode != 0:
+        print(f"[js_env] browser image build failed: {(r.stderr or '')[-200:]}", flush=True)
+        return None
+    return BROWSER_IMAGE
 
 
 def _pkg_root(target: str) -> Path | None:

@@ -24,7 +24,7 @@ def code_block(text):
 
 
 class Model:
-    def __init__(self, model_id=None, max_new_tokens=1500):
+    def __init__(self, model_id=None, max_new_tokens=1500, api_base=None, api_key=None):
         self.model_id = model_id or os.environ.get("WAVE_MODEL", _DEFAULT)
         self.max_new_tokens = max_new_tokens
         # WAVE_NO_THINK=1 disables a Qwen3-family model's <think> phase (enable_thinking=False): the
@@ -35,9 +35,21 @@ class Model:
         # WAVE_API_BASE (e.g. http://localhost:11434/v1 for a local ollama server) -> talk to an
         # OpenAI-compatible endpoint instead of loading local weights. This is how we run a GGUF /
         # tool-calling model: the server owns native tool-calls; we just call the API. Local, no egress.
-        self.api_base = os.environ.get("WAVE_API_BASE")
+        # An explicit api_base/api_key (used for the cloud GLM "eyes" model) overrides the env; the local
+        # ollama path passes neither and keeps the "Bearer local" placeholder. Detection stays local --
+        # only comprehension is allowed to point at a remote endpoint.
+        self.api_base = api_base or os.environ.get("WAVE_API_BASE")
+        self.api_key = api_key or os.environ.get("WAVE_API_KEY")
+        # ollama defaults to a 4096-token context (num_ctx); a code slice + a reasoning model's <think>
+        # blows straight past it and the reply gets cut before the answer. Raise it for the LOCAL ollama
+        # endpoint only -- OpenRouter/GLM rejects ollama's "options" field. WAVE_NUM_CTX overrides.
+        self.num_ctx = int(os.environ.get("WAVE_NUM_CTX", "16384"))
         self._tok = None
         self._model = None
+
+    @property
+    def _is_local_api(self):
+        return bool(self.api_base) and any(h in self.api_base for h in ("localhost", "127.0.0.1", ":11434"))
 
     @property
     def supports_tools(self):
@@ -71,9 +83,13 @@ class Model:
         self._model.eval()
         print("[model] loaded", flush=True)
 
-    def _api_chat(self, messages, tools=None, temperature=0.2, max_tokens=None, timeout=300):
+    def _api_chat(self, messages, tools=None, temperature=0.2, max_tokens=None, timeout=300, think=None,
+                  json_mode=False):
         """One call to the OpenAI-compatible endpoint -> the assistant message dict {content, tool_calls}.
-        Retries a couple times on a transient server error (ollama occasionally 500s under context load)."""
+        Retries a couple times on a transient server error (ollama occasionally 500s under context load).
+        think=False disables a reasoning model's <think> phase (ollama honors "think"). json_mode forces a
+        valid-JSON reply (OpenAI response_format) -- the reliable way to get structured output out of a
+        reasoning model: it emits the object directly instead of rambling past the token budget."""
         import time
 
         import requests
@@ -82,11 +98,17 @@ class Model:
             body["tools"] = tools
         if max_tokens:
             body["max_tokens"] = max_tokens
+        if think is not None:                               # ollama honors "think": the MTP model then
+            body["think"] = think                           # reasons only briefly and emits the answer
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        if self.num_ctx and self._is_local_api:             # give the local model a real context window
+            body["options"] = {"num_ctx": self.num_ctx}
         url = self.api_base.rstrip("/") + "/chat/completions"
         last = None
         for attempt in range(3):
             try:
-                r = requests.post(url, headers={"Authorization": "Bearer local",
+                r = requests.post(url, headers={"Authorization": f"Bearer {self.api_key or 'local'}",
                                                 "Content-Type": "application/json"}, json=body, timeout=timeout)
                 r.raise_for_status()
                 return r.json()["choices"][0]["message"]
@@ -102,11 +124,12 @@ class Model:
             raise RuntimeError("Model.chat(tools=...) needs an API backend -- set WAVE_API_BASE")
         return self._api_chat(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
 
-    def generate(self, system, user, max_new_tokens=None, temperature=0.4):
+    def generate(self, system, user, max_new_tokens=None, temperature=0.4, think=None, json_mode=False):
         if self.api_base:                                   # API backend: no local weights, just call the endpoint
             msg = self._api_chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
-                                 temperature=temperature, max_tokens=max_new_tokens)
-            return msg.get("content") or ""
+                                 temperature=temperature, max_tokens=max_new_tokens, think=think,
+                                 json_mode=json_mode)
+            return msg.get("content") or msg.get("reasoning") or ""   # thinking-only reply -> salvage reasoning
         self._load()
         import torch
         msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]

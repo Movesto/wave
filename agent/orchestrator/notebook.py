@@ -20,6 +20,7 @@ No cloud, no separate comprehension model.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .repomap import _rel
@@ -45,27 +46,55 @@ _NOTE_SYS = (
 
 # ---- deterministic ledger index (no model) -----------------------------------------------------------
 
-def _auth_of(route_code):
-    c = route_code.lower()
-    if "isadmin" in c or "adminuser" in c or "get_admin" in c or "'admin'" in c or '"admin"' in c:
+_AUTH_ADMIN = re.compile(r"adminuser|get_admin_user|\bis_admin\b|isadmin|require_admin|requireadmin|"
+                         r"adminguard|roles\s*\(\s*['\"]admin", re.I)
+# NB: match auth DEPENDENCIES, not the login form -- OAuth2PasswordRequestForm is the /login input, not a
+# guard, so don't match bare "oauth2" (it would tag the unauthenticated /login as protected).
+_AUTH_USER = re.compile(r"currentuser|get_current_user|isloggedin|require_auth|requireauth|"
+                        r"login_required|useguards|jwtauthguard|authguard|oauth2passwordbearer|"
+                        r"depends\s*\([^)]*(user|auth|current|token|session)", re.I)
+
+
+def _auth_from(text):
+    """Auth from the route line + handler signature/decorators. admin > user > none. The framework puts
+    the check in DIFFERENT places: Express/Nest in the route line (isLoggedIn/@UseGuards), FastAPI in the
+    handler params (Depends(get_current_user), CurrentUser/AdminUser annotated types) -- so we scan both."""
+    if _AUTH_ADMIN.search(text):
         return "admin"
-    if "isloggedin" in c or "currentuser" in c or "requireauth" in c or "require_auth" in c:
+    if _AUTH_USER.search(text):
         return "session"
-    if "depends" in c and ("user" in c or "auth" in c or "token" in c):
-        return "jwt/session"
-    return "unknown"
+    return "none"
+
+
+def _handler_for(finfo, route_line):
+    """The handler function a route decorator sits on -- the def within a few lines below the [ROUTE]
+    pin. Its signature carries the auth dependency the decorator line doesn't."""
+    cands = list(finfo.functions)
+    for c in finfo.classes:
+        cands.extend(c.methods)
+    best = None
+    for f in cands:
+        if 0 <= (f.line - route_line) <= 6 and (best is None or f.line < best.line):
+            best = f
+    return best
 
 
 def ledger_index(cmap, root, per_file, pinned):
     """Attack-surface index derived STRAIGHT from the map -- deterministic, cannot hallucinate.
-    entry_points = every [ROUTE] with a heuristic auth tag; ranked_targets = pinned files (already
-    pin-density-ordered) with their distinct sink classes."""
+    entry_points = every [ROUTE] with a heuristic auth tag (from the route line AND its handler's
+    signature); ranked_targets = pinned files (already pin-density-ordered) with their distinct classes."""
     entry_points, ranked = [], []
     for p in pinned:
         routes, sinks, _dyn = per_file[p]
         rel = _rel(root, p)
+        finfo = cmap.files.get(p)
         for ln, _, code in routes:
-            entry_points.append({"route": code, "file": rel, "line": ln, "auth": _auth_of(code)})
+            handler = _handler_for(finfo, ln) if finfo else None
+            if handler is not None:
+                auth = _auth_from(code + " " + (handler.sig or "") + " " + " ".join(handler.decorators))
+            else:
+                auth = _auth_from(code) if (_AUTH_ADMIN.search(code) or _AUTH_USER.search(code)) else "unknown"
+            entry_points.append({"route": code, "file": rel, "line": ln, "auth": auth})
         classes = []
         for _ln, label, _code in sinks:
             if label not in classes:

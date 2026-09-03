@@ -239,6 +239,15 @@ def read_note(model, root, path, per_file_entry):
         for c in (d.get("classes_to_try_first") or []):
             if c and c not in note["classes_to_try_first"]:
                 note["classes_to_try_first"].append(c)
+    # Ground the hint: keep only classes that an actual finding carries (drops the "dumped the whole
+    # taxonomy on a clean file" glitch). If findings exist but none matched, fall back to their classes.
+    fclasses = []
+    for f in note["findings"]:
+        c = str(f.get("class", "")).lower()
+        if c and c not in fclasses:
+            fclasses.append(c)
+    kept = [c for c in note["classes_to_try_first"] if str(c).lower() in fclasses]
+    note["classes_to_try_first"] = (kept or fclasses)[:5]
     return note
 
 

@@ -28,7 +28,9 @@ _ROUTE = re.compile(
 # --- The 9 injection classes the detector tries FIRST (class label -> sink regex) ---------------------
 # Language-specific tables avoid the exec()/eval() ambiguity between Python (code-eval) and JS (child_process).
 _SINKS_COMMON = [
-    ("NoSQLi",   re.compile(r"\$where|\.find(One)?\s*\(|\$regex\b|\.aggregate\s*\(")),
+    # .find(<callback>) is Array.prototype.find, NOT a Mongo query -- require an object filter `{` (or
+    # $-operators / findOne / aggregate) so JS array methods don't false-pin as NoSQLi.
+    ("NoSQLi",   re.compile(r"\$where\b|\.findOne\s*\(|\.find\s*\(\s*\{|\$regex\b|\.aggregate\s*\(")),
     ("ssrf",     re.compile(r"\bfetch\s*\(|\baxios\b|\.urlopen\s*\(|requests\.(get|post|put|request|head)\b|urllib\.request|http\.(get|request)\s*\(|\bgot\s*\(")),
     ("xss",      re.compile(r"innerHTML|dangerouslySetInnerHTML|document\.write|render_template_string|\bMarkup\s*\(|\.send\s*\(\s*[`\"']?\s*<")),
     ("redirect", re.compile(r"\bredirect\s*\(|res\.redirect\s*\(|sendRedirect")),
@@ -50,6 +52,148 @@ _SINKS_JS = [
 
 def _lang_sinks(lang):
     return (_SINKS_PY if lang == "python" else _SINKS_JS) + _SINKS_COMMON
+
+
+# --- Infrastructure / non-code files -----------------------------------------------------------------
+# SAST is not just backend/frontend code. Containers, CI, reverse proxies, shell scripts, and env files
+# carry their own critical bugs (root containers, docker-socket mounts, pull_request_target RCE, curl|sh,
+# hardcoded secrets, open proxies). We inventory the WHOLE repo so the model understands it, and pin the
+# infra-security patterns the same way we pin code sinks. Non-security config/docs are listed as context.
+_INFRA_PINS = {
+    "dockerfile": [
+        ("container-root",   re.compile(r"^\s*USER\s+root\b", re.I)),
+        ("remote-add",       re.compile(r"^\s*ADD\s+https?://", re.I)),
+        ("curl-pipe-sh",     re.compile(r"(curl|wget)\b.*\|\s*(sh|bash)")),
+        ("secret-in-image",  re.compile(r"^\s*(ENV|ARG)\s+\w*(SECRET|PASSWORD|TOKEN|API_?KEY|PRIVATE_KEY)", re.I)),
+        ("world-writable",   re.compile(r"chmod\s+-?R?\s*777")),
+    ],
+    "compose": [
+        ("privileged",       re.compile(r"privileged:\s*true", re.I)),
+        ("host-network",     re.compile(r"network_mode:\s*[\"']?host", re.I)),
+        ("docker-socket",    re.compile(r"/var/run/docker\.sock")),
+        ("secret-literal",   re.compile(r"(PASSWORD|SECRET|TOKEN|API_?KEY)\s*[:=]\s*\S", re.I)),
+    ],
+    "nginx": [
+        ("proxy-pass-dynamic", re.compile(r"proxy_pass\s+[^;]*\$(http_|arg_|request_|cookie_)")),
+        ("proxy-pass",       re.compile(r"proxy_pass\s+https?://")),
+        ("autoindex",        re.compile(r"autoindex\s+on", re.I)),
+        ("nginx-if",         re.compile(r"^\s*if\s*\(")),
+    ],
+    "workflow": [
+        ("pr-target",        re.compile(r"pull_request_target")),
+        ("event-injection",  re.compile(r"\$\{\{\s*github\.event\.")),
+        ("checkout-pr-ref",  re.compile(r"ref:\s*\$\{\{\s*github\.event")),
+        ("curl-pipe-sh",     re.compile(r"(curl|wget)\b.*\|\s*(sh|bash)")),
+    ],
+    "shell": [
+        ("curl-pipe-sh",     re.compile(r"(curl|wget)\b.*\|\s*(sh|bash)")),
+        ("eval",             re.compile(r"\beval\b")),
+        ("rm-rf-root",       re.compile(r"rm\s+-rf\s+/(\s|$|\*)")),
+    ],
+    "env": [
+        ("secret-literal",   re.compile(r"^\s*\w*(SECRET|PASSWORD|TOKEN|API_?KEY|PRIVATE_KEY)\w*\s*=\s*.+", re.I)),
+    ],
+    "terraform": [
+        ("public-ingress",   re.compile(r"cidr_blocks\s*=\s*\[?\s*[\"']0\.0\.0\.0/0")),
+        ("secret-literal",   re.compile(r"(password|secret|token|access_key)\s*=\s*[\"']\S", re.I)),
+    ],
+}
+# Dockerfile structural directives worth showing so the model grasps the image even absent a pin.
+_DOCKER_KEYS = re.compile(r"^\s*(FROM|USER|EXPOSE|ENTRYPOINT|CMD|WORKDIR)\b", re.I)
+# Files we inventory as context (no security pins): manifests, generic config, docs.
+_INVENTORY_ONLY = {"manifest", "config-yaml", "config", "doc"}
+
+
+def _classify_infra(path):
+    """Category for a non-code file, or None if it's not worth mapping."""
+    p = path.replace("\\", "/").lower()
+    base = p.rsplit("/", 1)[-1]
+    if base == "dockerfile" or base.startswith("dockerfile.") or base.endswith(".dockerfile"):
+        return "dockerfile"
+    if re.match(r"(docker[-.])?compose.*\.ya?ml$", base) or base in ("compose.yml", "compose.yaml"):
+        return "compose"
+    if "/.github/workflows/" in p and base.endswith((".yml", ".yaml")):
+        return "workflow"
+    if base == "nginx.conf" or base.endswith(".nginx") or (base.endswith(".conf") and "nginx" in p):
+        return "nginx"
+    if base.endswith((".sh", ".bash")):
+        return "shell"
+    if base == ".env" or base.startswith(".env.") or base.endswith(".env"):
+        return "env"
+    if base.endswith((".tf", ".tfvars")):
+        return "terraform"
+    if (base in ("package.json", "requirements.txt", "pyproject.toml", "pipfile", "go.mod", "gemfile",
+                 "cargo.toml", "composer.json") or base.startswith("requirements")):
+        return "manifest"
+    if base.endswith((".yml", ".yaml")):
+        return "config-yaml"
+    if base.endswith((".toml", ".ini", ".cfg", ".conf", ".properties")):
+        return "config"
+    if base.endswith((".md", ".rst", ".txt")) or base in ("license", "makefile", "procfile"):
+        return "doc"
+    return None
+
+
+def _secret_value(rhs):
+    """True only for a REAL literal secret value -- not an env reference (${VAR}), a number (durations/
+    ports), or an empty/placeholder. Kills the `JWT_SECRET: ${JWT_SECRET:?}` and `TOKEN_MINUTES=30` FPs."""
+    v = rhs.strip().strip("\"'").strip()
+    if not v or v.startswith(("${", "$(", "$")):
+        return False
+    if re.fullmatch(r"\d+", v):
+        return False
+    if v.lower() in ("changeme", "change_me", "yourpassword", "your-secret", "your_secret", "xxx", "...",
+                     "true", "false", "none", "null"):
+        return False
+    return True
+
+
+def _infra_purpose(cat, lines):
+    for ln in lines:
+        s = ln.strip().lstrip("#/*-! ").strip()
+        if s:
+            return s[:140]
+    return f"({cat} file)"
+
+
+def scan_infra(root):
+    """Walk the WHOLE repo (pruning the usual junk dirs) for non-code files and pin infra-security
+    patterns. Returns a list of {path, category, loc, purpose, pins, keys}."""
+    import os
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in codemap._SKIP and d != ".git"]
+        for fn in filenames:
+            f = Path(dirpath) / fn
+            if f.suffix.lower() in codemap._EXT_LANG:          # code -> handled by codemap
+                continue
+            cat = _classify_infra(str(f))
+            if cat is None:
+                continue
+            try:
+                if f.stat().st_size > 300_000:
+                    continue
+                lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            pins, keys = [], []
+            for i, raw in enumerate(lines, 1):
+                # strip comments (# is the comment char for all these formats) so a `curl|bash` inside a
+                # comment isn't pinned; whole-line comments scan nothing.
+                scan_line = "" if raw.lstrip().startswith("#") else re.split(r"\s#", raw, 1)[0]
+                for label, rx in _INFRA_PINS.get(cat, ()):
+                    if rx.search(scan_line):
+                        if label == "secret-literal":
+                            rhs = re.split(r"[:=]", raw, 1)
+                            if len(rhs) < 2 or not _secret_value(rhs[1]):
+                                continue
+                        pins.append((i, label, raw.strip()[:160]))
+                        break
+                if cat == "dockerfile" and _DOCKER_KEYS.match(raw):
+                    keys.append((i, raw.strip()[:120]))
+            out.append({"path": str(f), "category": cat, "loc": len(lines),
+                        "purpose": _infra_purpose(cat, lines), "pins": pins, "keys": keys})
+    return out
 
 
 def _read_lines(path):
@@ -77,6 +221,12 @@ def scan_pins(finfo):
     (line, label, code). Sink pins are hints, not verdicts."""
     routes, sinks, dyn = [], [], []
     sink_tbl = _lang_sinks(finfo.lang)
+    # Client-side code's fetch() is a browser call, not server-side SSRF. Recognize it by: JSX component
+    # (.tsx/.jsx), a React/Next import, or living under a frontend/client/public tree.
+    _p = finfo.path.replace("\\", "/").lower()
+    is_client = (Path(finfo.path).suffix.lower() in (".tsx", ".jsx")
+                 or bool(set(_p.split("/")) & {"frontend", "client", "public"})
+                 or any(("react" in i.lower() or "next" in i.lower()) for i in finfo.imports))
     for i, raw in enumerate(_read_lines(finfo.path), 1):
         s = _strip_comment(raw)
         code = raw.strip()[:160]
@@ -87,7 +237,8 @@ def scan_pins(finfo):
         matched = False
         for label, rx in sink_tbl:
             if rx.search(s):
-                sinks.append((i, label, code))
+                if not (label == "ssrf" and is_client):    # client-side fetch is not server SSRF
+                    sinks.append((i, label, code))
                 matched = True
                 break
         if not matched:                                    # dynamic dispatch / reflection the call graph misses
@@ -175,17 +326,34 @@ def _rel(root, path):
         return path.replace("\\", "/")
 
 
-def render(cmap, root, per_file, pinned, rest):
+def _render_infra(root, inf):
+    rel = _rel(root, inf["path"])
+    head = f"### {rel}   ({inf['category']}, {inf['loc']} loc)"
+    if inf["pins"]:
+        head += f"   PINS: {len(inf['pins'])}"
+    lines = [head, f"purpose: {inf['purpose']}"]
+    for ln, code in inf.get("keys", []):
+        lines.append(f"   {code}   L{ln}")
+    for ln, label, code in inf["pins"]:
+        lines.append(f"   [INFRA:{label}] {code}   L{ln}")
+    return "\n".join(lines)
+
+
+def render(cmap, root, per_file, pinned, rest, infra=None):
+    infra = infra or []
     n_routes = sum(len(per_file[p][0]) for p in per_file)
     n_sinks = sum(len(per_file[p][1]) for p in per_file)
+    n_infra_pins = sum(len(i["pins"]) for i in infra)
     out = [
         f"# wave repo map — {Path(root).name}",
         "",
-        f"files: {len(cmap.files)}   functions: {sum(len(v) for v in cmap.funcs.values())}   "
-        f"classes: {sum(len(v) for v in cmap.classes.values())}   routes: {n_routes}   sink-pins: {n_sinks}",
+        f"code files: {len(cmap.files)}   functions: {sum(len(v) for v in cmap.funcs.values())}   "
+        f"classes: {sum(len(v) for v in cmap.classes.values())}   routes: {n_routes}   sink-pins: {n_sinks}   "
+        f"infra/config files: {len(infra)}   infra-pins: {n_infra_pins}",
         "",
         "Pins are triage HINTS (routes = where input enters; [SINK:<class>] = one of the 9 injection "
-        "classes to check first), never verdicts. Full source of any file is available on request.",
+        "classes; [INFRA:<kind>] = an infrastructure/CI misconfig), never verdicts. Full source of any "
+        "file is available on request.",
         "",
         "=" * 90,
         "## PINNED — files with routes or sinks (check these first)",
@@ -196,10 +364,24 @@ def render(cmap, root, per_file, pinned, rest):
     for p in pinned:
         out.append("")
         out.append(_render_file(cmap, root, p, per_file[p], full=True))
-    out += ["", "=" * 90, "## FULL INVENTORY — every remaining file", "=" * 90]
+    out += ["", "=" * 90, "## FULL INVENTORY — every remaining code file", "=" * 90]
     for p in rest:
         out.append("")
         out.append(_render_file(cmap, root, p, per_file[p], full=True))
+
+    # Infrastructure / CI / config -- the non-code attack surface, security cats first (pinned first).
+    sec = [i for i in infra if i["category"] not in _INVENTORY_ONLY]
+    ctx = [i for i in infra if i["category"] in _INVENTORY_ONLY]
+    sec.sort(key=lambda i: (-len(i["pins"]), i["path"]))
+    if sec:
+        out += ["", "=" * 90, "## INFRASTRUCTURE & CI/CONFIG (non-code attack surface)", "=" * 90]
+        for i in sec:
+            out.append("")
+            out.append(_render_infra(root, i))
+    if ctx:
+        out += ["", "=" * 90, "## DOCS, MANIFESTS & OTHER FILES (context)", "=" * 90]
+        for i in sorted(ctx, key=lambda i: i["path"]):
+            out.append(f"- {_rel(root, i['path'])}  ({i['category']}, {i['loc']} loc)  — {i['purpose']}")
     out.append("")
     return "\n".join(out)
 
@@ -218,7 +400,8 @@ def build_map(target, out=None):
 
     pinned = sorted([p for p in cmap.files if pincount(p) > 0], key=lambda p: (-pincount(p), p))
     rest = sorted(p for p in cmap.files if pincount(p) == 0)
-    text = render(cmap, root, per_file, pinned, rest)
+    infra = scan_infra(target)
+    text = render(cmap, root, per_file, pinned, rest, infra=infra)
 
     outp = Path(out) if out else root / "wave_map.md"
     outp.write_text(text, encoding="utf-8")
@@ -227,5 +410,6 @@ def build_map(target, out=None):
              "classes": sum(len(v) for v in cmap.classes.values()),
              "routes": sum(len(per_file[p][0]) for p in per_file),
              "sink_pins": sum(len(per_file[p][1]) for p in per_file),
+             "infra_files": len(infra), "infra_pins": sum(len(i["pins"]) for i in infra),
              "map_chars": len(text)}
     return {"map_path": str(outp), "text": text, "stats": stats, "cmap": cmap}

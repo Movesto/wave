@@ -82,8 +82,9 @@ def cmd_eyes(args):
     res = repomap.build_map(args.target, out=args.out)
     s = res["stats"]
     print(f"repo map -> {res['map_path']}")
-    print(f"  files={s['files']} pinned={s['pinned_files']} functions={s['functions']} "
-          f"classes={s['classes']} routes={s['routes']} sink-pins={s['sink_pins']} "
+    print(f"  code files={s['files']} pinned={s['pinned_files']} functions={s['functions']} "
+          f"classes={s['classes']} routes={s['routes']} sink-pins={s['sink_pins']}")
+    print(f"  infra/config files={s['infra_files']} infra-pins={s['infra_pins']} "
           f"map={s['map_chars']} chars")
     if not args.ledger:
         print("  (view the map above; add --ledger to run the model over it)")

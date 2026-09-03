@@ -109,24 +109,14 @@ _LEDGER_SYS = (
 )
 
 
-def build_ledger(map_text, local_model=None, use_glm=True, max_new_tokens=3000, map_char_cap=24000):
-    """Stage 1b -- the model reads the whole-repo MAP and returns an Attack-Surface Ledger.
+def _cap_map(map_text, cap):
+    if len(map_text) <= cap:
+        return map_text, False
+    return (map_text[:cap] + "\n\n[... map truncated to fit the model's context; PINNED targets and the "
+            "infrastructure section above are ordered first ...]"), True
 
-    Comprehension only (never a verdict). GLM if reachable, else local. The map is sent PINNED-section-first
-    (repomap.render puts it first), so a head-cap on a huge map still preserves the high-value targets.
 
-    Path split, measured: GLM (the intended primary) emits the structured JSON cleanly. The local MTP 27B
-    reasons *well* but writes free-form prose and ignores json_mode/think=False via ollama (see
-    reference_ollama_num_ctx) -- it rarely emits the object. So when no JSON parses we DON'T discard the
-    local model's analysis: we return it as `notes` (unstructured but useful to the downstream detector),
-    and the structured lists stay empty. That is honest graceful degradation, not a silent empty ledger."""
-    glm = make_glm() if use_glm else None
-    asker = Eyes(cmap=None, root=".", glm=glm, local=local_model)
-    truncated = len(map_text) > map_char_cap
-    body = map_text[:map_char_cap]
-    if truncated:
-        body += "\n\n[... map truncated to fit the model's context; PINNED targets above are complete ...]"
-    raw, via = asker._ask(_LEDGER_SYS, "REPO MAP:\n\n" + body, max_new_tokens=max_new_tokens)
+def _parse_ledger(raw, via, truncated):
     data = _json_block(raw) or {}
     notes = "" if data else (raw or "").split("</think>")[-1].strip()
     return {"via": via, "truncated": truncated,
@@ -134,6 +124,37 @@ def build_ledger(map_text, local_model=None, use_glm=True, max_new_tokens=3000, 
             "high_risk_ops": data.get("high_risk_ops") or [],
             "ranked_targets": data.get("ranked_targets") or [],
             "notes": notes}
+
+
+def build_ledger(map_text, local_model=None, use_glm=True, max_new_tokens=3000,
+                 glm_char_cap=120000, local_char_cap=24000):
+    """Stage 1b -- the model reads the whole-repo MAP and returns an Attack-Surface Ledger.
+
+    Comprehension only (never a verdict). The context cap is PATH-DEPENDENT: GLM is a cloud model with a
+    ~128k-token window, so it gets (nearly) the whole map (glm_char_cap); the local 27B has a 16k window,
+    so its fallback gets a small PINNED-first slice (local_char_cap). Sizing both to the local window --
+    the old bug -- threw away 60% of a real 60k-char map before GLM ever saw it.
+
+    Path split, measured: GLM (the intended primary) emits the structured JSON cleanly. The local MTP 27B
+    reasons *well* but writes free-form prose and ignores json_mode/think=False via ollama (see
+    reference_ollama_num_ctx). So when no JSON parses we DON'T discard the analysis: we return it as
+    `notes` (unstructured but useful), lists empty. Honest graceful degradation, not a silent empty ledger."""
+    glm = make_glm() if use_glm else None
+    if glm is not None:                                    # PRIMARY: cloud, big window -> (almost) whole map
+        body, trunc = _cap_map(map_text, glm_char_cap)
+        try:
+            out = glm.generate(_LEDGER_SYS, "REPO MAP:\n\n" + body, max_new_tokens=max_new_tokens,
+                               temperature=0.2, json_mode=True)
+            if out.strip():
+                return _parse_ledger(out, "glm", trunc)
+        except Exception:
+            pass                                            # 429 / transient -> fall through to local
+    if local_model is not None:                            # FALLBACK: local, small window
+        body, trunc = _cap_map(map_text, local_char_cap)
+        out = local_model.generate(_LEDGER_SYS, "REPO MAP:\n\n" + body, max_new_tokens=max_new_tokens,
+                                   temperature=0.2, think=False, json_mode=True)
+        return _parse_ledger(out, "local", trunc)
+    return _parse_ledger("", "none", len(map_text) > glm_char_cap)
 
 
 class Eyes:

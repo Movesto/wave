@@ -127,7 +127,7 @@ def _parse_ledger(raw, via, truncated):
 
 
 def build_ledger(map_text, local_model=None, use_glm=True, max_new_tokens=3000,
-                 glm_char_cap=120000, local_char_cap=24000):
+                 glm_char_cap=120000, local_char_cap=34000):
     """Stage 1b -- the model reads the whole-repo MAP and returns an Attack-Surface Ledger.
 
     Comprehension only (never a verdict). The context cap is PATH-DEPENDENT: GLM is a cloud model with a
@@ -149,11 +149,15 @@ def build_ledger(map_text, local_model=None, use_glm=True, max_new_tokens=3000,
                 return _parse_ledger(out, "glm", trunc)
         except Exception:
             pass                                            # 429 / transient -> fall through to local
-    if local_model is not None:                            # FALLBACK: local, small window
+    if local_model is not None:                            # FALLBACK: local, smaller window
         body, trunc = _cap_map(map_text, local_char_cap)
-        out = local_model.generate(_LEDGER_SYS, "REPO MAP:\n\n" + body, max_new_tokens=max_new_tokens,
-                                   temperature=0.2, think=False, json_mode=True)
-        return _parse_ledger(out, "local", trunc)
+        try:
+            out = local_model.generate(_LEDGER_SYS, "REPO MAP:\n\n" + body, max_new_tokens=max_new_tokens,
+                                       temperature=0.2, think=False, json_mode=True)
+            return _parse_ledger(out, "local", trunc)
+        except Exception as e:                             # a model/endpoint error must NEVER crash the run
+            return {"via": "error", "truncated": trunc, "entry_points": [], "high_risk_ops": [],
+                    "ranked_targets": [], "notes": f"local model call failed: {str(e)[:200]}"}
     return _parse_ledger("", "none", len(map_text) > glm_char_cap)
 
 

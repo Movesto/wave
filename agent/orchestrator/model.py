@@ -124,8 +124,45 @@ class Model:
             raise RuntimeError("Model.chat(tools=...) needs an API backend -- set WAVE_API_BASE")
         return self._api_chat(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
 
+    def _ollama_native(self, system, user, max_tokens=None, temperature=0.2, think=None, json_mode=False,
+                       timeout=300):
+        """Local ollama via the NATIVE /api/chat endpoint. The OpenAI-compat /v1 endpoint IGNORES
+        options.num_ctx (silently capping context at 4096 -> a 400 on any prompt over ~4096 tokens); the
+        native endpoint HONORS it. So all local text generate() goes here; tool-calling chat() stays on
+        /v1. Maps max_tokens -> options.num_predict; json_mode -> format:"json"."""
+        import time
+
+        import requests
+        root = self.api_base.rstrip("/")
+        if root.endswith("/v1"):
+            root = root[:-3]
+        opts = {"num_ctx": self.num_ctx, "temperature": temperature}
+        if max_tokens:
+            opts["num_predict"] = max_tokens
+        body = {"model": self.model_id, "stream": False, "options": opts,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        if think is not None:
+            body["think"] = think
+        if json_mode:
+            body["format"] = "json"
+        url = root.rstrip("/") + "/api/chat"
+        last = None
+        for attempt in range(3):
+            try:
+                r = requests.post(url, json=body, timeout=timeout)
+                r.raise_for_status()
+                m = r.json().get("message", {})
+                return m.get("content") or m.get("thinking") or ""
+            except Exception as e:
+                last = e
+                time.sleep(2 * (attempt + 1))
+        raise last
+
     def generate(self, system, user, max_new_tokens=None, temperature=0.4, think=None, json_mode=False):
-        if self.api_base:                                   # API backend: no local weights, just call the endpoint
+        if self._is_local_api:                              # local ollama -> native endpoint (num_ctx honored)
+            return self._ollama_native(system, user, max_tokens=max_new_tokens, temperature=temperature,
+                                       think=think, json_mode=json_mode)
+        if self.api_base:                                   # cloud OpenAI-compat (GLM/OpenRouter)
             msg = self._api_chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
                                  temperature=temperature, max_tokens=max_new_tokens, think=think,
                                  json_mode=json_mode)

@@ -162,6 +162,25 @@ def cmd_eyes(args):
     print(f"\nnotebook -> {paths['md']}  ({len(notes)} files noted, {total} findings)")
 
 
+def cmd_detect(args):
+    from pathlib import Path
+
+    from . import detector
+    from .model import Model
+    out_dir = str(Path(args.notebook).parent) if args.notebook else args.target
+    model = Model()
+    survivors, refuted, paths = detector.run(model, args.target, notebook_path=args.notebook,
+                                             budget=args.budget, out_dir=out_dir)
+    print(f"\nDETECTOR (clean-room falsification): {len(survivors)} survived, {len(refuted)} refuted")
+    print(f"\nSURVIVORS -> {paths['candidates']}  (Stage 3 worklist, most-severe first):")
+    for r in survivors:
+        print(f"  * [{r['class']}/{r['confidence']}] {r['file']}:{r['line']}  {r['sink'][:70]}")
+    if refuted:
+        print(f"\nREFUTED ({len(refuted)}) -- scan for a wrong clear (a false refute = a missed bug):")
+        for r in refuted:
+            print(f"  - [{r['class']}] {r['file']}:{r['line']}  — {r['reason'][:80]}")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="orchestrator")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -218,6 +237,14 @@ def main():
                    help="when the model selects targets on a large repo, pause to let you steer the list "
                         "(drop/add) before deep-reading; without it, auto-proceeds")
     e.set_defaults(func=cmd_eyes)
+
+    dt = sub.add_parser("detect", help="Stage 2: clean-room falsify the notebook's findings -> candidates")
+    dt.add_argument("target")
+    dt.add_argument("--notebook", default=None,
+                    help="path to wave_notebook.jsonl (default <target>/wave_notebook.jsonl)")
+    dt.add_argument("--budget", type=int, default=40, metavar="N",
+                    help="max findings to falsify this run (severity+confidence order; resumable)")
+    dt.set_defaults(func=cmd_detect)
 
     args = ap.parse_args()
     args.func(args)

@@ -92,6 +92,50 @@ _COMPREHEND_SYS = (
 )
 
 
+_LEDGER_SYS = (
+    "You are a security code-comprehension assistant. You are given a MAP of a whole repository: every "
+    "file, what it imports and does, its functions/classes (signatures only), and inline PINS marking HTTP "
+    "routes [ROUTE] and candidate sinks [SINK:<class>] for the 9 injection classes (SQLi, NoSQLi, cmd, "
+    "eval, path, ssrf, xss, deser, redirect). You do NOT decide whether anything is vulnerable -- a "
+    "separate tool proves that by execution. Your job: read the WHOLE map and produce an ATTACK-SURFACE "
+    "LEDGER telling the downstream verifier where to look first. Reply with ONE JSON object, nothing else:\n"
+    '{"entry_points": [{"name": "<route or function>", "file": "<path>", "auth": '
+    '"<none|session|jwt|admin|unknown>", "input": "<what external input it takes>"}], '
+    '"high_risk_ops": [{"file": "<path>", "op": "<financial logic / file upload / role check / raw SQL / '
+    'exec / deserialize / etc>", "why": "<one clause>"}], '
+    '"ranked_targets": [{"file": "<path>", "classes_first": ["SQLi", "..."], "reason": "<one clause>"}]}\n'
+    "Rank targets by attack-surface value: input-reachable sinks first, the 9 injection classes before "
+    "broader logic. Base everything ONLY on the map -- never invent a file, route, or line not in it."
+)
+
+
+def build_ledger(map_text, local_model=None, use_glm=True, max_new_tokens=3000, map_char_cap=24000):
+    """Stage 1b -- the model reads the whole-repo MAP and returns an Attack-Surface Ledger.
+
+    Comprehension only (never a verdict). GLM if reachable, else local. The map is sent PINNED-section-first
+    (repomap.render puts it first), so a head-cap on a huge map still preserves the high-value targets.
+
+    Path split, measured: GLM (the intended primary) emits the structured JSON cleanly. The local MTP 27B
+    reasons *well* but writes free-form prose and ignores json_mode/think=False via ollama (see
+    reference_ollama_num_ctx) -- it rarely emits the object. So when no JSON parses we DON'T discard the
+    local model's analysis: we return it as `notes` (unstructured but useful to the downstream detector),
+    and the structured lists stay empty. That is honest graceful degradation, not a silent empty ledger."""
+    glm = make_glm() if use_glm else None
+    asker = Eyes(cmap=None, root=".", glm=glm, local=local_model)
+    truncated = len(map_text) > map_char_cap
+    body = map_text[:map_char_cap]
+    if truncated:
+        body += "\n\n[... map truncated to fit the model's context; PINNED targets above are complete ...]"
+    raw, via = asker._ask(_LEDGER_SYS, "REPO MAP:\n\n" + body, max_new_tokens=max_new_tokens)
+    data = _json_block(raw) or {}
+    notes = "" if data else (raw or "").split("</think>")[-1].strip()
+    return {"via": via, "truncated": truncated,
+            "entry_points": data.get("entry_points") or [],
+            "high_risk_ops": data.get("high_risk_ops") or [],
+            "ranked_targets": data.get("ranked_targets") or [],
+            "notes": notes}
+
+
 class Eyes:
     def __init__(self, cmap, root, glm=None, local=None):
         self.map = cmap

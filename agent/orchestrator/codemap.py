@@ -22,6 +22,7 @@ _SKIP = {"node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build"
 
 _FUNC_DEF = {"function_definition", "function_declaration", "method_definition",
              "generator_function_declaration", "function_expression", "arrow_function"}
+_CLASS_DEF = {"class_definition", "class_declaration"}
 _CALL = {"call", "call_expression"}
 
 
@@ -33,6 +34,31 @@ class Func:
     end: int = 0                                      # last line of the body (for exact source slicing)
     exported: bool = False
     decorators: list = field(default_factory=list)   # e.g. route decorators -> entry points
+    sig: str = ""                                     # parameter signature, e.g. "(req, res)"
+
+
+@dataclass
+class Cls:
+    name: str
+    file: str
+    line: int
+    end: int = 0
+    exported: bool = False
+    decorators: list = field(default_factory=list)
+    methods: list = field(default_factory=list)      # [Func]
+
+
+@dataclass
+class FileInfo:
+    """Everything one source file is COMPOSED OF -- the per-file view the detailed repo map renders."""
+    path: str
+    lang: str
+    loc: int = 0
+    doc: str = ""                                     # module docstring / leading comment ("what it does")
+    imports: list = field(default_factory=list)       # raw import lines / required modules
+    functions: list = field(default_factory=list)     # top-level Funcs (methods live under their class)
+    classes: list = field(default_factory=list)       # [Cls]
+    exports: list = field(default_factory=list)        # exported public names
 
 
 @dataclass
@@ -40,6 +66,8 @@ class CodeMap:
     funcs: dict = field(default_factory=lambda: defaultdict(list))   # name -> [Func]
     calls: list = field(default_factory=list)                        # (caller_name, callee_name, file, line)
     imports: dict = field(default_factory=lambda: defaultdict(set))  # file -> {module}
+    classes: dict = field(default_factory=lambda: defaultdict(list)) # name -> [Cls]
+    files: dict = field(default_factory=dict)                        # path -> FileInfo (the by-file view)
     _callers: dict = field(default_factory=lambda: defaultdict(set)) # callee_name -> {caller_name}
 
     def entry_points(self):
@@ -175,16 +203,62 @@ def _decorators(node):
     return out
 
 
-def _walk(node, m, file, lang, enclosing):
+def _params(node):
+    """The parameter signature of a function/method, e.g. '(req, res)'. Best-effort, one line."""
+    for fld in ("parameters",):
+        p = node.child_by_field_name(fld)
+        if p is not None:
+            return " ".join(_txt(p).split())[:200]
+    for c in node.children:
+        if c.type in ("parameters", "formal_parameters"):
+            return " ".join(_txt(c).split())[:200]
+        if c.type == "identifier":                        # arrow fn with a single bare param: x => ...
+            return f"({_txt(c)})"
+    return ""
+
+
+def _module_doc(root, lang):
+    """A cheap 'what this file does' line: Python module docstring or a JS/TS leading comment."""
+    for c in root.children[:4]:
+        if lang == "python" and c.type == "expression_statement":
+            s = c.children[0] if c.children else None
+            if s is not None and s.type == "string":
+                return " ".join(_txt(s).strip("\"'` \n").split())[:200]
+            return ""                                      # first stmt isn't a string -> no docstring
+        if lang != "python" and c.type == "comment":
+            return " ".join(_txt(c).lstrip("/*# ").rstrip("*/ ").split())[:200]
+    return ""
+
+
+def _walk(node, m, file, lang, enclosing, finfo, cls):
     t = node.type
     new_enc = enclosing
-    if t in _FUNC_DEF:
+    new_cls = cls
+    if t in _CLASS_DEF:
+        cname = _def_name(node)
+        if cname:
+            c_obj = Cls(name=cname, file=file, line=node.start_point[0] + 1, end=node.end_point[0] + 1,
+                        exported=_is_exported(node, lang), decorators=_decorators(node))
+            m.classes[cname].append(c_obj)
+            if finfo is not None:
+                finfo.classes.append(c_obj)
+                if c_obj.exported and cname not in finfo.exports:
+                    finfo.exports.append(cname)
+            new_cls = c_obj
+    elif t in _FUNC_DEF:
         name = _def_name(node)
         if name:
-            m.funcs[name].append(Func(name=name, file=file, line=node.start_point[0] + 1,
-                                      end=node.end_point[0] + 1, exported=_is_exported(node, lang),
-                                      decorators=_decorators(node)))
+            fobj = Func(name=name, file=file, line=node.start_point[0] + 1, end=node.end_point[0] + 1,
+                        exported=_is_exported(node, lang), decorators=_decorators(node), sig=_params(node))
+            m.funcs[name].append(fobj)
+            if cls is not None:                            # a method of the enclosing class
+                cls.methods.append(fobj)
+            elif finfo is not None:                        # a top-level (module) function
+                finfo.functions.append(fobj)
+                if fobj.exported and name not in finfo.exports:
+                    finfo.exports.append(name)
             new_enc = name
+            new_cls = None                                 # nested defs in a fn body aren't class methods
     elif t in _CALL:
         callee = _callee_name(node)
         if callee:
@@ -195,13 +269,13 @@ def _walk(node, m, file, lang, enclosing):
                 if args is not None:
                     m.imports[file].add(_txt(args).strip("()\"' "))
     elif t in ("import_statement", "import_from_statement", "import_declaration"):
-        m.imports[file].add(_txt(node)[:120])
+        m.imports[file].add(" ".join(_txt(node)[:120].split()))
     for c in node.children:
-        _walk(c, m, file, lang, new_enc)
+        _walk(c, m, file, lang, new_enc, finfo, new_cls)
 
 
 def build(target):
-    """Parse every source file under `target` into a CodeMap."""
+    """Parse every source file under `target` into a CodeMap (structure + a per-file composition view)."""
     from tree_sitter_language_pack import get_parser
     m = CodeMap()
     parsers = {}
@@ -214,5 +288,10 @@ def build(target):
             tree = parsers[lang].parse(src)
         except Exception:
             continue
-        _walk(tree.root_node, m, str(f), lang, "<module>")
+        path = str(f)
+        finfo = FileInfo(path=path, lang=lang, loc=src.count(b"\n") + 1,
+                         doc=_module_doc(tree.root_node, lang))
+        m.files[path] = finfo
+        _walk(tree.root_node, m, path, lang, "<module>", finfo, None)
+        finfo.imports = sorted(m.imports.get(path, ()))
     return m

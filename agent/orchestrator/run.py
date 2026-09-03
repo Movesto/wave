@@ -76,6 +76,41 @@ def cmd_discover(args):
         print(f"      {c.sink}")
 
 
+def cmd_eyes(args):
+    from . import repomap
+    from . import eyes as eyesmod
+    res = repomap.build_map(args.target, out=args.out)
+    s = res["stats"]
+    print(f"repo map -> {res['map_path']}")
+    print(f"  files={s['files']} pinned={s['pinned_files']} functions={s['functions']} "
+          f"classes={s['classes']} routes={s['routes']} sink-pins={s['sink_pins']} "
+          f"map={s['map_chars']} chars")
+    if not args.ledger:
+        print("  (view the map above; add --ledger to run the model over it)")
+        return
+    local = None
+    if not args.no_local:
+        from .model import Model
+        local = Model()
+    led = eyesmod.build_ledger(res["text"], local_model=local, use_glm=not args.no_glm)
+    if args.json:
+        print(json.dumps({k: v for k, v in led.items() if v}, indent=2))
+        return
+    print(f"\nATTACK-SURFACE LEDGER (via {led['via']}{', TRUNCATED map' if led['truncated'] else ''})")
+    print(f"  entry points ({len(led['entry_points'])}):")
+    for e in led["entry_points"]:
+        print(f"    - {e.get('name','?')}  [auth:{e.get('auth','?')}]  {e.get('file','')}  <- {e.get('input','')}")
+    print(f"  high-risk ops ({len(led['high_risk_ops'])}):")
+    for o in led["high_risk_ops"]:
+        print(f"    - {o.get('op','?')}  {o.get('file','')}  ({o.get('why','')})")
+    print(f"  ranked targets ({len(led['ranked_targets'])}):")
+    for t in led["ranked_targets"]:
+        print(f"    - {t.get('file','?')}  first={t.get('classes_first',[])}  ({t.get('reason','')})")
+    if led.get("notes"):
+        print("\n  (model returned prose, not JSON -- unstructured analysis follows)\n")
+        print("  " + led["notes"].replace("\n", "\n  "))
+
+
 def main():
     ap = argparse.ArgumentParser(prog="orchestrator")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -118,6 +153,17 @@ def main():
                     help="boot the WHOLE app for Rung-2 + business-logic/IDOR differentials "
                          "(default: run-by-piece micro-exec only, no whole-app boot)")
     lp.set_defaults(func=cmd_loop)
+
+    e = sub.add_parser("eyes", help="Stage 1: build the detailed whole-repo MAP; optionally the model ledger")
+    e.add_argument("target")
+    e.add_argument("--out", default=None, help="where to write the map (default <target>/wave_map.md)")
+    e.add_argument("--ledger", action="store_true",
+                   help="also run the model over the map -> Attack-Surface Ledger (loads a model)")
+    e.add_argument("--json", action="store_true", help="print the ledger as JSON")
+    e.add_argument("--no-glm", action="store_true", help="skip GLM comprehension; local model only")
+    e.add_argument("--no-local", action="store_true",
+                   help="don't load the local model (GLM only; ledger empty if GLM is down)")
+    e.set_defaults(func=cmd_eyes)
 
     args = ap.parse_args()
     args.func(args)

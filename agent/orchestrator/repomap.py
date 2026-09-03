@@ -386,10 +386,44 @@ def render(cmap, root, per_file, pinned, rest, infra=None):
     return "\n".join(out)
 
 
+def _render_digest(cmap, root, per_file, pinned, infra):
+    """A DENSE attack-surface digest for the ledger's model input: per pinned file, only its path +
+    purpose + [ROUTE]/[SINK]/[DYN] pins (no signature/structure dumps), plus infra misconfig pins. ~10x
+    smaller than the full map, so the ledger sees the whole pinned surface even on a monorepo. The full
+    detailed map (with structure) stays as wave_map.md for viewing and tool-calling depth."""
+    out = ["# wave attack-surface digest — " + Path(root).name, "",
+           "Pinned files (routes + 9-class sink candidates) and infra/CI misconfigs only -- the surface to "
+           "triage. Pins are HINTS, not verdicts. Full source + structure of any file are available on "
+           "request via tools.", "", "## PINNED CODE (routes + sinks)"]
+    for p in pinned:
+        routes, sinks, dyn = per_file[p]
+        fi = cmap.files[p]
+        out.append("")
+        out.append(f"### {_rel(root, p)}  ({fi.lang})  {fi.doc or ''}".rstrip())
+        for ln, _, code in routes:
+            out.append(f"   [ROUTE] {code}   L{ln}")
+        for ln, label, code in sinks:
+            flow = _flow(cmap, fi, ln)
+            out.append(f"   [SINK:{label}] {code}   L{ln}" + (f"   {flow}" if flow else ""))
+        for ln, kind, code in dyn:
+            out.append(f"   [DYN:{kind}] {code}   L{ln}")
+    sec = [i for i in infra if i["category"] not in _INVENTORY_ONLY and i["pins"]]
+    if sec:
+        out += ["", "## INFRASTRUCTURE & CI (misconfig pins)"]
+        for i in sorted(sec, key=lambda i: (-len(i["pins"]), i["path"])):
+            out.append("")
+            out.append(f"### {_rel(root, i['path'])}  ({i['category']})  {i['purpose']}".rstrip())
+            for ln, label, code in i["pins"]:
+                out.append(f"   [INFRA:{label}] {code}   L{ln}")
+    out.append("")
+    return "\n".join(out)
+
+
 def build_map(target, out=None):
     """Build the detailed whole-repo map and write it to `out` (default <target>/wave_map.md).
 
-    Returns {map_path, text, stats, cmap} -- cmap is reused by the ledger pass so we parse once."""
+    Returns {map_path, text, digest, stats, cmap} -- `text` is the full detailed map (for viewing +
+    tool-calling); `digest` is the dense pins-only view fed to the ledger. cmap is reused so we parse once."""
     cmap = codemap.build(target)
     root = Path(target)
     per_file = {p: scan_pins(fi) for p, fi in cmap.files.items()}
@@ -402,6 +436,7 @@ def build_map(target, out=None):
     rest = sorted(p for p in cmap.files if pincount(p) == 0)
     infra = scan_infra(target)
     text = render(cmap, root, per_file, pinned, rest, infra=infra)
+    digest = _render_digest(cmap, root, per_file, pinned, infra)
 
     outp = Path(out) if out else root / "wave_map.md"
     outp.write_text(text, encoding="utf-8")
@@ -411,5 +446,5 @@ def build_map(target, out=None):
              "routes": sum(len(per_file[p][0]) for p in per_file),
              "sink_pins": sum(len(per_file[p][1]) for p in per_file),
              "infra_files": len(infra), "infra_pins": sum(len(i["pins"]) for i in infra),
-             "map_chars": len(text)}
-    return {"map_path": str(outp), "text": text, "stats": stats, "cmap": cmap}
+             "map_chars": len(text), "digest_chars": len(digest)}
+    return {"map_path": str(outp), "text": text, "digest": digest, "stats": stats, "cmap": cmap}

@@ -127,13 +127,14 @@ def _parse_ledger(raw, via, truncated):
 
 
 def build_ledger(map_text, local_model=None, use_glm=True, max_new_tokens=3000,
-                 glm_char_cap=120000, local_char_cap=34000):
+                 glm_char_cap=300000, local_char_cap=34000):
     """Stage 1b -- the model reads the whole-repo MAP and returns an Attack-Surface Ledger.
 
-    Comprehension only (never a verdict). The context cap is PATH-DEPENDENT: GLM is a cloud model with a
-    ~128k-token window, so it gets (nearly) the whole map (glm_char_cap); the local 27B has a 16k window,
-    so its fallback gets a small PINNED-first slice (local_char_cap). Sizing both to the local window --
-    the old bug -- threw away 60% of a real 60k-char map before GLM ever saw it.
+    Input is the dense attack-surface DIGEST (repomap._render_digest), not the full map -- ~10x smaller,
+    so the whole pinned surface fits even for a monorepo. The context cap is PATH-DEPENDENT: GLM is a cloud
+    model with a ~128k-token window, so it gets up to glm_char_cap (~300k chars ≈ 75-90k tokens -- enough
+    for oh-my-pi's whole 287k digest); the local 27B has a 16k window, so its fallback gets a PINNED-first
+    slice (local_char_cap). Digest files are ordered pin-density-first, so any truncation keeps the densest.
 
     Path split, measured: GLM (the intended primary) emits the structured JSON cleanly. The local MTP 27B
     reasons *well* but writes free-form prose and ignores json_mode/think=False via ollama (see

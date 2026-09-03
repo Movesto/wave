@@ -85,7 +85,7 @@ def cmd_eyes(args):
     print(f"  code files={s['files']} pinned={s['pinned_files']} functions={s['functions']} "
           f"classes={s['classes']} routes={s['routes']} sink-pins={s['sink_pins']}")
     print(f"  infra/config files={s['infra_files']} infra-pins={s['infra_pins']} "
-          f"map={s['map_chars']} chars")
+          f"map={s['map_chars']} chars  ledger-digest={s['digest_chars']} chars")
     if not args.ledger:
         print("  (view the map above; add --ledger to run the model over it)")
         return
@@ -93,7 +93,7 @@ def cmd_eyes(args):
     if not args.no_local:
         from .model import Model
         local = Model()
-    led = eyesmod.build_ledger(res["text"], local_model=local, use_glm=not args.no_glm)
+    led = eyesmod.build_ledger(res["digest"], local_model=local, use_glm=not args.no_glm)
     if args.json:
         print(json.dumps({k: v for k, v in led.items() if v}, indent=2))
         return

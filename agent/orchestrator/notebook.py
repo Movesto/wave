@@ -1,0 +1,207 @@
+"""Stage 1b -- the NOTEBOOK: comprehension as a pentester's persistent notes.
+
+The old ledger asked one model to summarize a whole-repo digest it couldn't hold (and a small/cloud model
+would mislabel files). Instead the STRONG local model reads ONE pinned file at a time -- seeded with that
+file's map pins -- and writes a durable NOTE: what the file does, the untrusted inputs, the dangerous ops,
+and which exploit CLASSES to try first. Like a pentester jotting findings to return to when planning the
+attack. Notes persist to wave_notebook.jsonl (+ a readable wave_notebook.md), so:
+
+  - context never has to hold the whole repo (each call = one file, windowed around its pins);
+  - the run is RESUMABLE -- re-running skips files already noted, so a monorepo can be worked in passes;
+  - Stage 2/3 come back to the notes to hypothesize + choose an exploit class.
+
+Also emits a DETERMINISTIC ledger index (entry points + auth + ranked targets + class hints) straight from
+the map -- zero model, so it cannot hallucinate a file or a route. The model's effort goes entirely into
+per-file depth grounded in the real source, never a whole-repo summary.
+
+Model is the local detection model (Qwen) via ollama's native endpoint (num_ctx + format:json honored).
+No cloud, no separate comprehension model.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from .repomap import _rel
+
+_WINDOW = 150            # matches reader.py: >~320-line single prompts wedge the GPU; 150 is safe
+_MAX_WINDOWS = 3         # cap calls per file (each window = one generate call)
+_TOKENS = 3000           # room for a brief <think> + the JSON note
+
+_NOTE_SYS = (
+    "You are a penetration tester taking NOTES on ONE source file, to return to later when planning "
+    "exploits. The repo map has already flagged candidate sinks/routes in this file (shown as HINTS); "
+    "confirm or DISMISS each against the actual code. Record ONLY reachable issues -- a parameterized "
+    "query, an escaped value, or a constant is NOT a finding. Output ONE JSON object, nothing else:\n"
+    '{"purpose": "<what this file/module does, one line>", '
+    '"untrusted_inputs": "<request params/body/headers/args an external caller controls, or none>", '
+    '"findings": [{"line": <int>, "function": "<name>", "class": "<sqli|nosqli|cmd|eval|path|ssrf|xss|'
+    'deser|redirect|authz|other>", "sink": "<the dangerous call>", "input": "<the untrusted source that '
+    'reaches it, or unclear>", "why": "<one line>", "confidence": "high"|"low"}], '
+    '"classes_to_try_first": ["<class>", ...], '
+    '"cross_file": "<other modules/functions this depends on that matter for exploitation, or none>"}\n'
+    "Keep reasoning brief, then output the JSON.")
+
+
+# ---- deterministic ledger index (no model) -----------------------------------------------------------
+
+def _auth_of(route_code):
+    c = route_code.lower()
+    if "isadmin" in c or "adminuser" in c or "get_admin" in c or "'admin'" in c or '"admin"' in c:
+        return "admin"
+    if "isloggedin" in c or "currentuser" in c or "requireauth" in c or "require_auth" in c:
+        return "session"
+    if "depends" in c and ("user" in c or "auth" in c or "token" in c):
+        return "jwt/session"
+    return "unknown"
+
+
+def ledger_index(cmap, root, per_file, pinned):
+    """Attack-surface index derived STRAIGHT from the map -- deterministic, cannot hallucinate.
+    entry_points = every [ROUTE] with a heuristic auth tag; ranked_targets = pinned files (already
+    pin-density-ordered) with their distinct sink classes."""
+    entry_points, ranked = [], []
+    for p in pinned:
+        routes, sinks, _dyn = per_file[p]
+        rel = _rel(root, p)
+        for ln, _, code in routes:
+            entry_points.append({"route": code, "file": rel, "line": ln, "auth": _auth_of(code)})
+        classes = []
+        for _ln, label, _code in sinks:
+            if label not in classes:
+                classes.append(label)
+        ranked.append({"file": rel, "classes_first": classes, "routes": len(routes), "sinks": len(sinks)})
+    return {"entry_points": entry_points, "ranked_targets": ranked}
+
+
+# ---- the per-file notes (model) ----------------------------------------------------------------------
+
+def _windows_for(src, focus_lines, window=_WINDOW, max_windows=_MAX_WINDOWS):
+    """Line-numbered windows that COVER the pinned lines (not just the file head) so a sink at L307 is
+    actually in view. Falls back to the head when there are no pins. Each window is one generate call."""
+    lines = src.splitlines()
+    n = len(lines)
+    starts = sorted({((fl - 1) // window) * window for fl in focus_lines if 1 <= fl <= n})
+    starts = (starts or [0])[:max_windows]
+    out = []
+    for s in starts:
+        chunk = lines[s:s + window]
+        out.append((s + 1, "\n".join(f"{s + i + 1}: {ln}" for i, ln in enumerate(chunk))))
+    return out or [(1, "")]
+
+
+def _hint_block(per_file_entry):
+    routes, sinks, dyn = per_file_entry
+    out = []
+    for ln, _, code in routes:
+        out.append(f"   [ROUTE] {code}  L{ln}")
+    for ln, label, code in sinks:
+        out.append(f"   [SINK:{label}] {code}  L{ln}")
+    for ln, kind, code in dyn:
+        out.append(f"   [DYN:{kind}] {code}  L{ln}")
+    return "\n".join(out) or "   (none)"
+
+
+def _parse_note(txt):
+    after = (txt or "").split("</think>")[-1]
+    for scope in (after, txt or ""):
+        i, j = scope.find("{"), scope.rfind("}")
+        if 0 <= i < j:
+            try:
+                d = json.loads(scope[i:j + 1])
+                if isinstance(d, dict):
+                    return d
+            except Exception:
+                pass
+    return {}
+
+
+def read_note(model, root, path, per_file_entry):
+    """The model reads one pinned file (windowed around its pins, seeded with the map hints) -> a note."""
+    try:
+        src = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    routes, sinks, dyn = per_file_entry
+    focus = [ln for ln, _, _ in routes] + [ln for ln, _, _ in sinks] + [ln for ln, _, _ in dyn]
+    hints = _hint_block(per_file_entry)
+    rel = _rel(root, path)
+    note = {"file": rel, "purpose": "", "untrusted_inputs": "", "findings": [],
+            "classes_to_try_first": [], "cross_file": ""}
+    wins = _windows_for(src, focus)
+    for start, body in wins:
+        span = f" (lines {start}-{start + _WINDOW - 1})" if len(wins) > 1 else ""
+        user = (f"FILE {rel}{span}\nMAP HINTS (confirm or dismiss against the code):\n{hints}\n\n"
+                f"SOURCE:\n{body}")
+        txt = model.generate(_NOTE_SYS, user, max_new_tokens=_TOKENS, temperature=0.2, think=False,
+                             json_mode=True)
+        d = _parse_note(txt)
+        if not d:
+            continue
+        note["purpose"] = note["purpose"] or str(d.get("purpose") or "")
+        note["untrusted_inputs"] = note["untrusted_inputs"] or str(d.get("untrusted_inputs") or "")
+        note["cross_file"] = note["cross_file"] or str(d.get("cross_file") or "")
+        for f in (d.get("findings") or []):
+            if isinstance(f, dict):
+                note["findings"].append(f)
+        for c in (d.get("classes_to_try_first") or []):
+            if c and c not in note["classes_to_try_first"]:
+                note["classes_to_try_first"].append(c)
+    return note
+
+
+def _render_md(root, notes):
+    out = [f"# wave notebook — {Path(root).name}", "",
+           "Per-file pentester notes (grounded in reading each pinned file). Findings are `believed` "
+           "leads for Stage 2/3 to hypothesize + prove -- never verdicts.", ""]
+    for nt in notes:
+        out.append(f"## {nt['file']}")
+        if nt.get("purpose"):
+            out.append(f"- purpose: {nt['purpose']}")
+        if nt.get("untrusted_inputs"):
+            out.append(f"- untrusted inputs: {nt['untrusted_inputs']}")
+        if nt.get("classes_to_try_first"):
+            out.append(f"- try first: {', '.join(nt['classes_to_try_first'])}")
+        if nt.get("cross_file"):
+            out.append(f"- cross-file: {nt['cross_file']}")
+        for f in nt.get("findings", []):
+            out.append(f"  - L{f.get('line','?')} [{f.get('class','?')}/{f.get('confidence','?')}] "
+                       f"{f.get('sink','')} <- {f.get('input','?')}  ({f.get('why','')})")
+        out.append("")
+    return "\n".join(out)
+
+
+def read_notes(model, root, per_file, pinned, budget=20, out_dir=None, resume=True):
+    """Read the top-`budget` pinned files (pin-density order) into persistent notes. Appends each note to
+    wave_notebook.jsonl as it is produced (durable + resumable: a re-run skips files already noted), then
+    renders wave_notebook.md. Returns (notes, paths)."""
+    out_dir = Path(out_dir or root)
+    jsonl = out_dir / "wave_notebook.jsonl"
+    done = {}
+    if resume and jsonl.exists():
+        for line in jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                d = json.loads(line)
+                done[d["file"]] = d
+            except Exception:
+                pass
+    targets = pinned[:budget]
+    with jsonl.open("a", encoding="utf-8") as fh:
+        for i, path in enumerate(targets, 1):
+            rel = _rel(root, path)
+            if rel in done:
+                print(f"[notebook] {i}/{len(targets)} skip (already noted) {rel}", flush=True)
+                continue
+            print(f"[notebook] {i}/{len(targets)} reading {rel} ...", flush=True)
+            note = read_note(model, root, path, per_file[path])
+            if note is None:
+                continue
+            fh.write(json.dumps(note) + "\n")
+            fh.flush()
+            done[rel] = note
+            print(f"[notebook]   -> {len(note['findings'])} finding(s); "
+                  f"try {note['classes_to_try_first'] or '-'}", flush=True)
+    notes = [done[_rel(root, p)] for p in pinned if _rel(root, p) in done]
+    md = _render_md(root, notes)
+    (out_dir / "wave_notebook.md").write_text(md, encoding="utf-8")
+    return notes, {"jsonl": str(jsonl), "md": str(out_dir / "wave_notebook.md")}

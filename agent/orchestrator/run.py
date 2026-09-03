@@ -77,39 +77,40 @@ def cmd_discover(args):
 
 
 def cmd_eyes(args):
-    from . import repomap
-    from . import eyes as eyesmod
+    from . import repomap, notebook
     res = repomap.build_map(args.target, out=args.out)
     s = res["stats"]
     print(f"repo map -> {res['map_path']}")
     print(f"  code files={s['files']} pinned={s['pinned_files']} functions={s['functions']} "
           f"classes={s['classes']} routes={s['routes']} sink-pins={s['sink_pins']}")
-    print(f"  infra/config files={s['infra_files']} infra-pins={s['infra_pins']} "
-          f"map={s['map_chars']} chars  ledger-digest={s['digest_chars']} chars")
-    if not args.ledger:
-        print("  (view the map above; add --ledger to run the model over it)")
+    print(f"  infra/config files={s['infra_files']} infra-pins={s['infra_pins']} map={s['map_chars']} chars")
+
+    # Deterministic ledger index -- derived straight from the map, no model, cannot hallucinate.
+    idx = notebook.ledger_index(res["cmap"], args.target, res["per_file"], res["pinned"])
+    print(f"\nATTACK-SURFACE INDEX (deterministic)")
+    print(f"  entry points ({len(idx['entry_points'])}):")
+    for e in idx["entry_points"][:40]:
+        print(f"    - [auth:{e['auth']}]  {e['file']}:{e['line']}  {e['route'][:90]}")
+    if len(idx["entry_points"]) > 40:
+        print(f"    ... +{len(idx['entry_points']) - 40} more")
+    print(f"  ranked targets ({len(idx['ranked_targets'])}):")
+    for t in idx["ranked_targets"][:40]:
+        print(f"    - {t['file']}  routes={t['routes']} sinks={t['sinks']}  classes={t['classes_first']}")
+    if len(idx["ranked_targets"]) > 40:
+        print(f"    ... +{len(idx['ranked_targets']) - 40} more")
+
+    if not args.notes:
+        print("\n  (add --notes to have the model read each pinned file into the persistent notebook)")
         return
-    local = None
-    if not args.no_local:
-        from .model import Model
-        local = Model()
-    led = eyesmod.build_ledger(res["digest"], local_model=local, use_glm=not args.no_glm)
-    if args.json:
-        print(json.dumps({k: v for k, v in led.items() if v}, indent=2))
-        return
-    print(f"\nATTACK-SURFACE LEDGER (via {led['via']}{', TRUNCATED map' if led['truncated'] else ''})")
-    print(f"  entry points ({len(led['entry_points'])}):")
-    for e in led["entry_points"]:
-        print(f"    - {e.get('name','?')}  [auth:{e.get('auth','?')}]  {e.get('file','')}  <- {e.get('input','')}")
-    print(f"  high-risk ops ({len(led['high_risk_ops'])}):")
-    for o in led["high_risk_ops"]:
-        print(f"    - {o.get('op','?')}  {o.get('file','')}  ({o.get('why','')})")
-    print(f"  ranked targets ({len(led['ranked_targets'])}):")
-    for t in led["ranked_targets"]:
-        print(f"    - {t.get('file','?')}  first={t.get('classes_first',[])}  ({t.get('reason','')})")
-    if led.get("notes"):
-        print("\n  (model returned prose, not JSON -- unstructured analysis follows)\n")
-        print("  " + led["notes"].replace("\n", "\n  "))
+
+    from .model import Model
+    model = Model()
+    out_dir = str(__import__("pathlib").Path(args.out).parent) if args.out else None
+    print(f"\nNOTEBOOK: model reads top-{args.notes_budget} pinned files (persisted + resumable)")
+    notes, paths = notebook.read_notes(model, args.target, res["per_file"], res["pinned"],
+                                       budget=args.notes_budget, out_dir=out_dir)
+    total = sum(len(n["findings"]) for n in notes)
+    print(f"\nnotebook -> {paths['md']}  ({len(notes)} files noted, {total} findings)")
 
 
 def main():
@@ -155,15 +156,14 @@ def main():
                          "(default: run-by-piece micro-exec only, no whole-app boot)")
     lp.set_defaults(func=cmd_loop)
 
-    e = sub.add_parser("eyes", help="Stage 1: build the detailed whole-repo MAP; optionally the model ledger")
+    e = sub.add_parser("eyes", help="Stage 1: whole-repo MAP + deterministic index; optionally the notebook")
     e.add_argument("target")
     e.add_argument("--out", default=None, help="where to write the map (default <target>/wave_map.md)")
-    e.add_argument("--ledger", action="store_true",
-                   help="also run the model over the map -> Attack-Surface Ledger (loads a model)")
-    e.add_argument("--json", action="store_true", help="print the ledger as JSON")
-    e.add_argument("--no-glm", action="store_true", help="skip GLM comprehension; local model only")
-    e.add_argument("--no-local", action="store_true",
-                   help="don't load the local model (GLM only; ledger empty if GLM is down)")
+    e.add_argument("--notes", action="store_true",
+                   help="the local model reads each pinned file into a persistent notebook "
+                        "(wave_notebook.jsonl/.md) -- resumable; loads the model")
+    e.add_argument("--notes-budget", type=int, default=20, metavar="N",
+                   help="how many pinned files (pin-density order) the notebook reads (default 20)")
     e.set_defaults(func=cmd_eyes)
 
     args = ap.parse_args()

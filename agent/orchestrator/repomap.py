@@ -447,4 +447,5 @@ def build_map(target, out=None):
              "sink_pins": sum(len(per_file[p][1]) for p in per_file),
              "infra_files": len(infra), "infra_pins": sum(len(i["pins"]) for i in infra),
              "map_chars": len(text), "digest_chars": len(digest)}
-    return {"map_path": str(outp), "text": text, "digest": digest, "stats": stats, "cmap": cmap}
+    return {"map_path": str(outp), "text": text, "digest": digest, "stats": stats, "cmap": cmap,
+            "pinned": pinned, "per_file": per_file, "infra": infra}

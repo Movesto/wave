@@ -4,7 +4,12 @@
 master_plan) for the current direction. Written to be read cold by an outside reviewer — the last section
 lists the open questions and suspected blind spots we most want a second opinion on.*
 
-Last updated: 2026-08-30.
+Last updated: 2026-09-02.
+
+*An external architecture review (2026-09-02, `arch_feedback.md`) contributed several improvements that are
+now folded into the stages below and flagged **[review-adopted]**. Suggestions we deliberately did **not**
+promote to the main design — because they conflict with a hard-won lesson or risk regressing precision — are
+kept separately in §12 so the reasoning is on record.*
 
 ---
 
@@ -175,18 +180,59 @@ Verified on serialize-javascript (independently surfaced `options.unsafe` + the 
 function-serialization sinks — the real CVE-2020-7660 surfaces) and launchpad (prescan pinpointed the actual
 `exec(command)` command-injection line).
 
+**[review-adopted, adapted] Security-pinned whole-repo map + Attack-Surface Ledger.** Additions that target
+our big-repo timeouts and the scale/cost triage problem (§10.9). **We adapt the review here:** it proposed
+compressing the whole repo to a ~2k-token skeleton, but the design intent is a **detailed whole-repo
+inventory** — every file, what each is *composed of* (imports, functions/classes with signatures, exports,
+decorators) and what it *does* (module docstring/purpose) — plus pinned targets, so the model knows the
+repo bottom-to-top. **Depth-on-demand** (full source of a specific file) comes from the model's tool-calling
+*after* the map, not from stuffing every line into the map. So the lever is completeness of *structure +
+purpose + pins*, not aggressive compression.
+1. **Detailed, ranked inventory.** A whole-repo structural map (signatures/exports/decorators, bodies
+   omitted; full source fetched on demand via tool-calling). Built on our tree-sitter `codemap.py`; no
+   `aider`/`grep-ast` dependency (we already extract more than grep-ast's tags — a real call graph +
+   reachability).
+2. **Invert the reference-count bias — pin high-value targets.** *Critical caveat from the review:* a
+   vanilla PageRank/reference-count ranking (repomap's default) **demotes** security bugs, because they
+   live in isolated routes and unreferenced wrappers that score *low*. So a deterministic regex/AST pass
+   must **unconditionally pin to the top**: route decorators (`@app.get/post`, Express `router.*`, Nest
+   controllers), and sensitive sinks (`exec`/`spawn`/`eval`, raw-SQL `execute`, deserialization
+   `pickle`/`unserialize`, direct file ops). This overlaps what the dynamic prescan already pins; the new
+   part is doing it as a *ranking* over the whole map — a PINNED section first, then the full inventory so
+   nothing is hidden.
+3. **Attack-Surface Ledger.** GLM-5.2 (local Qwen fallback) turns the pinned map into a structured
+   ledger — entry points + their auth requirements, high-risk operations (financial logic, file uploads,
+   role checks), and a ranked list of files for deep inspection. This ledger is the triage that keeps
+   per-entry comprehension + detection tractable on one GPU and stops the read-all step from drowning on a
+   monorepo.
+
 ### Stage 2 — The Detector  *(PLANNED — next build)*
 
-Consumes the enriched map. For each candidate sink slice, the **local** model runs an **adversarial
-ensemble**:
-- one framing tasked to **prove it's exploitable**, another to **prove it's safe** (guard present, input
-  sanitized, not reachable);
-- each must **cite evidence from the slice** (a line, a missing check), not assert;
-- **N independent votes**; only hypotheses that survive both the adversarial disproof and the vote get
-  promoted to the (expensive) proof loop.
+Consumes the enriched map. For each candidate sink slice, the **local** model discriminates on the concrete
+case, checked against itself.
 
-Rationale: this is the field's antidote to the ~50% FP rate. It replaces the old closed "9-class oracle
-decides" with "the model discriminates on the concrete case, checked against itself."
+**[review-adopted] Asymmetric clean-room falsification — replaces N identical votes.** The original design
+here was "argue both sides + N independent votes." The external review made the decisive point (and it
+matches our own open risk §10.3): running N *identically-primed* passes on the same local model just
+**launders that model's bias N times** — the votes are correlated because the context is shared. The fix is
+to decorrelate by **context asymmetry**, not by re-rolling the same prompt:
+- **Step 1 — Generate (primed).** Local Qwen gets the resolved slice from Stage 1 and hypothesizes an
+  exploit vector (e.g. IDOR on `/api/profile`, unsanitized input into `exec`).
+- **Step 2 — Clean room (fresh context).** **Reset the conversation entirely** (`messages: []`), pass in
+  **only** the raw ~40-line slice, single-turn, low temperature (0.1), and task the model *solely* with
+  **disproving** the vuln against a falsification rubric: does framework routing/middleware sanitize before
+  entry? is there an implicit cast or schema validator that blocks the payload? is the branch logically
+  unreachable?
+- Each side must **cite evidence from the slice** (a line, a missing check), not assert. Only hypotheses
+  that survive the clean-room disproof get promoted to the (expensive) proof loop.
+- **Zero extra VRAM** — the two calls run sequentially on the one GPU; the separation is contextual, not a
+  second model.
+
+This is the field's antidote to the ~50% FP rate and replaces the old closed "9-class oracle decides" with
+"the model discriminates, then a fresh instance tries to knock it down." **Honest limit:** it's still the
+same weights, so shared *training* bias survives — the reset kills anchoring/priming correlation, not the
+model's fundamental blind spots. It is strictly better than N-identical-votes and costs nothing, but it is
+not a guarantee; the proof loop remains the real arbiter.
 
 ### Stage 3 — The Proof Loop  *(PARTLY BUILT)*
 
@@ -222,11 +268,32 @@ The language-agnostic, class-agnostic core: `hypothesize → act → observe →
   `blocked`. Every `confirmed` carries the triple: action taken, observation returned, model's reasoning —
   re-runnable by a human.
 
+- **[review-adopted] Structured error escalation — never let a broken environment read as "safe."** A test
+  that crashes with `ECONNREFUSED`, a missing mock, or a dependency/import error must **not** be marked
+  `refuted`. It routes to an escalation handler: (1) the agent tries to fix the runtime scaffold — install
+  a package, spin up a mock SQLite DB, start the missing service; (2) if the environment still can't be
+  provisioned after **two** attempts, the verdict is **`blocked: under-provisioned`**, never a false
+  `refuted`. This is our concrete answer to §10.8 (distinguishing "refuted because safe" from "refuted
+  because under-provisioned").
+
+- **[review-adopted] Distinct status for business-logic effects.** Business-logic/IDOR/workflow results
+  get their own verdict **`anomalous_state: human-reviewable`**, kept *separate* from a witnessed
+  `confirmed`, so a model-argued state change is never silently confused with a tool-witnessed injection.
+  This answers §10.7.
+
 **Graceful degradation (the honest part):** injection/memory/reflection get a self-proving witness
-(near-zero FP). Business-logic/IDOR get a *fact* (state changed) plus the model's mechanism argument, flagged
-**human-reviewable** — because "is this state *bad* or intended?" is a judgment no tool (and no human without
-context) can make automatically. Strong classes get a strong witness; open-ended classes get a reasoned
-argument anchored to a real observed effect — which is how expert humans deliver them.
+(near-zero FP) → `confirmed`. Business-logic/IDOR get a *fact* (state changed) plus the model's mechanism
+argument → `anomalous_state: human-reviewable` — because "is this state *bad* or intended?" is a judgment no
+tool (and no human without context) can make automatically. Strong classes get a strong witness; open-ended
+classes get a reasoned argument anchored to a real observed effect — which is how expert humans deliver them.
+
+**[review-adopted] Context discipline for the tool-use loop.** Multi-turn investigation saturates the 16k
+window fast — we already hit an ollama 500 from a context bloated by `cat`/`grep` dumps, and band-aided it
+with a blind 1200-char truncation (which can slice off the exact line carrying the proof). The proper fix:
+**never pipe raw container `stdout`/`stderr` into the prompt.** Redirect execution output to a temp file on
+the host and give the model lightweight query tools — `grep_output(pattern, lines=10)`, `tail_output(lines=20)`
+— so it pulls only the relevant lines. Keeps tokens (and response time) minimal without ever discarding the
+evidence line. *(Not yet built — supersedes the current truncation.)*
 
 ### Stage 4 — Patch + Reverify  *(BUILT for Python; extend to JS)*
 
@@ -249,9 +316,13 @@ demonstrated end-to-end on VAmPI (Python).
 | `recorder.py` — verdict/evidence ledger | ✅ Built |
 | Proof of cmdi (py/js/ts) + XSS via scaffold | ✅ Demonstrated |
 | Detect→prove→patch→reverify (Python) | ✅ Demonstrated (VAmPI) |
-| **Stage 2 detector — adversarial ensemble** | ⬜ Planned (next) |
+| **Stage 2 detector — clean-room asymmetric falsifier** | ⬜ Planned (next) — [review-adopted] |
 | Wire Eyes map → detector → proof loop into one pipeline | ⬜ Planned |
 | Patch/reverify for JS/TS | ⬜ Planned |
+| Stage 1 security-pinned ranking + Attack-Surface Ledger | ⬜ Planned — [review-adopted] |
+| Stage 3 escalation handler (`blocked: under-provisioned`) | ⬜ Planned — [review-adopted] |
+| `anomalous_state: human-reviewable` verdict status | ⬜ Planned — [review-adopted] |
+| Context discipline: file logs + `grep_output`/`tail_output` | ⬜ Planned — [review-adopted] |
 | GHSA real-CVE benchmark harness | ✅ Built; baseline 2/23 (see §8) |
 
 ---
@@ -331,7 +402,40 @@ of this document.
 
 ---
 
-## 11. File map (current)
+## 11. External-review suggestions we did NOT adopt as main
+
+These came from the same 2026-09-02 review. They are reasonable ideas, but each conflicts with a hard-won
+lesson or risks regressing precision, so they are recorded as **suggestions** — pursue only with the caveat
+attached, not as part of the main design.
+
+1. **Full JIT scaffolding (let the model write its own test harness from scratch).** *Caveat:* this collides
+   with our single most-repeated finding — **the model drowns in GLUE** (module systems ESM/CJS/TS, async
+   wiring, browser boilerplate). `repro.py` exists precisely because "harness owns the glue, model owns the
+   payload" fixed the 8-steps-of-loader-fighting failure. Blanket JIT would regress that. **Adopt only the
+   hybrid form:** keep the scaffold for glue, let the model author JIT pieces *only* for the environment it
+   genuinely can't template (e.g. a 10-line SSRF listener, a mock DB). Note `investigate.py` already is a
+   model-driven JIT loop, so the real gap is provisioning/escalation (now [review-adopted] in Stage 3), not
+   a new free-form harness generator.
+
+2. **Experiential memory fed back into prompts.** The review proposes a JSON/SQLite ledger of per-target
+   "lessons" that pre-seeds *future* runs. *Caveat:* seeding future prompts with past folklore can
+   **poison** — one wrong lesson propagates into every matching run, and it is exactly the unvalidated soft
+   heuristic our "tools prove, not reasoning" invariant exists to keep out of the confirmation path. Our real
+   learning mechanism is the DAGVUL/training path, not prompt-seeded memory. **Keep it log-only** (post-run
+   reflection appended to a store for humans/telemetry) until the base pipeline is solid; do **not** wire it
+   back into detection or proof prompts yet.
+
+**Framing caveat on the whole review.** It implicitly assumes wave is currently *false-positive-limited*, so
+it centers Stage-2 filtering. Our measured reality is the opposite: at GHSA 2/23 we are **recall- and
+agent-reliability-limited** — the misses are proof-shape coverage gaps + a borderline local agent, not an FP
+flood, and no detector has run yet. So among the adopted items, **Stage 1 pinning (recall)** and **Stage 3
+escalation/context (coverage + honesty of `blocked`)** move our actual metric more than the Stage 2 clean-room
+does *today*; the clean-room banks its value once recall is up. Every adopted item still routes through the
+same borderline local agent — the ceiling the bake-off identified — which the review does not address.
+
+---
+
+## 12. File map (current)
 
 ```
 agent/orchestrator/

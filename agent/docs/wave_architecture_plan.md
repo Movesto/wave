@@ -316,7 +316,8 @@ demonstrated end-to-end on VAmPI (Python).
 | `recorder.py` — verdict/evidence ledger | ✅ Built |
 | Proof of cmdi (py/js/ts) + XSS via scaffold | ✅ Demonstrated |
 | Detect→prove→patch→reverify (Python) | ✅ Demonstrated (VAmPI) |
-| **Stage 2 detector — clean-room asymmetric falsifier** | ⬜ Planned (next) — [review-adopted] |
+| **Stage 2 detector — clean-room asymmetric falsifier** | ✅ Built (`detector.py`), verified — [review-adopted] |
+| Stage 1b notebook — persistent per-file notes + model target selection | ✅ Built (`notebook.py`) |
 | Wire Eyes map → detector → proof loop into one pipeline | ⬜ Planned |
 | Patch/reverify for JS/TS | ⬜ Planned |
 | Stage 1 security-pinned ranking + Attack-Surface Ledger | ⬜ Planned — [review-adopted] |

@@ -79,15 +79,19 @@ def _handler_for(finfo, route_line):
     return best
 
 
+_AUTH_ORDER = {"none": 0, "session": 1, "jwt/session": 1, "admin": 2, "unknown": 3, "-": 4}
+
+
 def ledger_index(cmap, root, per_file, pinned):
     """Attack-surface index derived STRAIGHT from the map -- deterministic, cannot hallucinate.
     entry_points = every [ROUTE] with a heuristic auth tag (from the route line AND its handler's
-    signature); ranked_targets = pinned files (already pin-density-ordered) with their distinct classes."""
+    signature); ranked_targets = pinned files (pin-density-ordered) with their classes + most-open auth."""
     entry_points, ranked = [], []
     for p in pinned:
         routes, sinks, _dyn = per_file[p]
         rel = _rel(root, p)
-        finfo = cmap.files.get(p)
+        finfo = cmap.files.get(p) if cmap else None
+        file_auth = None
         for ln, _, code in routes:
             handler = _handler_for(finfo, ln) if finfo else None
             if handler is not None:
@@ -95,12 +99,71 @@ def ledger_index(cmap, root, per_file, pinned):
             else:
                 auth = _auth_from(code) if (_AUTH_ADMIN.search(code) or _AUTH_USER.search(code)) else "unknown"
             entry_points.append({"route": code, "file": rel, "line": ln, "auth": auth})
+            if file_auth is None or _AUTH_ORDER.get(auth, 3) < _AUTH_ORDER.get(file_auth, 3):
+                file_auth = auth
         classes = []
         for _ln, label, _code in sinks:
             if label not in classes:
                 classes.append(label)
-        ranked.append({"file": rel, "classes_first": classes, "routes": len(routes), "sinks": len(sinks)})
+        ranked.append({"file": rel, "classes_first": classes, "routes": len(routes),
+                       "sinks": len(sinks), "auth": file_auth or "-"})
     return {"entry_points": entry_points, "ranked_targets": ranked}
+
+
+# ---- model-driven target SELECTION (large repos: pick the files worth deep-reading) -----------------
+
+_SELECT_SYS = (
+    "You are a lead penetration tester triaging a LARGE codebase before a deep review. Below is the "
+    "attack-surface INDEX: candidate files with their route count, sink count, the injection CLASSES "
+    "flagged in each, and the most-open AUTH on their routes. Choose the up-to-N files MOST worth a deep "
+    "read -- where untrusted input most plausibly reaches a dangerous sink, or that form an exploit chain "
+    "(entry -> handler -> sink). Strongly prefer UNAUTH (auth:none) request-reachable routes and dangerous "
+    "classes (cmd/eval/sqli/ssrf/deser/path) over low-value ones (a lone redirect, an admin-only static "
+    "query). Output ONLY a JSON array, ranked most-promising first, at most N items, each: "
+    '{"file": "<exact path from the index>", "reason": "<one line why it is worth deep-reading>"}. '
+    "Use ONLY paths that appear in the index.")
+
+
+def _index_text(idx, cap=300):
+    """Compact index for the selection model: one line per ranked file. Capped to the top `cap` (already
+    density-ordered) so even a monorepo's index fits the window."""
+    out = []
+    for t in idx["ranked_targets"][:cap]:
+        cls = ",".join(t["classes_first"]) or "-"
+        out.append(f"{t['file']}  routes={t['routes']} sinks={t['sinks']} auth={t['auth']}  classes={cls}")
+    extra = len(idx["ranked_targets"]) - cap
+    if extra > 0:
+        out.append(f"... (+{extra} lower-density files omitted)")
+    return "\n".join(out)
+
+
+def select_targets(model, root, per_file, pinned, budget, index=None):
+    """The model reads the compact index and picks up to `budget` files worth deep-reading. Returns a list
+    of {file, path, reason} in the model's ranked order; falls back to pin-density order on any failure."""
+    idx = index or ledger_index(None, root, per_file, pinned)  # cmap only needed for auth; index may be passed
+    rel_to_path = {_rel(root, p): p for p in pinned}
+    user = f"N = {budget}\n\nATTACK-SURFACE INDEX ({len(pinned)} candidate files):\n{_index_text(idx)}"
+    picks = []
+    try:
+        txt = model.generate(_SELECT_SYS, user, max_new_tokens=2000, temperature=0.2, think=False,
+                             json_mode=True)
+        after = (txt or "").split("</think>")[-1]
+        i, j = after.find("["), after.rfind("]")
+        arr = json.loads(after[i:j + 1]) if 0 <= i < j else []
+        seen = set()
+        for it in arr:
+            f = str(it.get("file", "")).replace("\\", "/") if isinstance(it, dict) else ""
+            if f in rel_to_path and f not in seen:
+                seen.add(f)
+                picks.append({"file": f, "path": rel_to_path[f], "reason": str(it.get("reason", ""))})
+            if len(picks) >= budget:
+                break
+    except Exception:
+        picks = []
+    if not picks:                                          # model failed -> density order (existing behaviour)
+        picks = [{"file": _rel(root, p), "path": p, "reason": "(pin-density fallback)"}
+                 for p in pinned[:budget]]
+    return picks
 
 
 # ---- the per-file notes (model) ----------------------------------------------------------------------
@@ -200,8 +263,9 @@ def _render_md(root, notes):
     return "\n".join(out)
 
 
-def read_notes(model, root, per_file, pinned, budget=20, out_dir=None, resume=True):
-    """Read the top-`budget` pinned files (pin-density order) into persistent notes. Appends each note to
+def read_notes(model, root, per_file, pinned, budget=20, out_dir=None, resume=True, targets=None):
+    """Read files into persistent notes. `targets` (an ordered list of absolute paths, e.g. from
+    select_targets) overrides the default top-`budget` pin-density order. Appends each note to
     wave_notebook.jsonl as it is produced (durable + resumable: a re-run skips files already noted), then
     renders wave_notebook.md. Returns (notes, paths)."""
     out_dir = Path(out_dir or root)
@@ -214,7 +278,7 @@ def read_notes(model, root, per_file, pinned, budget=20, out_dir=None, resume=Tr
                 done[d["file"]] = d
             except Exception:
                 pass
-    targets = pinned[:budget]
+    targets = list(targets) if targets is not None else pinned[:budget]
     with jsonl.open("a", encoding="utf-8") as fh:
         for i, path in enumerate(targets, 1):
             rel = _rel(root, path)

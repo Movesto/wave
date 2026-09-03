@@ -76,6 +76,40 @@ def cmd_discover(args):
         print(f"      {c.sink}")
 
 
+def _steer(picks, pinned, target):
+    """Live steering of the model's proposed deep-read list: Enter=go, drop N,M, add <substr>, list, quit."""
+    import re as _re
+
+    from .repomap import _rel
+    while True:
+        try:
+            cmd = input("\n> [Enter]=go / drop 3,5 / add <substr> / list / quit: ").strip()
+        except EOFError:
+            return picks
+        if not cmd:
+            return picks
+        if cmd == "quit":
+            raise SystemExit("notebook aborted by user")
+        if cmd == "list":
+            pass
+        elif cmd.startswith("drop"):
+            idxs = {int(x) for x in _re.findall(r"\d+", cmd)}
+            picks = [pk for n, pk in enumerate(picks, 1) if n not in idxs]
+        elif cmd.startswith("add "):
+            sub = cmd[4:].strip()
+            have = {pk["path"] for pk in picks}
+            for p in pinned:
+                rel = _rel(target, p)
+                if sub in rel and p not in have:
+                    picks.append({"file": rel, "path": p, "reason": "(added by user)"})
+        else:
+            print("  (unrecognized — Enter to go, or: drop N,M | add <substr> | list | quit)")
+            continue
+        for n, pk in enumerate(picks, 1):
+            print(f"  {n:>2} {pk['file']}  — {pk['reason'][:80]}")
+    return picks
+
+
 def cmd_eyes(args):
     from . import repomap, notebook
     res = repomap.build_map(args.target, out=args.out)
@@ -106,9 +140,24 @@ def cmd_eyes(args):
     from .model import Model
     model = Model()
     out_dir = str(__import__("pathlib").Path(args.out).parent) if args.out else None
-    print(f"\nNOTEBOOK: model reads top-{args.notes_budget} pinned files (persisted + resumable)")
-    notes, paths = notebook.read_notes(model, args.target, res["per_file"], res["pinned"],
-                                       budget=args.notes_budget, out_dir=out_dir)
+    pinned, per_file, budget = res["pinned"], res["per_file"], args.notes_budget
+
+    targets = None                                         # None -> read all pinned (density order)
+    if len(pinned) > budget:                               # large repo: let the model pick what to deep-read
+        print(f"\nSELECTION: {len(pinned)} pinned files > budget {budget} — model picks the "
+              f"{budget} worth deep-reading ...")
+        picks = notebook.select_targets(model, args.target, per_file, pinned, budget, index=idx)
+        print(f"\nProposed ({len(picks)} of {len(pinned)} pinned):")
+        for n, pk in enumerate(picks, 1):
+            print(f"  {n:>2} {pk['file']}  — {pk['reason'][:80]}")
+        if args.interactive:
+            picks = _steer(picks, pinned, args.target)
+        targets = [pk["path"] for pk in picks]
+
+    n_read = len(targets) if targets is not None else min(len(pinned), budget)
+    print(f"\nNOTEBOOK: reading {n_read} files (persisted + resumable)")
+    notes, paths = notebook.read_notes(model, args.target, per_file, pinned, budget=budget,
+                                       out_dir=out_dir, targets=targets)
     total = sum(len(n["findings"]) for n in notes)
     print(f"\nnotebook -> {paths['md']}  ({len(notes)} files noted, {total} findings)")
 
@@ -163,7 +212,11 @@ def main():
                    help="the local model reads each pinned file into a persistent notebook "
                         "(wave_notebook.jsonl/.md) -- resumable; loads the model")
     e.add_argument("--notes-budget", type=int, default=20, metavar="N",
-                   help="how many pinned files (pin-density order) the notebook reads (default 20)")
+                   help="how many files the notebook reads (default 20); when pinned files exceed this, "
+                        "the model SELECTS the N worth deep-reading instead of taking the densest N")
+    e.add_argument("--interactive", action="store_true",
+                   help="when the model selects targets on a large repo, pause to let you steer the list "
+                        "(drop/add) before deep-reading; without it, auto-proceeds")
     e.set_defaults(func=cmd_eyes)
 
     args = ap.parse_args()

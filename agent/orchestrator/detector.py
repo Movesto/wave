@@ -19,6 +19,7 @@ Input: the persistent notebook (wave_notebook.jsonl from `eyes --notes`). Output
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .repomap import _rel  # noqa: F401  (kept for symmetry with notebook; path handling below uses it indirectly)
@@ -33,11 +34,16 @@ _FALSIFY_SYS = (
     "NOT exploitable -- input validation / sanitization / escaping / parameterization before the sink, a "
     "type cast or schema that constrains the input, an allow-list, the sink being unreachable from "
     "untrusted input, or the value being a constant that is not attacker-controlled. Judge using ONLY the "
-    "code shown; do NOT assume a guard exists elsewhere. Output ONE JSON object, nothing else: "
-    '{"verdict": "refuted"|"survives", "reason": "<the specific guard/cast/allow-list/reason it is safe, '
-    'OR why it cannot be disproved from this code>"}. "refuted" = you found a concrete safe-making reason '
-    'HERE. "survives" = you could NOT disprove it from this code. Be strict but honest -- do not refute '
-    "just because a guard *might* exist elsewhere.")
+    "code shown; do NOT assume a guard exists elsewhere. "
+    "Output ONE JSON object and NOTHING else, with the keys in THIS ORDER: "
+    '{"reason": "<work through the code, then state your decision>", "verdict": "refuted"|"survives"}. '
+    "Write `reason` FIRST -- do your full analysis there -- and write `verdict` LAST, as the single "
+    "conclusion that FOLLOWS FROM that analysis. The verdict MUST agree with how the reason ends: if the "
+    'reason concludes the code is safe / not exploitable / the input cannot reach the sink -> "refuted"; '
+    'if the reason concludes you could NOT prove it safe from this code -> "survives". "refuted" = you '
+    'found a concrete safe-making reason HERE. "survives" = you could NOT disprove it from this code. Be '
+    "strict but honest: do not refute just because a guard *might* exist elsewhere, and NEVER emit a "
+    "verdict that contradicts your own reason.")
 
 
 def _load_findings(notebook_path):
@@ -80,7 +86,16 @@ def _slice(root, rel, line, pad=30):
     return "\n".join(f"{a + i + 1}: {ln}" for i, ln in enumerate(lines[a:b]))
 
 
+# the trailing verdict field -- last match wins (the reason may quote the schema/the word "verdict")
+_VERDICT_RE = re.compile(r'"verdict"\s*:\s*"\s*(refuted|survives)\s*"', re.I)
+
+
 def _parse(txt):
+    """Best-effort {verdict, reason} from the model's reply. Prefer strict JSON (after any </think>). A
+    long, unescaped `reason` string is the common breakage that makes json.loads fail -- when it does,
+    salvage the verdict by regex (taking the LAST match, since verdict is emitted last) so a real
+    decision is never lost to the default. The reason ordering is enforced by _FALSIFY_SYS so that the
+    verdict trails -- and therefore reflects -- the analysis, never a label committed before reasoning."""
     after = (txt or "").split("</think>")[-1]
     for scope in (after, txt or ""):
         i, j = scope.find("{"), scope.rfind("}")
@@ -91,7 +106,9 @@ def _parse(txt):
                     return d
             except Exception:
                 pass
-    return {}
+    scope = after or (txt or "")                           # strict JSON failed -> salvage the verdict
+    ms = _VERDICT_RE.findall(scope)
+    return {"verdict": ms[-1].lower()} if ms else {}
 
 
 def falsify(model, root, finding):
@@ -104,7 +121,9 @@ def falsify(model, root, finding):
              f"untrusted input: {finding['input'] or 'unclear'}.")
     user = f"{claim}\n\nCODE:\n{code}\n\nTry to disprove this finding."
     try:
-        txt = model.generate(_FALSIFY_SYS, user, max_new_tokens=1200, temperature=0.1, think=False,
+        # verdict is emitted LAST now (reason-first, so it reflects the concluded analysis) -- give a
+        # generous budget so a verbose reason can't run out of room before the verdict lands.
+        txt = model.generate(_FALSIFY_SYS, user, max_new_tokens=1800, temperature=0.1, think=False,
                              json_mode=True)
     except Exception as e:
         return {"verdict": "survives", "reason": f"falsifier call failed: {str(e)[:120]}"}

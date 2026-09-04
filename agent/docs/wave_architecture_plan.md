@@ -4,7 +4,9 @@
 master_plan) for the current direction. Written to be read cold by an outside reviewer — the last section
 lists the open questions and suspected blind spots we most want a second opinion on.*
 
-Last updated: 2026-09-02.
+Last updated: 2026-09-03. **Stages 1–3 are built and verified** (Eyes → Detector → Proof Loop, incl. all
+review-adopted items + the reachability gate). **Current focus → Stage 4 for JS/TS** (patch + reverify is
+demonstrated for Python; extend it) and a single chained `eyes → notes → detect → prove` command.
 
 *An external architecture review (2026-09-02, `arch_feedback.md`) contributed several improvements that are
 now folded into the stages below and flagged **[review-adopted]**. Suggestions we deliberately did **not**
@@ -127,7 +129,7 @@ reason*, not trying to suppress the reasoning.
    └───┬─────────────────────────────────────────────────────────────┘
        │
    ┌───▼────────────────────────────────────────────────────────────┐
-   │ STAGE 2 — THE DETECTOR  (adversarial-ensemble confirm) [PLANNED]│
+   │ STAGE 2 — THE DETECTOR  (adversarial-ensemble confirm) [BUILT]  │
    │   For each candidate sink slice, the LOCAL model argues BOTH     │
    │   "prove exploitable" and "prove safe", cites evidence, N-vote.  │
    │   → OUTPUT: ranked hypotheses worth the cost of proving          │
@@ -135,7 +137,7 @@ reason*, not trying to suppress the reasoning.
        │
    ┌───▼─────────────────────────────────────────────────────────────┐
    │ STAGE 3 — THE PROOF LOOP  (hypothesize→act→observe→reason→       │
-   │           conclude)                          [PARTLY BUILT]      │
+   │           conclude)                          [BUILT]            │
    │   execute.py    : general executor — run anything, any language, │
    │                   in the target's real env, sandboxed            │
    │   investigate.py: the tool-use loop the model drives             │
@@ -206,7 +208,7 @@ purpose + pins*, not aggressive compression.
    per-entry comprehension + detection tractable on one GPU and stops the read-all step from drowning on a
    monorepo.
 
-### Stage 2 — The Detector  *(PLANNED — next build)*
+### Stage 2 — The Detector  *(BUILT — `detector.py`, verified)*
 
 Consumes the enriched map. For each candidate sink slice, the **local** model discriminates on the concrete
 case, checked against itself.
@@ -234,7 +236,21 @@ same weights, so shared *training* bias survives — the reset kills anchoring/p
 model's fundamental blind spots. It is strictly better than N-identical-votes and costs nothing, but it is
 not a guarantee; the proof loop remains the real arbiter.
 
-### Stage 3 — The Proof Loop  *(PARTLY BUILT)*
+### Stage 3 — The Proof Loop  *(BUILT — `prove.py` drives the ladder on the detector's survivors)*
+
+**Built:** `prove.py` consumes the detector's `wave_candidates.jsonl`, resolves each line-based survivor to
+its enclosing function via codemap, and runs the ladder — `rung1.micro_exec` (canary-in-sink: SQL/SSRF and
+now **cmd/path**, discriminating shell-vs-argv and traversal-vs-sanitized) → the model-driven `investigate`
+loop for what the canary can't settle. All three [review-adopted] items are in (`investigate.py`): context
+discipline (`grep_output`/`tail_output` over a file log, replacing blind truncation), structured error
+escalation (`blocked: under-provisioned`), and the `anomalous_state` verdict. Local tool-calling runs on
+ollama's native `/api/chat` (honors `num_ctx`; the `/v1` endpoint capped context at 4096 and 500'd on
+multi-turn loops). **[review-adopted] Reachability gate** (`reachability.py`): a `confirmed` sink with no
+path from an untrusted-facing entry (route/CLI/handler) is downgraded to `anomalous_state`/human-review — the
+answer to "the sink fires, but is it a vuln?" (an eval-runner executes code by design). Verified end-to-end
+on oh-my-pi (grounded confirmations: `uid=0`, marker file) and deterministically on direct-sink fixtures.
+Honest limit: the gate is function-level reachability over the name-based graph, not value-level taint (§10.4).
+
 
 The language-agnostic, class-agnostic core: `hypothesize → act → observe → reason → conclude`.
 
@@ -293,7 +309,8 @@ with a blind 1200-char truncation (which can slice off the exact line carrying t
 **never pipe raw container `stdout`/`stderr` into the prompt.** Redirect execution output to a temp file on
 the host and give the model lightweight query tools — `grep_output(pattern, lines=10)`, `tail_output(lines=20)`
 — so it pulls only the relevant lines. Keeps tokens (and response time) minimal without ever discarding the
-evidence line. *(Not yet built — supersedes the current truncation.)*
+evidence line. *(Built in `investigate.py` — the head/tail digest + `grep_output`/`tail_output` tools now
+supersede the blind truncation.)*
 
 ### Stage 4 — Patch + Reverify  *(BUILT for Python; extend to JS)*
 
@@ -318,12 +335,16 @@ demonstrated end-to-end on VAmPI (Python).
 | Detect→prove→patch→reverify (Python) | ✅ Demonstrated (VAmPI) |
 | **Stage 2 detector — clean-room asymmetric falsifier** | ✅ Built (`detector.py`), verified — [review-adopted] |
 | Stage 1b notebook — persistent per-file notes + model target selection | ✅ Built (`notebook.py`) |
+| **Stage 3 driver — survivors → confirmation ladder** | ✅ Built (`prove.py`), verified (oh-my-pi grounded confirms) |
+| Stage 3 canary — rung1 tripwires cmd/path (+ SQL/SSRF) | ✅ Built (`rung1.py`), deterministic proven/refuted |
+| **Reachability gate — confirmed→human-review if no untrusted path** | ✅ Built (`reachability.py`), verified |
+| Stage 3 escalation handler (`blocked: under-provisioned`) | ✅ Built (`investigate.py`) — [review-adopted] |
+| `anomalous_state: human-reviewable` verdict status | ✅ Built (`recorder.py` + `investigate.py`) — [review-adopted] |
+| Context discipline: file logs + `grep_output`/`tail_output` | ✅ Built (`investigate.py`) — [review-adopted] |
+| Local tool-calling on ollama native `/api/chat` (num_ctx) | ✅ Built (`model.py`) — fixes /v1 4096-cap 500s |
 | Wire Eyes map → detector → proof loop into one pipeline | ⬜ Planned |
 | Patch/reverify for JS/TS | ⬜ Planned |
 | Stage 1 security-pinned ranking + Attack-Surface Ledger | ⬜ Planned — [review-adopted] |
-| Stage 3 escalation handler (`blocked: under-provisioned`) | ⬜ Planned — [review-adopted] |
-| `anomalous_state: human-reviewable` verdict status | ⬜ Planned — [review-adopted] |
-| Context discipline: file logs + `grep_output`/`tail_output` | ⬜ Planned — [review-adopted] |
 | GHSA real-CVE benchmark harness | ✅ Built; baseline 2/23 (see §8) |
 
 ---

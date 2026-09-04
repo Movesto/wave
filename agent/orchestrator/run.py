@@ -204,6 +204,82 @@ def cmd_prove(args):
         print(f"  [BLOCKED   {d.get('cwe')}] {d['file']}:{d['line']}  -- {d.get('why', '')[:80]}")
 
 
+def cmd_patch(args):
+    from pathlib import Path
+
+    from . import patch as patchmod
+    from .model import Model
+    out_dir = str(Path(args.findings).parent) if args.findings else args.target
+    model = Model()
+    results, paths = patchmod.run(model, args.target, findings_path=args.findings, budget=args.budget,
+                                  out_dir=out_dir, write=args.write)
+    fixed = [r for r in results if r["status"] == "fixed"]
+    print(f"\nPATCH + REVERIFY: {len(fixed)} fixed, {len(results) - len(fixed)} rejected/failed  "
+          f"({'WROTE verified patches' if args.write else 'dry-run -- sources restored'})")
+    print(f"patches -> {paths['patches']}")
+    for r in results:
+        tag = "FIXED" if r["status"] == "fixed" else r["status"].upper()
+        print(f"  [{tag} {r.get('cwe')}] {r['file']}:{r['line']}  {r.get('unit', '')}")
+        if r.get("gate_a"):
+            print(f"      Gate A (exploit re-fired): {r['gate_a']}  -- {r.get('gate_a_note', '')[:80]}")
+            print(f"      Gate B (still loads):      {r['gate_b']}  -- {r.get('gate_b_note', '')[:60]}")
+
+
+def cmd_all(args):
+    """One-shot pipeline: eyes(notebook) -> detect -> prove -> (optional) patch, sharing ONE model."""
+    from . import detector, notebook, prove, repomap
+    from .model import Model
+    t = args.target
+    model = Model()
+
+    # Stage 1 -- whole-repo map + per-file notebook (model selects targets on big repos)
+    res = repomap.build_map(t)
+    s = res["stats"]
+    print(f"[all] map: {s['files']} files, {s['pinned_files']} pinned, {s['sink_pins']} sink-pins", flush=True)
+    idx = notebook.ledger_index(res["cmap"], t, res["per_file"], res["pinned"])
+    pinned, per_file = res["pinned"], res["per_file"]
+    targets = None
+    if len(pinned) > args.notes_budget:
+        picks = notebook.select_targets(model, t, per_file, pinned, args.notes_budget, index=idx)
+        if args.interactive:
+            picks = _steer(picks, pinned, t)
+        targets = [pk["path"] for pk in picks]
+        print(f"[all] selected {len(targets)} of {len(pinned)} pinned files to deep-read", flush=True)
+    notes, npaths = notebook.read_notes(model, t, per_file, pinned, budget=args.notes_budget, targets=targets)
+    total = sum(len(n["findings"]) for n in notes)
+    print(f"[all] notebook: {len(notes)} files noted, {total} findings -> {npaths['md']}", flush=True)
+
+    # Stage 2 -- clean-room falsification -> survivors
+    survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget)
+    print(f"[all] detect: {len(survivors)} survived, {len(refuted)} refuted -> {dpaths['candidates']}", flush=True)
+    if not survivors:
+        print("[all] no survivors -- pipeline done.")
+        return
+
+    # Stage 3 -- confirmation ladder (+ reachability gate)
+    by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate)
+    print(f"[all] prove: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
+          f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
+
+    # Stage 4 -- patch + reverify (optional)
+    fixed = []
+    if args.patch and by["confirmed"]:
+        from . import patch as patchmod
+        pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write)
+        fixed = [r for r in pres if r["status"] == "fixed"]
+        print(f"[all] patch: {len(fixed)} fixed of {len(pres)} confirmed "
+              f"({'wrote' if args.write else 'dry-run'})", flush=True)
+
+    print(f"\n=== PIPELINE on {t} ===")
+    print(f"  findings={total}  survivors={len(survivors)}  CONFIRMED={len(by['confirmed'])}  "
+          f"anomalous={len(by['anomalous_state'])}  fixed={len(fixed)}")
+    for d in by["confirmed"]:
+        print(f"  [CONFIRMED {d.get('cwe')}] {d['file']}:{d['line']}  {d.get('unit', '')}  "
+              f"-- {(d.get('evidence') or '')[:70]}")
+    for d in by["anomalous_state"]:
+        print(f"  [ANOMALOUS {d.get('cwe')}] {d['file']}:{d['line']}  -- {d.get('why', '')[:70]}")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="orchestrator")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -279,6 +355,29 @@ def main():
                     help="disable the reachability gate (which downgrades a confirmed sink to "
                          "anomalous_state/human-review when no untrusted-input path reaches it)")
     pr.set_defaults(func=cmd_prove)
+
+    pt = sub.add_parser("patch", help="Stage 4: patch each confirmed finding + reverify with the same proof")
+    pt.add_argument("target")
+    pt.add_argument("--findings", default=None,
+                    help="path to wave_findings.jsonl (default <target>/wave_findings.jsonl)")
+    pt.add_argument("--budget", type=int, default=10, metavar="N",
+                    help="max confirmed findings to patch this run")
+    pt.add_argument("--write", action="store_true",
+                    help="KEEP a patch that passed both gates (default: dry-run, restore the source)")
+    pt.set_defaults(func=cmd_patch)
+
+    al = sub.add_parser("all", help="one-shot pipeline: eyes(notebook) -> detect -> prove [-> patch]")
+    al.add_argument("target")
+    al.add_argument("--notes-budget", type=int, default=20, metavar="N",
+                    help="files the notebook deep-reads (model selects when pinned exceeds this)")
+    al.add_argument("--detect-budget", type=int, default=60, metavar="N", help="findings to falsify")
+    al.add_argument("--prove-budget", type=int, default=12, metavar="N", help="survivors to prove")
+    al.add_argument("--patch", action="store_true", help="also run Stage 4 (patch + reverify) on confirmations")
+    al.add_argument("--patch-budget", type=int, default=8, metavar="N", help="confirmed findings to patch")
+    al.add_argument("--write", action="store_true", help="keep patches that pass both gates (with --patch)")
+    al.add_argument("--no-reach-gate", action="store_true", help="disable the reachability gate in prove")
+    al.add_argument("--interactive", action="store_true", help="steer the notebook's target selection")
+    al.set_defaults(func=cmd_all)
 
     args = ap.parse_args()
     args.func(args)

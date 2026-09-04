@@ -4,9 +4,10 @@
 master_plan) for the current direction. Written to be read cold by an outside reviewer — the last section
 lists the open questions and suspected blind spots we most want a second opinion on.*
 
-Last updated: 2026-09-03. **Stages 1–3 are built and verified** (Eyes → Detector → Proof Loop, incl. all
-review-adopted items + the reachability gate). **Current focus → Stage 4 for JS/TS** (patch + reverify is
-demonstrated for Python; extend it) and a single chained `eyes → notes → detect → prove` command.
+Last updated: 2026-09-03. **All four stages are built and verified** (Eyes → Detector → Proof Loop → Patch),
+including every review-adopted item, the reachability gate, and a one-shot `run all` pipeline. **Current
+focus →** run the full pipeline on real repos to move the GHSA number (§8), value-level taint to sharpen the
+reachability gate (§10.4), and Stage 1 security-pinned ranking / Attack-Surface Ledger.
 
 *An external architecture review (2026-09-02, `arch_feedback.md`) contributed several improvements that are
 now folded into the stages below and flagged **[review-adopted]**. Suggestions we deliberately did **not**
@@ -312,11 +313,22 @@ the host and give the model lightweight query tools — `grep_output(pattern, li
 evidence line. *(Built in `investigate.py` — the head/tail digest + `grep_output`/`tail_output` tools now
 supersede the blind truncation.)*
 
-### Stage 4 — Patch + Reverify  *(BUILT for Python; extend to JS)*
+### Stage 4 — Patch + Reverify  *(BUILT — `patch.py`, language-agnostic)*
 
 The model writes a fix; the **same** proof re-runs; if the confirmed exploit no longer fires, the patch
-holds; if it still fires, the patch failed and the loop continues. Full detect→prove→patch→reverify was
-demonstrated end-to-end on VAmPI (Python).
+holds; if it still fires, the patch failed. `patch.py` drives the new pipeline: for each `confirmed` finding
+(never `anomalous_state` — that's human-review), the model rewrites the enclosing function, and the SAME
+oracle that confirmed it re-runs on the patched code as **Gate A** (rung1 canary must no longer be `proven`,
+or the investigate loop no longer `confirmed`) alongside **Gate B** (the file still parses — `py_compile` /
+`node --check`). Non-destructive by default (the source is restored and the patch saved to
+`wave_patches.jsonl`); `--write` keeps a patch that passed both gates. Language-agnostic because the model
+writes the fix in the file's language and the oracle re-proves it (rung1 for Python, the investigate sandbox
+otherwise). Verified deterministically: a confirmed `os.system` cmd-injection → patched to an argv list →
+Gate A `blocked` (the canary now clears it) + Gate B `pass` → `fixed`. Legacy `remediate.py` (dynamic
+re-fire + differential regression) remains for the whole-app loop.
+
+**The full chain is one command:** `run all <target> [--patch]` runs eyes(notebook) → detect → prove →
+(optional) patch, sharing one model, each stage reading the previous stage's on-disk artifact (resumable).
 
 ---
 
@@ -342,8 +354,8 @@ demonstrated end-to-end on VAmPI (Python).
 | `anomalous_state: human-reviewable` verdict status | ✅ Built (`recorder.py` + `investigate.py`) — [review-adopted] |
 | Context discipline: file logs + `grep_output`/`tail_output` | ✅ Built (`investigate.py`) — [review-adopted] |
 | Local tool-calling on ollama native `/api/chat` (num_ctx) | ✅ Built (`model.py`) — fixes /v1 4096-cap 500s |
-| Wire Eyes map → detector → proof loop into one pipeline | ⬜ Planned |
-| Patch/reverify for JS/TS | ⬜ Planned |
+| **Stage 4 — patch + reverify (language-agnostic)** | ✅ Built (`patch.py`); Python verified deterministically |
+| **One-shot pipeline `eyes → detect → prove [→ patch]`** | ✅ Built (`run all`) |
 | Stage 1 security-pinned ranking + Attack-Surface Ledger | ⬜ Planned — [review-adopted] |
 | GHSA real-CVE benchmark harness | ✅ Built; baseline 2/23 (see §8) |
 

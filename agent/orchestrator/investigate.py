@@ -25,12 +25,16 @@ _AGENT_SYS = (
     "nothing else:\n"
     '  run a command: {"action":"run","command":"<shell command>","image":"<optional docker image, '
     'e.g. python:3.12-slim or node:20-slim>","network":"<none|host>","why":"<what you expect to see>"}\n'
-    '  finish:        {"action":"conclude","verdict":"confirmed|refuted|believed|blocked","cwe":"CWE-XX",'
-    '"why":"<why, citing what you OBSERVED>","evidence":"<the concrete observed effect>"}\n'
+    '  finish:        {"action":"conclude","verdict":"confirmed|refuted|believed|blocked|anomalous_state",'
+    '"cwe":"CWE-XX","why":"<why, citing what you OBSERVED>","evidence":"<the concrete observed effect>"}\n'
     "RULES: (1) You may only CONFIRM after you have RUN something and OBSERVED the effect that proves it; "
     "reasoning alone is 'believed', never 'confirmed'. (2) 'refuted' means you ran it and saw it is safe. "
     "(3) 'blocked' means you could not run what you needed. (4) Keep commands self-contained; the target's "
-    "code is under the working directory. Keep any reasoning BRIEF, then output ONLY the json object.\n"
+    "code is under the working directory. Keep any reasoning BRIEF, then output ONLY the json object. "
+    "(5) A MISSING dependency (ModuleNotFoundError / Cannot find module) or a refused connection is an "
+    "ENVIRONMENT problem, NOT proof the code is safe -- install it and re-run; if you still cannot, use "
+    "'blocked', NEVER 'refuted'. (6) Use 'anomalous_state' for an OBSERVED business-logic / IDOR state "
+    "change (a judgment call, not a tool-witnessed injection).\n"
     "HOW TO RUN CODE: each action is exactly ONE shell command. Do NOT run a file you have not created. "
     "Either run it INLINE, e.g. command \"python3 -c 'import app; app.f(\\\"; id\\\")'\", or CREATE the "
     "file first in one command with a heredoc, e.g. \"cat > t.py <<'EOF'\\n...\\nEOF\\npython3 t.py\". "
@@ -48,7 +52,7 @@ _AGENT_SYS = (
     "\"why\":\"the injected id ran\",\"evidence\":\"uid=0(root) gid=0(root)\"}"
 )
 
-_VERDICTS = {"confirmed", "refuted", "believed", "blocked"}
+_VERDICTS = {"confirmed", "refuted", "believed", "blocked", "anomalous_state"}
 
 # --- Native tool-calling path (for a tool-tuned model behind an OpenAI-compatible API: ollama etc.) ---
 # The model returns structured tool_calls instead of our text JSON; the enum on `verdict` makes parroting
@@ -59,7 +63,20 @@ _NATIVE_SYS = (
     "may only conclude 'confirmed' AFTER a run_command whose output shows the effect (e.g. an injected "
     "`id` prints a uid= line, your marker appears). The target repo is mounted at /work. When you are "
     "done, call conclude. To run an exported function, require/import it (e.g. "
-    "node -e \"require('/work/app').f('; id')\" or python3 -c \"import app; app.f('; id')\")."
+    "node -e \"require('/work/app').f('; id')\" or python3 -c \"import app; app.f('; id')\"). "
+    "A run that fails with a MISSING dependency (ModuleNotFoundError / Cannot find module) or a refused "
+    "connection is an ENVIRONMENT problem, NOT evidence the code is safe -- fix it (install the package "
+    "with network 'host', e.g. `pip install <pkg>` / `npm i <pkg>`, or start the service) and re-run; if "
+    "after a couple of tries you still cannot run it, conclude 'blocked', NEVER 'refuted'. Instead of "
+    "re-running to re-read a big output, use grep_output(pattern) / tail_output(lines) to inspect the last "
+    "run. Use verdict 'anomalous_state' (not 'confirmed') when you OBSERVED a business-logic / IDOR state "
+    "change that is a judgment call rather than a tool-witnessed injection. "
+    "ACT, DON'T ORIENT: the relevant code is ALREADY in the task -- do NOT waste steps re-reading files "
+    "with cat/sed/ls/head. Your budget is small. Your FIRST action should TEST the vulnerability (run the "
+    "scaffold with a payload, or call the function with an injection) and OBSERVE the effect; then CONCLUDE. "
+    "If a class cannot be proven by running one piece because it needs a live backend/service you cannot "
+    "start, conclude 'blocked' promptly; if it looks vulnerable but you did not witness the effect, conclude "
+    "'believed' -- do not keep exploring."
 )
 
 _RUN_TOOL = {"type": "function", "function": {
@@ -75,19 +92,149 @@ _CONCLUDE_TOOL = {"type": "function", "function": {
     "name": "conclude",
     "description": "Give the final verdict once you have run enough to decide.",
     "parameters": {"type": "object", "properties": {
-        "verdict": {"type": "string", "enum": ["confirmed", "refuted", "believed", "blocked"]},
+        "verdict": {"type": "string",
+                    "enum": ["confirmed", "refuted", "believed", "blocked", "anomalous_state"]},
         "cwe": {"type": "string"},
         "why": {"type": "string", "description": "why, citing what you observed"},
         "evidence": {"type": "string", "description": "the concrete observed effect"},
     }, "required": ["verdict", "why"]}}}
 
 
+# --- review-adopted (Stage 3): context discipline + structured error escalation helpers ---
+
+# provisioning-failure signals: a run that fails on a MISSING dep/service must never read as `refuted`.
+_PROV_SIGNALS = (
+    "modulenotfounderror", "no module named", "importerror", "cannot find module", "module_not_found",
+    "err_module_not_found", "econnrefused", "connection refused", "could not connect", "command not found",
+    "executable file not found", "no such file or directory",
+)
+
+# a run that actually got the TARGET to execute (scaffold marker / injected effect / the fn threw) --
+# distinguishes "refuted because safe" from "refuted because nothing ever ran".
+_REAL_EXEC_MARKERS = ("WAVE_RESULT", "WAVE_RENDER_CANARY", "WAVE_OUTPUT", "WAVE_CALL_ERROR", "WAVE_LOAD_ERROR",
+                      "uid=", "wave_HIT", "WAVE-PWNED")
+
+
+def _provision_signal(text):
+    t = (text or "").lower()
+    return any(s in t for s in _PROV_SIGNALS)
+
+
+def _real_exec(text):
+    return any(m in (text or "") for m in _REAL_EXEC_MARKERS)
+
+
+def _combined(res):
+    return ((res.stdout or "") + ("\n" + res.stderr if res.stderr else "")).strip()
+
+
+def _digest(res, tail=20, tools=True):
+    """Short model-facing digest of a run: header + the LAST `tail` lines. The FULL output stays OUT of the
+    prompt -- the model pulls more with grep_output/tail_output. Replaces the blind 1200-char truncation
+    that could slice off the exact proof line (wave_architecture_plan.md, Stage 3 review-adopted)."""
+    head = (f"$ {res.command}\n[exit {res.exit_code}" + (" TIMED OUT" if res.timed_out else "")
+            + f", {res.duration:.1f}s]")
+    body = _combined(res)
+    if not body:
+        return head + "\n(no output)"
+    lines = body.splitlines()
+    if len(lines) <= tail + 8:
+        return head + "\n" + body
+    hint = " -- use grep_output(pattern) / tail_output(lines) for more" if tools else ""
+    return (head + f"\n--- output: last {tail} of {len(lines)} lines{hint} ---\n" + "\n".join(lines[-tail:]))
+
+
+def _grep(run_log, pattern, limit=10):
+    if not run_log:
+        return "no command has been run yet -- run_command first."
+    lines = run_log.splitlines()
+    try:
+        rx = re.compile(pattern, re.I).search
+    except re.error:
+        rx = None
+    hits = [f"{i + 1}: {ln}" for i, ln in enumerate(lines)
+            if (rx(ln) if rx else pattern.lower() in ln.lower())]
+    if not hits:
+        return f"no line matches {pattern!r} in the last run ({len(lines)} lines)."
+    extra = f"\n... (+{len(hits) - limit} more matches)" if len(hits) > limit else ""
+    return "\n".join(hits[:limit]) + extra
+
+
+def _tail(run_log, n=20):
+    if not run_log:
+        return "no command has been run yet -- run_command first."
+    return "\n".join(run_log.splitlines()[-n:])
+
+
+def _finalize(verdict, why, ran, saw_prov, saw_real):
+    """The grounding rule + structured error escalation on a raw conclusion:
+    - confirmed / anomalous_state need an OBSERVATION (ran>0), else -> believed.
+    - a 'refuted' whose ONLY observations were provisioning failures (the target never ran cleanly) is not
+      a safe verdict -> blocked (under-provisioned)."""
+    if verdict not in _VERDICTS:
+        verdict = "believed"
+    if verdict in ("confirmed", "anomalous_state") and ran == 0:
+        return "believed", f"(downgraded from {verdict}: no command was run to observe the effect) " + why
+    if verdict == "refuted" and saw_prov and not saw_real:
+        return "blocked", ("(under-provisioned: 'refuted' overturned -- the target never executed cleanly; "
+                           "every run hit a missing dependency/service, so safety is NOT proven) " + why)
+    return verdict, why
+
+
+def _force_conclude(model, messages, ran, saw_prov, saw_real):
+    """Out of exploration budget -> ONE final call constrained to conclude, so we get a REASONED verdict
+    instead of a flat 'step budget spent'. Returns a Verdict, or None if the model still won't decide."""
+    import json as _json
+    msgs = messages + [{"role": "user", "content":
+        "You are OUT of exploration steps -- do NOT run more commands. Call conclude NOW with your final "
+        "verdict from what you already observed: 'confirmed' only if you WITNESSED the effect; 'blocked' if "
+        "a proof needs a service/backend you could not start; 'believed' if it looks vulnerable but you did "
+        "not prove it; 'refuted' if you saw it is safe."}]
+    try:
+        msg = model.chat(msgs, tools=[_CONCLUDE_TOOL], temperature=0.1)
+    except Exception:
+        return None
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function", {}) or {}
+        if fn.get("name") != "conclude":
+            continue
+        raw = fn.get("arguments")
+        try:
+            args = raw if isinstance(raw, dict) else _json.loads(raw or "{}")
+        except Exception:
+            args = {}
+        verdict, why = _finalize(str(args.get("verdict", "believed")).lower(), str(args.get("why", "")),
+                                 ran, saw_prov, saw_real)
+        return Verdict(verdict, why, str(args.get("evidence", "")), str(args.get("cwe", "")), ran, [])
+    return None
+
+
+_GREP_TOOL = {"type": "function", "function": {
+    "name": "grep_output",
+    "description": "Search the LAST command's FULL output for a substring/regex; returns matching lines. Use "
+                   "this to find a marker, `uid=`, or an error in a big output instead of re-running.",
+    "parameters": {"type": "object", "properties": {
+        "pattern": {"type": "string", "description": "substring or regex to find in the last run's output"},
+        "lines": {"type": "integer", "description": "max matching lines to return (default 10)"},
+    }, "required": ["pattern"]}}}
+
+_TAIL_TOOL = {"type": "function", "function": {
+    "name": "tail_output",
+    "description": "Return the last N lines of the LAST command's full output.",
+    "parameters": {"type": "object", "properties": {
+        "lines": {"type": "integer", "description": "how many trailing lines (default 20)"},
+    }, "required": []}}}
+
+
 def _investigate_native(model, brief, *, image, mount, container, network, max_steps, step_timeout):
     """Tool-calling loop over the model's NATIVE tools interface (structured tool_calls)."""
     import json as _json
     messages = [{"role": "system", "content": _NATIVE_SYS}, {"role": "user", "content": brief}]
-    tools = [_RUN_TOOL, _CONCLUDE_TOOL]
+    tools = [_RUN_TOOL, _GREP_TOOL, _TAIL_TOOL, _CONCLUDE_TOOL]
     trail, ran = [], 0
+    run_log = ""                                            # the LAST run's full output (grep/tail read it)
+    saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
+    seen_cmds = set()                                       # to nudge a model re-running the same command
     for step in range(max_steps):
         try:
             msg = model.chat(messages, tools=tools, temperature=0.2)
@@ -104,29 +251,55 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
         for tc in tool_calls:
             fn = tc.get("function", {}) or {}
             name = fn.get("name")
+            raw = fn.get("arguments")                        # /v1 -> JSON string; ollama native -> dict
             try:
-                args = _json.loads(fn.get("arguments") or "{}")
+                args = raw if isinstance(raw, dict) else _json.loads(raw or "{}")
             except Exception:
                 args = {}
             if name == "conclude":
-                verdict = str(args.get("verdict", "believed")).lower()
-                why = str(args.get("why", ""))
-                if verdict == "confirmed" and ran == 0:     # GROUNDING RULE
-                    verdict = "believed"
-                    why = "(downgraded from confirmed: no command was run to observe the effect) " + why
+                verdict, why = _finalize(str(args.get("verdict", "believed")).lower(),
+                                         str(args.get("why", "")), ran, saw_prov, saw_real)
                 print(f"[investigate:native] concluded: {verdict} after {ran} run(s)", flush=True)
-                return Verdict(verdict if verdict in _VERDICTS else "believed", why,
-                               str(args.get("evidence", "")), str(args.get("cwe", "")), ran, trail)
-            cmd = str(args.get("command", "")).strip()
+                return Verdict(verdict, why, str(args.get("evidence", "")), str(args.get("cwe", "")), ran, trail)
+            if name == "grep_output":
+                content = _grep(run_log, str(args.get("pattern", "")), int(args.get("lines") or 10))
+                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
+                continue
+            if name == "tail_output":
+                content = _tail(run_log, int(args.get("lines") or 20))
+                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
+                continue
+            cmd = str(args.get("command", "")).strip()      # run_command
             res = execute(cmd, image=str(args.get("image") or image), mount=mount, container=container,
                           network=str(args.get("network") or network), timeout=step_timeout)
             ran += 1
+            run_log = _combined(res)                         # full output stays here, not in the prompt
+            prov = _provision_signal(run_log)
+            saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(run_log)
             print(f"[investigate:native] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
-                  + (" TIMEOUT" if res.timed_out else ""), flush=True)
-            summ = res.summary(limit=1200)                  # bound context growth (many cat/grep dumps -> 500s)
-            trail.append((cmd, summ))
-            messages.append({"role": "tool", "tool_call_id": tc.get("id"), "content": summ})
-    return Verdict("blocked", f"step budget ({max_steps}) spent without a conclusion", ran=ran, trail=trail)
+                  + (" TIMEOUT" if res.timed_out else "") + (" [prov-fail]" if prov else ""), flush=True)
+            digest = _digest(res)
+            if prov:                                         # escalate, never let it read as 'safe'
+                digest += ("\nNOTE: this is a MISSING DEPENDENCY/SERVICE (an environment problem), NOT proof "
+                           "the code is safe. Fix it -- install the package (network 'host') or start the "
+                           "service, then re-run. Do NOT conclude 'refuted' from this; if you still cannot "
+                           "provision, conclude 'blocked'.")
+            if cmd in seen_cmds:                             # zombie loop: re-running a command already run
+                digest += ("\nNOTE: you ALREADY ran this exact command -- do NOT repeat it. Stop reading; "
+                           "TEST the vulnerability with a payload or CONCLUDE now.")
+            seen_cmds.add(cmd)
+            if max_steps - step <= 2:                        # budget almost gone -> push to finish
+                digest += (f"\nNOTE: only {max_steps - step} step(s) left. Run your ONE decisive test now, "
+                           "or call conclude.")
+            trail.append((cmd, digest))
+            messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": digest})
+    fv = _force_conclude(model, messages, ran, saw_prov, saw_real)   # budget spent -> extract a real verdict
+    if fv is not None:
+        fv.trail = trail
+        print(f"[investigate:native] forced conclusion: {fv.verdict} after {ran} run(s)", flush=True)
+        return fv
+    verdict = "blocked" if (saw_prov and not saw_real) or ran == 0 else "believed"
+    return Verdict(verdict, f"step budget ({max_steps}) spent; model would not conclude", ran=ran, trail=trail)
 
 
 @dataclass
@@ -174,6 +347,7 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
                                    network=network, max_steps=max_steps, step_timeout=step_timeout)
     trail = []
     ran = 0
+    saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
     for step in range(max_steps):
         user = (f"HYPOTHESIS / TASK:\n{brief}\n\nWORK SO FAR:\n{_render(trail)}\n\n"
                 f"Steps left: {max_steps - step}. Your next action (one json object):")
@@ -191,9 +365,15 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
             res = execute(cmd, image=str(act.get("image") or image), mount=mount, container=container,
                           network=str(act.get("network") or network), timeout=step_timeout)
             ran += 1
+            prov = _provision_signal(_combined(res))
+            saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(_combined(res))
             print(f"[investigate] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
-                  + (" TIMEOUT" if res.timed_out else ""), flush=True)
-            summ = res.summary()
+                  + (" TIMEOUT" if res.timed_out else "") + (" [prov-fail]" if prov else ""), flush=True)
+            summ = _digest(res, tools=False)               # head/tail digest, not a blind truncation
+            if prov:                                        # missing dep/service -> escalate, never "safe"
+                summ += ("\nNOTE: this is a MISSING DEPENDENCY/SERVICE (an environment problem), NOT proof "
+                         "the code is safe. Install it and re-run; do NOT conclude 'refuted' -- use "
+                         "'blocked' if you cannot provision.")
             # nudge a stuck model: it repeated a command it ALREADY ran (whether it failed OR succeeded --
             # a zombie loop re-running a passing command never reads its own output). Push it to move on.
             if any(pc == cmd for pc, _ps in trail):
@@ -211,11 +391,10 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
                               "values, or gave an invalid verdict -- RUN a command and OBSERVE before "
                               "concluding, then use a real verdict (confirmed/refuted/believed/blocked)"))
                 continue
-            if verdict == "confirmed" and ran == 0:        # GROUNDING RULE: no observation -> can't confirm
-                verdict = "believed"
-                why = "(downgraded from confirmed: no command was ever run to observe the effect) " + why
+            verdict, why = _finalize(verdict, why, ran, saw_prov, saw_real)   # grounding + error escalation
             print(f"[investigate] concluded: {verdict} after {ran} run(s)", flush=True)
             return Verdict(verdict, why, str(act.get("evidence", "")), str(act.get("cwe", "")), ran, trail)
         else:
             trail.append((f"(unknown action {kind!r})", "expected run or conclude"))
-    return Verdict("blocked", f"step budget ({max_steps}) spent without a conclusion", ran=ran, trail=trail)
+    verdict = "blocked" if (saw_prov and not saw_real) or ran == 0 else "believed"
+    return Verdict(verdict, f"step budget ({max_steps}) spent without a conclusion", ran=ran, trail=trail)

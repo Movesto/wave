@@ -181,6 +181,29 @@ def cmd_detect(args):
             print(f"  - [{r['class']}] {r['file']}:{r['line']}  — {r['reason'][:80]}")
 
 
+def cmd_prove(args):
+    from pathlib import Path
+
+    from . import prove
+    from .model import Model
+    out_dir = str(Path(args.candidates).parent) if args.candidates else args.target
+    model = Model()
+    by, paths = prove.run(model, args.target, candidates_path=args.candidates, budget=args.budget,
+                          out_dir=out_dir, gate=not args.no_reach_gate)
+    conf, anom, refu = by["confirmed"], by["anomalous_state"], by["refuted"]
+    blk, bel = by["blocked"], by["believed"]
+    print(f"\nPROOF LOOP: {len(conf)} confirmed, {len(anom)} anomalous-state, {len(refu)} refuted, "
+          f"{len(blk)} blocked, {len(bel)} believed")
+    print(f"findings -> {paths['findings']}   casefile -> {paths['casefile']}")
+    for d in conf:
+        print(f"  [CONFIRMED {d.get('cwe')}] {d['file']}:{d['line']}  {d.get('unit', '')}  "
+              f"-- {(d.get('evidence') or d.get('why', ''))[:80]}")
+    for d in anom:
+        print(f"  [ANOMALOUS {d.get('cwe')}] {d['file']}:{d['line']}  -- {d.get('why', '')[:80]}")
+    for d in blk:
+        print(f"  [BLOCKED   {d.get('cwe')}] {d['file']}:{d['line']}  -- {d.get('why', '')[:80]}")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="orchestrator")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -245,6 +268,17 @@ def main():
     dt.add_argument("--budget", type=int, default=40, metavar="N",
                     help="max findings to falsify this run (severity+confidence order; resumable)")
     dt.set_defaults(func=cmd_detect)
+
+    pr = sub.add_parser("prove", help="Stage 3: run the detector's survivors through the confirmation ladder")
+    pr.add_argument("target")
+    pr.add_argument("--candidates", default=None,
+                    help="path to wave_candidates.jsonl (default <target>/wave_candidates.jsonl)")
+    pr.add_argument("--budget", type=int, default=20, metavar="N",
+                    help="max candidates to prove this run (severity order; resumable)")
+    pr.add_argument("--no-reach-gate", action="store_true",
+                    help="disable the reachability gate (which downgrades a confirmed sink to "
+                         "anomalous_state/human-review when no untrusted-input path reaches it)")
+    pr.set_defaults(func=cmd_prove)
 
     args = ap.parse_args()
     args.func(args)

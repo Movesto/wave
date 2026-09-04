@@ -25,7 +25,10 @@ from itertools import count
 KINDS = ("file_summary", "route", "dataflow_edge", "entity", "control",
          "hypothesis", "evidence", "confirmation", "blocked")
 SOURCES = ("seed", "tool", "model", "oracle")
-STATUSES = ("believed", "confirmed", "refuted", "blocked")
+# anomalous_state: an OBSERVED state change (business-logic / IDOR) the model argues is a violation --
+# kept DISTINCT from a tool-witnessed injection `confirmed`, because "is this state bad or intended?" is a
+# judgment no tool can make automatically (wave_architecture_plan.md, Stage 3 review-adopted).
+STATUSES = ("believed", "confirmed", "refuted", "blocked", "anomalous_state")
 
 
 @dataclass
@@ -139,7 +142,9 @@ class CaseFile:
                  ""]
         for status, header, kinds in (
             ("confirmed", "CONFIRMED (findings)", ("confirmation",)),
-            ("blocked", "BLOCKED (needs an artifact)", ("blocked", "hypothesis")),
+            ("anomalous_state", "ANOMALOUS STATE (human-reviewable -- observed effect, not a witnessed injection)",
+             ("confirmation", "hypothesis")),
+            ("blocked", "BLOCKED (needs an artifact / under-provisioned)", ("blocked", "hypothesis", "confirmation")),
             ("believed", "OPEN HYPOTHESES (not yet confirmed)", ("hypothesis",)),
             ("refuted", "REFUTED (cleared as safe)", ("hypothesis", "confirmation")),
         ):

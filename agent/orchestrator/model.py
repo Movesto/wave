@@ -119,10 +119,50 @@ class Model:
 
     def chat(self, messages, tools=None, temperature=0.2, max_tokens=None):
         """Native chat, optionally with tools -> the assistant message dict (content + tool_calls).
-        Requires an API backend (WAVE_API_BASE); local transformers models use generate() instead."""
+        Requires an API backend (WAVE_API_BASE); local transformers models use generate() instead.
+        LOCAL ollama routes to the NATIVE /api/chat endpoint (honors options.num_ctx=16384); the /v1
+        OpenAI-compat endpoint IGNORES num_ctx and caps context at 4096, so a multi-turn tool-use loop
+        500s once its history grows past ~4096 tokens."""
         if not self.api_base:
             raise RuntimeError("Model.chat(tools=...) needs an API backend -- set WAVE_API_BASE")
+        if self._is_local_api:
+            return self._ollama_native_chat(messages, tools=tools, temperature=temperature,
+                                            max_tokens=max_tokens)
         return self._api_chat(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
+
+    def _ollama_native_chat(self, messages, tools=None, temperature=0.2, max_tokens=None, timeout=300):
+        """Local ollama TOOL-CALLING via the NATIVE /api/chat endpoint. Same reason generate() uses it:
+        /v1 silently caps context at 4096 (ignores options.num_ctx) -> a growing tool-use conversation
+        overruns it and the server 500s. /api/chat honors num_ctx. Returns the assistant message dict
+        {content, tool_calls}; native tool_calls carry `arguments` as a DICT (not a JSON string) and no
+        id -- we synthesize an id; the investigate loop accepts dict-or-string arguments."""
+        import secrets as _secrets
+        import time
+
+        import requests
+        root = self.api_base.rstrip("/")
+        if root.endswith("/v1"):
+            root = root[:-3]
+        opts = {"num_ctx": self.num_ctx, "temperature": temperature}
+        if max_tokens:
+            opts["num_predict"] = max_tokens
+        body = {"model": self.model_id, "messages": messages, "stream": False, "options": opts}
+        if tools:
+            body["tools"] = tools
+        url = root.rstrip("/") + "/api/chat"
+        last = None
+        for attempt in range(3):
+            try:
+                r = requests.post(url, json=body, timeout=timeout)
+                r.raise_for_status()
+                msg = r.json().get("message", {}) or {}
+                for tc in msg.get("tool_calls") or []:          # native tool_calls have no id -> synthesize
+                    tc.setdefault("id", "call_" + _secrets.token_hex(4))
+                return msg
+            except Exception as e:                              # transient 500 / timeout -> retry
+                last = e
+                time.sleep(2 * (attempt + 1))
+        raise last
 
     def _ollama_native(self, system, user, max_tokens=None, temperature=0.2, think=None, json_mode=False,
                        timeout=300):

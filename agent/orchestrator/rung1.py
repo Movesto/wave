@@ -64,6 +64,10 @@ class _Tripwire:
     def path(self, p):
         self.hits.append(("path", str(p), ""))
 
+    def cmd(self, command, shell=False):
+        # meta = "shell" (string run through a shell -> injectable) vs "list" (argv, separated -> not shell-inj)
+        self.hits.append(("cmd", str(command), "shell" if shell else "list"))
+
 
 class _FakeResult:
     def fetchone(self): return None
@@ -201,6 +205,49 @@ def _tripwires(tw):
         applied.append("urllib")
     except Exception:
         pass
+    # OS-command sinks (CWE-78) -> record the command + whether it hits a SHELL (injectable) vs an argv list.
+    # os.system is always a shell; subprocess honors shell=. Record, then DON'T execute (return/raise).
+    try:
+        import os as _os
+
+        def _system(command):
+            tw.cmd(command, shell=True)
+            return 0                                       # never actually run the (marked) command
+        patch(_os, "system", _system)
+
+        def _popen(command, *a, **k):
+            tw.cmd(command, shell=True)
+            raise RuntimeError("wave-rung1: os.popen stubbed after recording")
+        patch(_os, "popen", _popen)
+        applied.append("os.system")
+    except Exception:
+        pass
+    try:
+        import subprocess as _sp
+
+        def _sp_stub(*a, **k):
+            cmd = a[0] if a else (k.get("args") or "")
+            tw.cmd(cmd, shell=bool(k.get("shell", False)))
+            raise RuntimeError("wave-rung1: subprocess stubbed after recording")
+        for _fn in ("run", "call", "check_call", "check_output", "Popen"):
+            patch(_sp, _fn, _sp_stub)
+        applied.append("subprocess")
+    except Exception:
+        pass
+    # File-open sink (CWE-22) -> record the path, then call the REAL open (safe: patching open globally would
+    # break the target's own import-time file reads; the marker path won't exist so real open just raises).
+    try:
+        import builtins as _bi
+        _real_open = _bi.open
+
+        def _open_rec(file, *a, **k):
+            with contextlib.suppress(Exception):
+                tw.path(file)
+            return _real_open(file, *a, **k)
+        patch(_bi, "open", _open_rec)
+        applied.append("open")
+    except Exception:
+        pass
     tw._stubs = applied
     try:
         yield
@@ -264,11 +311,22 @@ def _verdict_from_hits(hits, marker, cwe):
                 host = ""
             if marker.lower() in host.lower():
                 return ("proven", f"marker controls the outbound HOST: {text[:160]}")
-        if kind == "path" and marker in text and ("../" in text or text.strip().startswith("/")):
-            return ("proven", f"marker reached a file path with traversal: {text[:160]}")
+        # command injection requires the marker to reach a SHELL command string (os.system / shell=True);
+        # a marker that lands as a separated argv element (shell=False) is NOT shell-injectable.
+        if kind == "cmd" and marker in text and params == "shell":
+            return ("proven", f"marker reached a shell command (injectable): {text[:160]}")
+        # path traversal: the ../ must SURVIVE to the open() call (the traversal payload was not sanitized).
+        if kind == "path" and marker in text and "../" in text:
+            return ("proven", f"marker reached a file path with traversal intact: {text[:160]}")
     # marker only in params (parameterized) -> safe, if a SQL sink was hit at all
     if cwe == "CWE-89" and any(k == "sql" and marker in (p or "") for k, t, p in hits):
         return ("safe", "marker reached the SQL sink only as a bound parameter (parameterized)")
+    # command reached only as a separated argv element -> not shell-injectable
+    if cwe == "CWE-78" and any(k == "cmd" and marker in t and m == "list" for k, t, m in hits):
+        return ("safe", "marker reached the command only as a separated argv element (no shell)")
+    # path reached but the traversal was neutralized (no ../ survived to the open call)
+    if cwe == "CWE-22" and any(k == "path" and marker in t and "../" not in t for k, t, m in hits):
+        return ("safe", "marker reached the file path but the traversal was neutralized (no ../ survived)")
     return ("unknown", f"no sink reached with the marker in an unsafe position ({len(hits)} sink hit(s))")
 
 
@@ -282,11 +340,15 @@ def _observe(obs, marker, cwe) -> MicroResult:
 
 
 def _payload(cwe):
-    """(arg value, search marker). For SSRF the value is HOST-SHAPED so a genuine URL argument controls
-    the outbound HOST (real SSRF); a value that only lands in a path segment won't match the host."""
+    """(arg value, search marker). SSRF -> HOST-SHAPED so a genuine URL argument controls the outbound HOST
+    (a value that only lands in a path segment won't match the host). PATH -> carries `../` so an unsanitized
+    open() shows the traversal at the sink (a sanitizer that strips `../` leaves the bare marker -> safe).
+    cmd/sqli -> a plain marker; the observer decides by WHERE it lands (shell string / SQL statement)."""
     token = secrets.token_hex(4)
     if cwe == "CWE-918":
         return f"http://wz{token}.wave.test/", f"wz{token}.wave.test"
+    if cwe == "CWE-22":
+        return f"../../../wz{token}", f"wz{token}"
     return "WZ" + token, "WZ" + token
 
 
@@ -380,6 +442,29 @@ try:
     import urllib.request as _ur
     def _uo(url=None, *a, **k): _http(getattr(url,"full_url",url) or ""); raise RuntimeError("stub")
     _ur.urlopen = _uo
+except Exception: pass
+def _cmd(c, shell): _HITS.append(("cmd", str(c), "shell" if shell else "list"))
+def _path(p): _HITS.append(("path", str(p), ""))
+try:
+    import os as _os0
+    def _sys0(command): _cmd(command, True); return 0
+    _os0.system = _sys0
+    def _pop0(command, *a, **k): _cmd(command, True); raise RuntimeError("stub")
+    _os0.popen = _pop0
+except Exception: pass
+try:
+    import subprocess as _sp0
+    def _sps(*a, **k): _cmd(a[0] if a else (k.get("args") or ""), bool(k.get("shell", False))); raise RuntimeError("stub")
+    for _fn in ("run","call","check_call","check_output","Popen"): setattr(_sp0, _fn, _sps)
+except Exception: pass
+try:
+    import builtins as _bi0
+    _ro = _bi0.open
+    def _op(file, *a, **k):
+        try: _path(file)
+        except Exception: pass
+        return _ro(file, *a, **k)
+    _bi0.open = _op
 except Exception: pass
 for _mod in ("pymysql", "MySQLdb"):
     try:

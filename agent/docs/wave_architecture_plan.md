@@ -350,6 +350,7 @@ re-fire + differential regression) remains for the whole-app loop.
 | **Stage 3 driver — survivors → confirmation ladder** | ✅ Built (`prove.py`), verified (oh-my-pi grounded confirms) |
 | Stage 3 canary — rung1 tripwires cmd/path (+ SQL/SSRF) | ✅ Built (`rung1.py`), deterministic proven/refuted |
 | **Reachability gate — confirmed→human-review if no untrusted path** | ✅ Built (`reachability.py`), verified |
+| **Context gate — suppress server-side classes in frontend/browser code** | ✅ Built (`reachability.is_frontend`), verified on Teach |
 | Stage 3 escalation handler (`blocked: under-provisioned`) | ✅ Built (`investigate.py`) — [review-adopted] |
 | `anomalous_state: human-reviewable` verdict status | ✅ Built (`recorder.py` + `investigate.py`) — [review-adopted] |
 | Context discipline: file logs + `grep_output`/`tail_output` | ✅ Built (`investigate.py`) — [review-adopted] |

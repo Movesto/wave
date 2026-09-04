@@ -12,7 +12,41 @@ Honest limits: this is FUNCTION-level reachability over codemap's name-matched c
 taint (whether the specific tainted argument flows to the sink) -- the architecture's open §10.4. It is a
 coarse precision gate, not a soundness proof; the safe direction on uncertainty is human-review, not silence.
 """
+import re
 from collections import deque
+
+# --- Execution-context gate: server-side sink classes cannot occur in BROWSER/frontend code. A client-side
+# `fetch(url)` is not server-side SSRF; browser code has no SQL, filesystem, or shell. So a server-only sink
+# proven in frontend code is a mislabel, not a vuln (the client/server analogue of the reachability gate). ---
+
+# server-side classes that make no sense in the browser (xss + redirect DO occur client-side, so not here)
+SERVER_ONLY_CLASSES = {"ssrf", "sqli", "nosqli", "cmd", "path", "deser"}
+SERVER_ONLY_CWE = {"CWE-918", "CWE-89", "CWE-943", "CWE-78", "CWE-22", "CWE-502", "CWE-95"}
+
+# browser-only globals -- their presence in the source is a reliable "this runs in a browser" signal (Node
+# has no window/document/localStorage), and catches a plain .js util that no path/suffix rule would.
+_BROWSER_SIGNAL = re.compile(r"\bwindow\.|\bdocument\.|\blocalStorage\b|\bsessionStorage\b|\bnavigator\.|"
+                             r"import\.meta\.env|\baddEventListener\s*\(|\bdispatchEvent\s*\(")
+_FRONTEND_IMPORT = re.compile(r"\b(react|next|vue|svelte|@angular|solid-js|preact|@remix-run|react-router)\b", re.I)
+# only UNAMBIGUOUS frontend dirs -- "components"/"pages"/"views" also occur server-side (MVC templates),
+# and misclassifying a backend file there would SUPPRESS a real vuln (the dangerous direction); the
+# browser-global signal + JSX + framework-import catch real frontend robustly without them.
+_FRONTEND_DIRS = {"frontend", "client", "public", "webapp", "www"}
+
+
+def is_frontend(path, source="", imports=()):
+    """Best-effort: does this file run in the BROWSER (not the server)? JSX suffix, a frontend directory, a
+    frontend-framework import, or a browser-only global in the source. Python is virtually never frontend."""
+    p = str(path).replace("\\", "/").lower()
+    if p.rsplit(".", 1)[-1] in ("tsx", "jsx"):
+        return True
+    if p.endswith(".py"):                                   # server language -- never browser code
+        return False
+    if set(p.split("/")) & _FRONTEND_DIRS:
+        return True
+    if any(_FRONTEND_IMPORT.search(str(i)) for i in (imports or ())):
+        return True
+    return bool(source and _BROWSER_SIGNAL.search(source))
 
 # decorator / name signals that a function receives external, attacker-controllable input DIRECTLY
 _ROUTE_HINTS = ("route", ".get(", ".post(", ".put(", ".delete(", ".patch(", "app.", "router.", "blueprint",

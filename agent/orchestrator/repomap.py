@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import codemap, eyes
+from . import codemap, eyes, reachability
 
 # --- Routes (entry points untrusted input arrives through) --------------------------------------------
 _ROUTE = re.compile(
@@ -221,13 +221,12 @@ def scan_pins(finfo):
     (line, label, code). Sink pins are hints, not verdicts."""
     routes, sinks, dyn = [], [], []
     sink_tbl = _lang_sinks(finfo.lang)
-    # Client-side code's fetch() is a browser call, not server-side SSRF. Recognize it by: JSX component
-    # (.tsx/.jsx), a React/Next import, or living under a frontend/client/public tree.
-    _p = finfo.path.replace("\\", "/").lower()
-    is_client = (Path(finfo.path).suffix.lower() in (".tsx", ".jsx")
-                 or bool(set(_p.split("/")) & {"frontend", "client", "public"})
-                 or any(("react" in i.lower() or "next" in i.lower()) for i in finfo.imports))
-    for i, raw in enumerate(_read_lines(finfo.path), 1):
+    # Browser/frontend code cannot host a SERVER-SIDE sink: a client-side fetch() is not SSRF, and there is
+    # no SQL / filesystem / shell in the browser. Detect the context (JSX, a frontend dir, a frontend-import,
+    # or a browser-only global in the source) and suppress the server-only classes there (xss/redirect stay).
+    src_lines = list(_read_lines(finfo.path))
+    is_client = reachability.is_frontend(finfo.path, source="\n".join(src_lines), imports=finfo.imports)
+    for i, raw in enumerate(src_lines, 1):
         s = _strip_comment(raw)
         code = raw.strip()[:160]
         if _ROUTE.search(s):
@@ -237,7 +236,7 @@ def scan_pins(finfo):
         matched = False
         for label, rx in sink_tbl:
             if rx.search(s):
-                if not (label == "ssrf" and is_client):    # client-side fetch is not server SSRF
+                if not (is_client and label in reachability.SERVER_ONLY_CLASSES):
                     sinks.append((i, label, code))
                 matched = True
                 break

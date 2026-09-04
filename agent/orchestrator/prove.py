@@ -160,11 +160,26 @@ def _record_outcome(case, hyp_id, c, rec):
 
 
 def _apply_gate(rec, c, cmap):
-    """Reachability gate: a `confirmed` sink with no untrusted-input path -> `anomalous_state` (human-review).
-    Never drops the finding; only re-categorizes. Annotates every confirmed/anomalous rec with the path."""
+    """Context + reachability gates on a `confirmed` sink (never drops -- only re-categorizes to
+    `anomalous_state`/human-review):
+      (1) CONTEXT: a server-side class proven in FRONTEND/browser code is a mislabel (a browser fetch is not
+          server-side SSRF; the browser has no SQL/fs/shell).
+      (2) REACHABILITY: no path from an untrusted-facing entry reaches the sink -> may be internal/intended."""
     if rec.get("verdict") != "confirmed":
         return rec
-    reachable, note = reachability.gate(cmap, c.unit)
+    if c.cwe in reachability.SERVER_ONLY_CWE:                # (1) execution-context gate
+        try:
+            src = Path(c.file).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            src = ""
+        if reachability.is_frontend(c.file, source=src):
+            rec["verdict"] = "anomalous_state"
+            rec["context"] = "frontend/browser code"
+            rec["why"] = (f"[context] this sink is in FRONTEND/browser code -- not server-side {c.cwe} "
+                          f"(the browser makes this call); review as a client-side concern if any. "
+                          + rec.get("why", ""))
+            return rec
+    reachable, note = reachability.gate(cmap, c.unit)        # (2) reachability gate
     rec["reachability"] = note
     if not reachable:
         rec["verdict"] = "anomalous_state"

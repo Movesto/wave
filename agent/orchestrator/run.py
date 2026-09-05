@@ -189,7 +189,7 @@ def cmd_prove(args):
     out_dir = str(Path(args.candidates).parent) if args.candidates else args.target
     model = Model()
     by, paths = prove.run(model, args.target, candidates_path=args.candidates, budget=args.budget,
-                          out_dir=out_dir, gate=not args.no_reach_gate)
+                          out_dir=out_dir, gate=not args.no_reach_gate, online=args.online)
     conf, anom, refu = by["confirmed"], by["anomalous_state"], by["refuted"]
     blk, bel = by["blocked"], by["believed"]
     print(f"\nPROOF LOOP: {len(conf)} confirmed, {len(anom)} anomalous-state, {len(refu)} refuted, "
@@ -257,7 +257,7 @@ def cmd_all(args):
         return
 
     # Stage 3 -- confirmation ladder (+ reachability gate)
-    by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate)
+    by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online)
     print(f"[all] prove: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
           f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
 
@@ -354,6 +354,9 @@ def main():
     pr.add_argument("--no-reach-gate", action="store_true",
                     help="disable the reachability gate (which downgrades a confirmed sink to "
                          "anomalous_state/human-review when no untrusted-input path reaches it)")
+    pr.add_argument("--online", action="store_true",
+                    help="give the model opt-in web_search / web_read tools (the box is otherwise fully "
+                         "local; sends queries off-box only when the model is unsure about an API/service)")
     pr.set_defaults(func=cmd_prove)
 
     pt = sub.add_parser("patch", help="Stage 4: patch each confirmed finding + reverify with the same proof")
@@ -376,6 +379,7 @@ def main():
     al.add_argument("--patch-budget", type=int, default=8, metavar="N", help="confirmed findings to patch")
     al.add_argument("--write", action="store_true", help="keep patches that pass both gates (with --patch)")
     al.add_argument("--no-reach-gate", action="store_true", help="disable the reachability gate in prove")
+    al.add_argument("--online", action="store_true", help="give the model opt-in web_search/web_read (egress)")
     al.add_argument("--interactive", action="store_true", help="steer the notebook's target selection")
     al.set_defaults(func=cmd_all)
 

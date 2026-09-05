@@ -225,12 +225,34 @@ _TAIL_TOOL = {"type": "function", "function": {
         "lines": {"type": "integer", "description": "how many trailing lines (default 20)"},
     }, "required": []}}}
 
+# --- opt-in web tools (only added when online=True): the model's eyes on the world for an unfamiliar API,
+# library, or third-party service (AWS, etc.) it must understand to judge a flow. Context only, never proof.
+_WEB_SEARCH_TOOL = {"type": "function", "function": {
+    "name": "web_search",
+    "description": "Search the web for an unfamiliar API / library / framework / service you must understand "
+                   "to judge this code. Returns ranked title/URL/snippet lines. Context only -- it never "
+                   "proves a vuln; only a run_command observation can.",
+    "parameters": {"type": "object", "properties": {
+        "query": {"type": "string", "description": "the search query"},
+    }, "required": ["query"]}}}
 
-def _investigate_native(model, brief, *, image, mount, container, network, max_steps, step_timeout):
+_WEB_READ_TOOL = {"type": "function", "function": {
+    "name": "web_read",
+    "description": "Read ONE web page deeply (clean text/markdown) -- e.g. a docs or advisory URL from "
+                   "web_search -- when a snippet isn't enough to understand an API/service. Context only.",
+    "parameters": {"type": "object", "properties": {
+        "url": {"type": "string", "description": "the http(s) URL to read"},
+    }, "required": ["url"]}}}
+
+
+def _investigate_native(model, brief, *, image, mount, container, network, max_steps, step_timeout,
+                        online=False):
     """Tool-calling loop over the model's NATIVE tools interface (structured tool_calls)."""
     import json as _json
     messages = [{"role": "system", "content": _NATIVE_SYS}, {"role": "user", "content": brief}]
     tools = [_RUN_TOOL, _GREP_TOOL, _TAIL_TOOL, _CONCLUDE_TOOL]
+    if online:                                              # opt-in egress: the model's eyes on the world
+        tools += [_WEB_SEARCH_TOOL, _WEB_READ_TOOL]
     trail, ran = [], 0
     run_log = ""                                            # the LAST run's full output (grep/tail read it)
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
@@ -267,6 +289,16 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 continue
             if name == "tail_output":
                 content = _tail(run_log, int(args.get("lines") or 20))
+                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
+                continue
+            if name in ("web_search", "web_read"):          # opt-in egress; degrades to '' on any failure
+                from . import search
+                if name == "web_search":
+                    out = search.web_search(str(args.get("query", "")))
+                else:
+                    out = search.web_read(str(args.get("url", "")))
+                content = out or "(no result / offline -- proceed on what you already know)"
+                print(f"[investigate:native] {name} -> {len(out)} chars", flush=True)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
                 continue
             cmd = str(args.get("command", "")).strip()      # run_command
@@ -337,14 +369,16 @@ def _render(trail, limit=1500):
 
 
 def investigate(model, brief, *, image="python:3.12-slim", mount=None, container=None,
-                network="none", max_steps=6, step_timeout=60, max_new_tokens=2000) -> Verdict:
+                network="none", max_steps=6, step_timeout=60, max_new_tokens=2000, online=False) -> Verdict:
     """Let the model investigate `brief` (a hypothesis + the relevant code) by running commands in a
     sandbox, until it concludes or the step budget is spent. `mount` binds the target dir into the box;
-    `container` runs inside the app's own container instead. A tool-calling model (WAVE_API_BASE) drives
-    the NATIVE tools loop; a local text model uses the JSON-action protocol below."""
+    `container` runs inside the app's own container instead. `online=True` adds the opt-in web_search /
+    web_read tools (the box is otherwise fully local). A tool-calling model (WAVE_API_BASE) drives the
+    NATIVE tools loop; a local text model uses the JSON-action protocol below."""
     if getattr(model, "supports_tools", False):
         return _investigate_native(model, brief, image=image, mount=mount, container=container,
-                                   network=network, max_steps=max_steps, step_timeout=step_timeout)
+                                   network=network, max_steps=max_steps, step_timeout=step_timeout,
+                                   online=online)
     trail = []
     ran = 0
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution

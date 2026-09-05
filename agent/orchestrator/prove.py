@@ -107,7 +107,7 @@ def _subj(c):
     return f"{c.cwe or c.family} {c.loc()}"
 
 
-def _prove_one(model, target, c, have_docker, max_steps):
+def _prove_one(model, target, c, have_docker, max_steps, online=False):
     """Run ONE candidate through the ladder -> a verdict record dict."""
     tstatus, tnote = taint.analyze(c)                        # intra-function value taint (Python; else unknown)
     reason = "not a canary-provable Python handler"
@@ -140,9 +140,11 @@ def _prove_one(model, target, c, have_docker, max_steps):
             img = js_env.prepare(target) or img
     step_to = 120 if mode == "render" else (90 if briefs._is_js(c.file) else 45)
     try:
+        # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
+        # controlled egress point when online, not blanket container network access.
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode),
                                image=img, mount=target, network="none", max_steps=max_steps,
-                               step_timeout=step_to)
+                               step_timeout=step_to, online=online)
     finally:
         repro.remove(target)
     return {"verdict": v.verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
@@ -207,7 +209,8 @@ def _apply_gate(rec, c, cmap):
     return rec
 
 
-def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=True, max_steps=8, gate=True):
+def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=True, max_steps=8, gate=True,
+        online=False):
     """Prove the detector's survivors (severity order, up to `budget`). Writes per-candidate verdicts to
     wave_findings.jsonl (resumable) + casefile.json. Returns (by_verdict, paths)."""
     target = str(target)
@@ -252,7 +255,7 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
                   f"({c.unit or 'no-func'}) ...", flush=True)
             hyp_id = case.record("hypothesis", _subj(c), "seed", "believed", provenance=c.loc(),
                                  cwe=c.cwe, family=c.family).id
-            rec = _prove_one(model, target, c, have_docker, max_steps)
+            rec = _prove_one(model, target, c, have_docker, max_steps, online=online)
             if gate:                                        # untrusted-reachability gate on confirmations
                 rec = _apply_gate(rec, c, cmap)
             _record_outcome(case, hyp_id, c, rec)

@@ -23,7 +23,7 @@ import json
 import shutil
 from pathlib import Path
 
-from . import briefs, codemap, reachability, recorder, repro, rung1
+from . import briefs, codemap, reachability, recorder, repro, rung1, taint
 from . import investigate as invmod
 from .models import Candidate
 
@@ -109,22 +109,25 @@ def _subj(c):
 
 def _prove_one(model, target, c, have_docker, max_steps):
     """Run ONE candidate through the ladder -> a verdict record dict."""
+    tstatus, tnote = taint.analyze(c)                        # intra-function value taint (Python; else unknown)
     reason = "not a canary-provable Python handler"
     if c.provable:
         mr = rung1.micro_exec(c, rt=None)                    # cheap in-process canary (no boot, no model)
         if mr.verdict == "proven":
             return {"verdict": "confirmed", "evidence": mr.evidence, "why": mr.reason, "ran": 0,
-                    "oracle": f"rung1 micro-exec (stubs={mr.stubs})", "marker": mr.marker}
+                    "oracle": f"rung1 micro-exec (stubs={mr.stubs})", "marker": mr.marker, "taint": tstatus}
         if mr.verdict == "safe":
             return {"verdict": "refuted", "evidence": "", "why": mr.reason, "ran": 0,
-                    "oracle": "rung1 micro-exec"}
+                    "oracle": "rung1 micro-exec", "taint": tstatus}
         reason = mr.reason                                   # unknown -> hand to the model prover
     if not have_docker:
-        return {"verdict": "believed", "evidence": "", "ran": 0, "oracle": "",
+        return {"verdict": "believed", "evidence": "", "ran": 0, "oracle": "", "taint": tstatus,
                 "why": f"docker unavailable -- canary unsettled ({reason})"}
     if model is None:
-        return {"verdict": "believed", "evidence": "", "ran": 0, "oracle": "",
+        return {"verdict": "believed", "evidence": "", "ran": 0, "oracle": "", "taint": tstatus,
                 "why": f"no model to investigate -- canary unsettled ({reason})"}
+    if tnote:                                                # resolve the slice for the model (structure, its job)
+        reason = f"{reason} | value-taint: {tstatus} -- {tnote}"
     mode = briefs._proof_mode(c)                             # sanitizer/ssti/protopoll/deser/render/call
     scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"))
     img = briefs._image_for(c.file)
@@ -143,7 +146,7 @@ def _prove_one(model, target, c, have_docker, max_steps):
     finally:
         repro.remove(target)
     return {"verdict": v.verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
-            "oracle": f"investigate ({v.ran} run(s))", "ran": v.ran}
+            "oracle": f"investigate ({v.ran} run(s))", "ran": v.ran, "taint": tstatus}
 
 
 def _record_outcome(case, hyp_id, c, rec):
@@ -187,7 +190,16 @@ def _apply_gate(rec, c, cmap):
                           f"(the browser makes this call); review as a client-side concern if any. "
                           + rec.get("why", ""))
             return rec
-    reachable, note = reachability.gate(cmap, c.unit)        # (2) reachability gate
+    # (2) value-taint gate: a MODEL-confirmed sink whose args don't derive from untrusted input in this
+    # function is likely a mislabel (the eval-runner shape). Conservative: only 'unrelated' (never the
+    # cross-function 'unknown'), and NEVER override a canary -- that dynamically WITNESSED the value at the
+    # sink, so it is ground truth over this static heuristic.
+    if rec.get("taint") == "unrelated" and str(rec.get("oracle", "")).startswith("investigate"):
+        rec["verdict"] = "anomalous_state"
+        rec["why"] = ("[value-taint] the sink arguments do not derive from untrusted input in this function "
+                      "-- likely a mislabel; human review. " + rec.get("why", ""))
+        return rec
+    reachable, note = reachability.gate(cmap, c.unit)        # (3) reachability gate
     rec["reachability"] = note
     if not reachable:
         rec["verdict"] = "anomalous_state"

@@ -12,6 +12,7 @@ Returns a RunningTarget the exploit/oracle stages drive. Deterministic; no model
 import re
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -456,7 +457,61 @@ def prepare(target, host_port=None):
     return rt, files, prof
 
 
-def provision(target, host_port=None, timeout=300) -> RunningTarget:
+# common liveness paths -- an app that 404s on `/` but serves `/health` or `/docs` is UP, not dead.
+_HEALTH_PATHS = ("/", "/health", "/healthz", "/ping", "/status", "/api", "/api/health", "/docs",
+                 "/login", "/index.html")
+
+
+def _probe(base_url, timeout=4):
+    """Is the SERVER accepting HTTP? Any HTTP response -- INCLUDING 401/403/404/500 -- means it is up and
+    serving (the crux fix: a 404 on `/` is a LIVE server, not a dead one). Only a refused connection /
+    timeout / DNS failure means it is not up yet. Tries several common paths."""
+    for path in _HEALTH_PATHS:
+        try:
+            with urllib.request.urlopen(base_url + path, timeout=timeout) as r:
+                return True, r.status                       # 2xx/3xx -> definitely up
+        except urllib.error.HTTPError as e:
+            return True, e.code                             # 4xx/5xx -> the server RESPONDED, so it is up
+        except Exception:
+            continue                                        # refused/timeout on this path -> try the next
+    return False, 0
+
+
+def _service_exited(rt):
+    """True if the app service has already EXITED (crashed) -- so we stop waiting the full window."""
+    try:
+        r = rt._compose("ps", "-a", "--status", "exited", "--services")
+        return rt.service in (r.stdout or "").split()
+    except Exception:
+        return False
+
+
+_FAIL_SIGNS = (
+    ("missing dependency", ("modulenotfounderror", "no module named", "importerror", "cannot find module",
+                            "err_module_not_found")),
+    ("port clash", ("address already in use", "port is already allocated", "bind: address already in use")),
+    ("database not ready", ("could not connect to server", "connection refused", "econnrefused",
+                            "server closed the connection", "getaddrinfo")),
+    ("crash on startup", ("traceback (most recent call last)", "panic:", "segmentation fault",
+                          "unhandledpromiserejection", "fatal error")),
+    ("build error", ("failed to solve", "returned a non-zero code", "npm err!", "error: pull access denied")),
+)
+
+
+def _classify_failure(logs):
+    """Best-effort reason from the container logs -> feeds an actionable `blocked: <reason>` + escalation."""
+    low = (logs or "").lower()
+    for reason, needles in _FAIL_SIGNS:
+        if any(n in low for n in needles):
+            return reason
+    return "did not become healthy (unknown -- slow start, wrong entrypoint, or no HTTP listener)"
+
+
+def provision(target, host_port=None, timeout=600, health_window=180) -> RunningTarget:
+    """Build + boot the app and health-gate it. `timeout` bounds the build/up (raised to 600s so a large
+    monorepo can finish building); `health_window` bounds the readiness poll. On failure, raises with the
+    CLASSIFIED reason + a log tail (so the caller records a specific `blocked: <reason>` and the user sees
+    why) instead of a generic message."""
     rt, files, prof = prepare(target, host_port)
     hooks = prof.drivers
     print(f"[provision] building+booting {prof.framework}/{prof.lang} via {len(files)} compose file(s); "
@@ -465,27 +520,43 @@ def provision(target, host_port=None, timeout=300) -> RunningTarget:
     for f in files:
         cmd += ["-f", f]
     cmd += ["up", "-d", "--build"]
-    subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                   timeout=timeout, env=compose_env())
-
-    for _ in range(40):                        # bounded (~2 min for a dead app; healthy apps pass in seconds)
+    try:
+        up = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                            timeout=timeout, env=compose_env())
+    except subprocess.TimeoutExpired:
         try:
-            with urllib.request.urlopen(rt.base_url + "/", timeout=4) as r:
-                if r.status < 500:
-                    rt.healthy = True
-                    break
-        except Exception:
-            pass
-        time.sleep(3)
-    print(f"[provision] {'up' if rt.healthy else 'NOT healthy'} at {rt.base_url} "
-          f"(instrumented: {hooks})", flush=True)
-    if not rt.healthy:                         # RAISE (don't return a dead target) -> the loop's non-fatal
-        try:                                   # path records `blocked` and keeps the static (Rung 0) verdicts
             rt.down()
         except Exception:
             pass
-        raise RuntimeError(
-            f"app did not become healthy at {rt.base_url} within the boot window "
-            f"({prof.framework}/{prof.lang}); likely a missing dependency (DB/service), a wrong "
-            f"entrypoint, or a crash on startup -- provisioning is a Rung-2 concern, static verdicts stand")
-    return rt
+        raise RuntimeError(f"provision: build/boot exceeded {timeout}s (a large repo -- raise timeout, or the "
+                           f"build is stuck); provisioning is a Rung-2 concern, static verdicts stand")
+    if up.returncode != 0:                     # `up --build` failed outright (build error / bad compose)
+        reason = _classify_failure((up.stdout or "") + (up.stderr or ""))
+        tail = ((up.stderr or "") + (up.stdout or "")).strip()[-500:]
+        try:
+            rt.down()
+        except Exception:
+            pass
+        raise RuntimeError(f"provision: compose up failed ({reason}). --- log tail ---\n{tail}")
+
+    deadline = time.time() + health_window
+    while time.time() < deadline:
+        up_now, status = _probe(rt.base_url)
+        if up_now:
+            rt.healthy = True
+            print(f"[provision] up at {rt.base_url} (HTTP {status}; instrumented: {hooks})", flush=True)
+            return rt
+        if _service_exited(rt):                # crashed -> don't wait the whole window
+            break
+        time.sleep(3)
+
+    logs = rt.logs()                           # NOT healthy -> capture WHY, classify, raise actionably
+    reason = _classify_failure(logs)
+    tail = logs.strip()[-500:]
+    try:
+        rt.down()
+    except Exception:
+        pass
+    print(f"[provision] NOT healthy at {rt.base_url} -- {reason}", flush=True)
+    raise RuntimeError(f"provision: app not healthy at {rt.base_url} -- {reason} "
+                       f"({prof.framework}/{prof.lang}). --- log tail ---\n{tail}")

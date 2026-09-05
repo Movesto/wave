@@ -32,15 +32,48 @@ up a minimal app around the concern."** The model extracts *only the code under 
 tiny synthetic app around it, seeds a fake in-memory store with two identities' data, drives the flow as each
 identity, and diffs the result. The repo never runs as a whole; only the slice runs, inside a scaffold.
 
-| | Synthetic micro-harness (PRIMARY) | Whole-app boot (FALLBACK) |
-|---|---|---|
-| Needs the repo to boot? | No | Yes |
-| Works on any repo? | Yes | Only bootable ones |
-| Provisioning cost | seconds | minutes; often fails |
-| Best for | isolated logic (IDOR on a handler, price tampering) | flows spanning the real middleware/routing |
+**There are THREE tiers, climb only as high as the vuln needs:**
+
+| Tier | What runs | Reaches | Best for |
+|---|---|---|---|
+| **1. Function harness** | one function + fake store, in-process | seconds | logic / IDOR in a callable (`get_order(id, user)`) |
+| **2. App test-client** | the app OBJECT + its built-in HTTP test client, in-process | seconds | **auth / cookie / header** — real HTTP + middleware, NO boot |
+| **3. Whole-app boot** | the whole app via compose | minutes; often fails | flows needing the real integrated stack / external services |
+
+**Tier 2 is the answer to "how do you test auth/cookie/header vulns?"** — those live in the HTTP layer
+(request parsing, middleware, cookies), which a function call skips. But you do NOT need production: every
+framework ships an in-process test client (Starlette/FastAPI `TestClient`, Flask `test_client()`, Django test
+client; JS `supertest`) that sends real HTTP requests to the imported app object — real headers, real
+middleware, real cookies — with **no server, no docker, no services running** (stub the external bits). The
+differential is identical: same request, one variable changed, observe the delta.
+- **auth bypass:** `GET /admin` with no cookie vs. as a normal user → a 200 = broken auth.
+- **cookie hijack:** log in, inspect `Set-Cookie` (HttpOnly/Secure/SameSite); replay A's cookie from a fresh
+  client → does it grant A's access? does the session id rotate on login (else fixation)?
+- **header exploit:** send `Host: evil.com` / `X-Forwarded-For: 127.0.0.1` → did a security decision change?
+
+Tier-2 limit: the app object must **import** (top-level imports must resolve). If it does `import boto3` /
+connects to AWS at module load, the import fails → Tier 3, or stub that import.
 
 Whole-app boot stays available (provisioning was just strengthened) for the cases that genuinely need the real
-integrated stack — but it is the fallback, not the headline.
+integrated stack — but it is the last resort, not the headline.
+
+### When NOTHING will run: research like a pentester (the escalation)
+
+Some targets can't be exercised at any tier — a supply-chain dependency that can't be installed, an import
+that needs a live third-party service (AWS, Stripe, a queue). A real pentester who can't run the target does
+not give up; they **read how the thing works** and reason to a conclusion. So the escalation ladder is:
+
+> run → (can't provision) try to fix the env (≤2 attempts) → **still can't: RESEARCH it** (web_search +
+> web_read the docs, understand how the dep/API actually behaves) → conclude a reasoned **`believed`** (cite
+> the source) → only `blocked` if even research leaves it undecidable.
+
+**Hard guardrail (grounding rule intact):** research informs a *belief*, it is not proof. A web-reasoned
+verdict is **`believed`** (likely-vulnerable or likely-safe), **never `confirmed` or `refuted`** — those still
+require actually running it and observing the effect. This turns a dead `blocked` into a useful researched
+lead. *Example:* `jwt.decode(token, options={"verify_signature": False})` — sandbox can't forge the real
+session flow → the model web_reads the PyJWT docs → learns signature verification is disabled → `believed:
+auth bypass` (cited), human-review. *(Wired: the `--online` web_search/web_read tools + the escalation
+instruction in `investigate.py`.)*
 
 ## 3. How the micro-harness works (the flow)
 

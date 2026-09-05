@@ -127,6 +127,13 @@ def _prove_one(model, target, c, have_docker, max_steps):
     mode = "render" if c.cwe in briefs._XSS_CWES else "call"
     scaffold = repro.build(c, target, mode=mode)             # harness owns the glue; model supplies the payload
     img = briefs._image_for(c.file)
+    if briefs._is_js(c.file):                                # JS/TS need tsx + the repo's node_modules;
+        from . import js_env                                 # XSS/DOM classes ALSO need a real browser to render
+        if c.cwe in briefs._XSS_CWES:                        # -- node:20-slim has none of these (the XSS miss).
+            js_env.ensure_deps(target)                       # (all cached/idempotent -> built once, then fast)
+            img = js_env.ensure_browser_runner() or js_env.prepare(target) or img
+        else:
+            img = js_env.prepare(target) or img
     step_to = 120 if c.cwe in briefs._XSS_CWES else (90 if briefs._is_js(c.file) else 45)
     try:
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode),

@@ -106,11 +106,20 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
         return True, "cannot reverify (docker unavailable) -- treat as still-vulnerable (conservative)"
     mode = "render" if c.cwe in briefs._XSS_CWES else "call"
     scaffold = repro.build(c, target, mode=mode)
+    img = briefs._image_for(c.file)
+    if briefs._is_js(c.file):                                # match prove: tsx+node_modules, browser for XSS
+        from . import js_env
+        if c.cwe in briefs._XSS_CWES:
+            js_env.ensure_deps(target)
+            img = js_env.ensure_browser_runner() or js_env.prepare(target) or img
+        else:
+            img = js_env.prepare(target) or img
     try:
         v = invmod.investigate(model, briefs._brief_for(c, target, "reverify the patch", scaffold=scaffold,
                                                         mode=mode),
-                               image=briefs._image_for(c.file), mount=target, network="none",
-                               max_steps=max_steps, step_timeout=(90 if briefs._is_js(c.file) else 45))
+                               image=img, mount=target, network="none",
+                               max_steps=max_steps, step_timeout=(120 if c.cwe in briefs._XSS_CWES else
+                                                                  (90 if briefs._is_js(c.file) else 45)))
     finally:
         repro.remove(target)
     return (v.verdict == "confirmed"), f"investigate -> {v.verdict}: {(v.why or '')[:100]}"

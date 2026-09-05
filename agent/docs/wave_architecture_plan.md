@@ -368,10 +368,13 @@ re-fire + differential regression) remains for the whole-app loop.
   measure capability.
 - **Capability testing** — a *different* real repo each time (never reuse except to confirm a fix).
 - **GHSA benchmark** (`agent/bench/ghsa_bench.py`) — repurposes Cisco's 500-CVE
-  vulnerability-localization-benchmark: we fetch the vulnerable commit, run the loop, and score whether wave
-  **proved** a vuln that lands in the ground-truth patched files (stricter than their localization task).
-  Current baseline **2/23** (both command-injection); misses are proof-shape gaps (DOM plugins, URL
-  sanitizers, servers, async-exec) + giant-repo timeouts — i.e. exactly what Stages 1–2 are meant to close.
+  vulnerability-localization-benchmark: we fetch the vulnerable commit, run the pipeline, and score whether
+  wave **proved** a vuln that lands in the ground-truth patched files (stricter than their localization task).
+  **The harness now runs the NEW pipeline** (`run all --no-reach-gate`: eyes → detect → prove) and scores the
+  `confirmed` (+ `anomalous_state`/human-review) files from `wave_findings.jsonl`; `--no-reach-gate` because
+  the targets are libraries (public-API entry, no routes), which the route-tuned reachability gate would
+  wrongly downgrade. The **2/23 baseline was the deprecated legacy loop** — the new pipeline (all four stages
+  + gates) is pending re-measurement; that number is the next thing to move.
 
 ---
 

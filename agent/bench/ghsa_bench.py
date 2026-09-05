@@ -4,7 +4,8 @@ Their task is LOCALIZATION (name the vulnerable file); ours is PROVING (run it, 
 we repurpose the repos and measure a stricter thing: did wave CONFIRM a real vuln, and did the confirmed
 file land in the ground-truth patched files? We select our lane -- npm/pip repos whose CWE is a class
 wave can prove (injection/XSS/path/SSRF) -- fetch each vulnerable commit straight from GitHub's archive
-URL (no full 500-repo download), run the loop, and diff proven files vs ground_truth_files.
+URL (no full 500-repo download), run the NEW pipeline (`run all`: eyes -> detect -> prove), and diff the
+confirmed (+ anomalous/human-review) files from wave_findings.jsonl against ground_truth_files.
 
   # ollama must be serving the agent model:
   WAVE_API_BASE=http://localhost:11434/v1  WAVE_MODEL=hf.co/.../...:Q6_K \
@@ -14,7 +15,6 @@ import argparse
 import csv
 import io
 import json
-import os
 import re
 import subprocess
 import sys
@@ -25,9 +25,9 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = _ROOT / "data" / "downloads" / "vlb" / "data" / "manifest.csv"
-# CWE classes wave can PROVE today (injection / XSS / path / SSRF / template / code-eval)
-OUR_CWES = {"78", "79", "89", "94", "95", "22", "918", "77", "1336", "917", "90", "611", "116", "80", "83"}
-_PROVEN = re.compile(r"\[PROVEN\s+CWE-\d+\]\s+(.+?):\d+", re.I)
+# CWE classes wave can PROVE today (injection / XSS / path / SSRF / template / code-eval / deserialization)
+OUR_CWES = {"78", "79", "89", "94", "95", "22", "918", "77", "1336", "917", "90", "611", "116", "80", "83",
+            "502", "943", "601"}
 
 
 def _cwes(row):
@@ -68,25 +68,38 @@ def fetch_extract(row, workdir):
 
 
 def run_wave(repo_dir, timeout):
-    """Run the loop as a subprocess; return the set of proven files (repo-relative)."""
-    # --reader-all: these are LIBRARIES (no web request->sink surface), so read every file, not just the
-    # surface-scored ones -- otherwise prioritize_files reads 0 files and there's nothing to investigate.
-    cmd = [sys.executable, "-u", "-m", "agent.orchestrator.run", "loop", str(repo_dir),
-           "--reader", "--reader-all", "--investigate", "--investigate-budget", "5"]
+    """Run the NEW pipeline (`run all`: eyes -> detect -> prove) as a subprocess and read the proven files
+    from wave_findings.jsonl. Returns (confirmed_files, anomalous_files, out).
+
+    --no-reach-gate: the GHSA targets are LIBRARIES (public-API entry, no HTTP routes), so the reachability
+    gate -- tuned for routes -- would wrongly downgrade a real library vuln to anomalous_state. The notebook
+    is sink-pin-driven (not route-driven), so no --reader-all hack is needed for libraries anymore."""
+    cmd = [sys.executable, "-u", "-m", "agent.orchestrator.run", "all", str(repo_dir),
+           "--notes-budget", "40", "--detect-budget", "100", "--prove-budget", "25", "--no-reach-gate"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(_ROOT),
                            encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
-        return None, "timeout"
+        return None, None, "timeout"
     out = (p.stdout or "") + (p.stderr or "")
-    proven = set()
-    for m in _PROVEN.finditer(out):
-        f = m.group(1).strip()
-        try:
-            proven.add(os.path.relpath(f, repo_dir).replace("\\", "/"))
-        except Exception:
-            proven.add(f.replace("\\", "/"))
-    return proven, out
+    confirmed, anomalous = set(), set()
+    findings = Path(repo_dir) / "wave_findings.jsonl"
+    if findings.exists():
+        # last verdict per (file,line,class); files are already repo-relative in the findings log
+        last = {}
+        for line in findings.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            last[(d.get("file"), d.get("line"), d.get("class"))] = d
+        for d in last.values():
+            f = str(d.get("file", "")).replace("\\", "/")
+            if d.get("verdict") == "confirmed":
+                confirmed.add(f)
+            elif d.get("verdict") == "anomalous_state":
+                anomalous.add(f)
+    return confirmed, anomalous, out
 
 
 def main():
@@ -115,25 +128,33 @@ def main():
                 print(f"  download failed: {type(e).__name__}: {e}", flush=True)
                 rows_out.append({"id": row["alpha_id"], "status": "download_fail"})
                 continue
-            proven, out = run_wave(repo, a.timeout)
+            proven, anomalous, out = run_wave(repo, a.timeout)
             if proven is None:
                 print("  wave: TIMEOUT", flush=True)
                 rows_out.append({"id": row["alpha_id"], "status": "timeout"})
                 continue
-            hit = bool(proven & gt)
-            print(f"  wave PROVEN files: {sorted(proven) or '(none)'}", flush=True)
-            print(f"  => {'HIT (proven in a ground-truth file)' if hit else 'miss' if proven else 'nothing proven'}",
-                  flush=True)
-            rows_out.append({"id": row["alpha_id"], "cwe": cwe, "hit": hit,
-                             "proven": sorted(proven), "gt": sorted(gt), "n_proven": len(proven)})
+            hit = bool(proven & gt)                                  # CONFIRMED in a ground-truth file
+            flagged = bool((proven | anomalous) & gt)               # confirmed OR anomalous (human-review) in gt
+            print(f"  wave CONFIRMED files: {sorted(proven) or '(none)'}", flush=True)
+            if anomalous:
+                print(f"  wave anomalous/human-review files: {sorted(anomalous)}", flush=True)
+            verdict = ("HIT (confirmed in a ground-truth file)" if hit else
+                       "FLAGGED (anomalous in a ground-truth file)" if flagged else
+                       "miss" if (proven or anomalous) else "nothing found")
+            print(f"  => {verdict}", flush=True)
+            rows_out.append({"id": row["alpha_id"], "cwe": cwe, "hit": hit, "flagged": flagged,
+                             "proven": sorted(proven), "anomalous": sorted(anomalous), "gt": sorted(gt),
+                             "n_proven": len(proven), "n_anomalous": len(anomalous)})
 
     scored = [r for r in rows_out if "hit" in r]
     hits = sum(1 for r in scored if r["hit"])
-    proved_something = sum(1 for r in scored if r["n_proven"])
-    print(f"\n{'=' * 70}\nSCORECARD  ({len(rows_out)} attempted, {len(scored)} ran)")
-    print(f"  proved a vuln IN a ground-truth file (hit): {hits}/{len(scored)}")
-    print(f"  proved SOMETHING (incl. outside gt):        {proved_something}/{len(scored)}")
-    print(f"  download/timeout failures:                  {len(rows_out) - len(scored)}")
+    flagged = sum(1 for r in scored if r.get("flagged"))
+    found_something = sum(1 for r in scored if r["n_proven"] or r["n_anomalous"])
+    print(f"\n{'=' * 70}\nSCORECARD  ({len(rows_out)} attempted, {len(scored)} ran)  [new pipeline: run all]")
+    print(f"  CONFIRMED a vuln IN a ground-truth file (hit): {hits}/{len(scored)}")
+    print(f"  confirmed OR anomalous(review) in gt:          {flagged}/{len(scored)}")
+    print(f"  found SOMETHING (incl. outside gt):            {found_something}/{len(scored)}")
+    print(f"  download/timeout failures:                     {len(rows_out) - len(scored)}")
 
 
 if __name__ == "__main__":

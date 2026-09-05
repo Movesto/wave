@@ -108,6 +108,8 @@ def main():
     ap.add_argument("--max-kb", type=float, default=2000, help="skip repos whose vulnerable zip is larger")
     ap.add_argument("--limit", type=int, default=8)
     ap.add_argument("--timeout", type=int, default=900, help="per-repo seconds")
+    ap.add_argument("--out", default=str(_ROOT / "ghsa_bench_results.json"),
+                    help="write per-CVE results + scorecard here (so a run is checkable after it ends)")
     a = ap.parse_args()
 
     if not MANIFEST.is_file():
@@ -150,11 +152,20 @@ def main():
     hits = sum(1 for r in scored if r["hit"])
     flagged = sum(1 for r in scored if r.get("flagged"))
     found_something = sum(1 for r in scored if r["n_proven"] or r["n_anomalous"])
+    summary = {"attempted": len(rows_out), "ran": len(scored), "hits": hits, "flagged": flagged,
+               "found_something": found_something, "failures": len(rows_out) - len(scored)}
     print(f"\n{'=' * 70}\nSCORECARD  ({len(rows_out)} attempted, {len(scored)} ran)  [new pipeline: run all]")
     print(f"  CONFIRMED a vuln IN a ground-truth file (hit): {hits}/{len(scored)}")
     print(f"  confirmed OR anomalous(review) in gt:          {flagged}/{len(scored)}")
     print(f"  found SOMETHING (incl. outside gt):            {found_something}/{len(scored)}")
     print(f"  download/timeout failures:                     {len(rows_out) - len(scored)}")
+    if a.out:                                              # persist so a run is checkable after it ends
+        try:
+            Path(a.out).write_text(json.dumps({"summary": summary, "rows": rows_out}, indent=2),
+                                   encoding="utf-8")
+            print(f"\n[results saved -> {a.out}]", flush=True)
+        except OSError as e:
+            print(f"\n[could not save results: {e}]", flush=True)
 
 
 if __name__ == "__main__":

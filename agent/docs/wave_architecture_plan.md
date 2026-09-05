@@ -392,6 +392,7 @@ re-fire + differential regression) remains for the whole-app loop.
 | **Reachability gate — confirmed→human-review if no untrusted path** | ✅ Built (`reachability.py`), verified |
 | **Context gate — suppress server-side classes in frontend/browser code** | ✅ Built (`reachability.is_frontend`), verified on Teach |
 | **Proof-shape coverage — SSTI, NoSQLi, proto-pollution, deser** | ✅ Built (canary + brief-guided); NoSQLi canary verified deterministically |
+| **Value-taint (intra-function, Python) — §10.4** | ✅ Built (`taint.py`): brief enrichment + conservative gate; verified |
 
 ---
 
@@ -419,6 +420,12 @@ of this document.
    do not yet track whether the *specific tainted value* actually flows along that path (vs. a sanitized
    copy, or a different argument). Reachability without dataflow will over-propose. Where's the right line
    between "give the model the slice and let it judge" and "the harness should do real taint"?
+   **[PARTLY ADDRESSED — `taint.py`]** An *intra-function* value taint now answers this within a function
+   (flows / sanitized / unrelated / unknown): it enriches the model's slice and conservatively gates a
+   model-confirmed `unrelated` sink to human-review, without ever overriding a dynamic canary. The chosen
+   line: the harness does the *intra-function* trace deterministically; *cross-function* flow is reported
+   `unknown` and left to the model's judgment on the slice (never gated away). Still open: real
+   cross-function/interprocedural taint, and JS/TS (v1 is Python only).
 
 5. **GLM reliance for comprehension quality.** When the free GLM pool 429s, comprehension falls to the
    local 27B. Is local-only comprehension good enough, or does quality drop meaningfully? We haven't

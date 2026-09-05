@@ -104,12 +104,17 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
         return (mr.verdict == "proven"), f"rung1 -> {mr.verdict}: {mr.reason[:100]}"
     if not have_docker:
         return True, "cannot reverify (docker unavailable) -- treat as still-vulnerable (conservative)"
-    mode = "render" if c.cwe in briefs._XSS_CWES else "call"
-    scaffold = repro.build(c, target, mode=mode)
+    if briefs._is_sanitizer(c):                              # match prove: sanitizer -> return-value proof
+        mode = "sanitizer"
+    elif c.cwe in briefs._XSS_CWES:
+        mode = "render"
+    else:
+        mode = "call"
+    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"))
     img = briefs._image_for(c.file)
-    if briefs._is_js(c.file):                                # match prove: tsx+node_modules, browser for XSS
+    if briefs._is_js(c.file):                                # tsx+node_modules; browser only for DOM render
         from . import js_env
-        if c.cwe in briefs._XSS_CWES:
+        if mode == "render":
             js_env.ensure_deps(target)
             img = js_env.ensure_browser_runner() or js_env.prepare(target) or img
         else:
@@ -118,7 +123,7 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
         v = invmod.investigate(model, briefs._brief_for(c, target, "reverify the patch", scaffold=scaffold,
                                                         mode=mode),
                                image=img, mount=target, network="none",
-                               max_steps=max_steps, step_timeout=(120 if c.cwe in briefs._XSS_CWES else
+                               max_steps=max_steps, step_timeout=(120 if mode == "render" else
                                                                   (90 if briefs._is_js(c.file) else 45)))
     finally:
         repro.remove(target)

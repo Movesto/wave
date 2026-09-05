@@ -124,17 +124,22 @@ def _prove_one(model, target, c, have_docker, max_steps):
     if model is None:
         return {"verdict": "believed", "evidence": "", "ran": 0, "oracle": "",
                 "why": f"no model to investigate -- canary unsettled ({reason})"}
-    mode = "render" if c.cwe in briefs._XSS_CWES else "call"
-    scaffold = repro.build(c, target, mode=mode)             # harness owns the glue; model supplies the payload
+    if briefs._is_sanitizer(c):                              # sanitizer/escaper -> prove by RETURN VALUE
+        mode = "sanitizer"
+    elif c.cwe in briefs._XSS_CWES:                          # DOM XSS -> render in a real browser
+        mode = "render"
+    else:
+        mode = "call"
+    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"))
     img = briefs._image_for(c.file)
     if briefs._is_js(c.file):                                # JS/TS need tsx + the repo's node_modules;
-        from . import js_env                                 # XSS/DOM classes ALSO need a real browser to render
-        if c.cwe in briefs._XSS_CWES:                        # -- node:20-slim has none of these (the XSS miss).
+        from . import js_env                                 # DOM render ALSO needs a real browser --
+        if mode == "render":                                 # node:20-slim has none of these (the XSS miss).
             js_env.ensure_deps(target)                       # (all cached/idempotent -> built once, then fast)
             img = js_env.ensure_browser_runner() or js_env.prepare(target) or img
         else:
             img = js_env.prepare(target) or img
-    step_to = 120 if c.cwe in briefs._XSS_CWES else (90 if briefs._is_js(c.file) else 45)
+    step_to = 120 if mode == "render" else (90 if briefs._is_js(c.file) else 45)
     try:
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode),
                                image=img, mount=target, network="none", max_steps=max_steps,

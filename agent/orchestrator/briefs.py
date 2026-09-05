@@ -31,6 +31,19 @@ def _is_js(path):
 
 _XSS_CWES = {"CWE-79", "CWE-80", "CWE-83", "CWE-116"}   # classes that need a real browser to PROVE (render + observe)
 
+# A URL/HTML SANITIZER or ESCAPER is proven by its RETURN VALUE (does the danger survive?), not by a DOM
+# render -- so it takes the `call` scaffold + a dangerous payload, no browser. Only meaningful for XSS/redirect.
+_SANITIZER_VERB = ("sanitiz", "clean", "escape", "purif", "scrub", "normaliz", "encode", "strip", "safe")
+_SANITIZER_NOUN = ("url", "uri", "href", "link", "redirect", "html", "xss", "markup")
+
+
+def _is_sanitizer(candidate):
+    cwe = getattr(candidate, "cwe", "") or ""
+    if cwe not in _XSS_CWES and cwe != "CWE-601":
+        return False
+    hay = ((getattr(candidate, "unit", "") or "") + " " + (getattr(candidate, "sink", "") or "")).lower()
+    return any(v in hay for v in _SANITIZER_VERB) and any(n in hay for n in _SANITIZER_NOUN)
+
 
 def _image_for(path):
     """A runtime image that can run this candidate's language (the model can install more if it needs)."""
@@ -65,6 +78,25 @@ def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
                      f"output IS reflected unescaped = still XSS (the canary just misfired -- that is enough "
                      f"to confirm). Only conclude refuted if WAVE_OUTPUT shows it ESCAPED (e.g. &lt;img). "
                      f"Supply ONLY the payload; the scaffold owns the browser/module glue.")
+        elif mode == "sanitizer":
+            def _p(pl):
+                return run_hint.replace("<payload>", pl)
+            extra = (
+                f"\nThis is a URL/HTML SANITIZER or ESCAPER -- it is NOT proven by rendering, but by its "
+                f"RETURN VALUE: feed it a DANGEROUS input and check whether the danger SURVIVES. The scaffold "
+                f"at {cont} calls {fn}(ARG) and prints WAVE_RESULT (the return value). Run it with these "
+                f"payloads, ONE PER RUN, and read WAVE_RESULT:\n"
+                f"  {_p('javascript:alert(1)')}\n"
+                f"  {_p('JaVaScRiPt:alert(1)')}          (case bypass)\n"
+                f"  {_p('  javascript:alert(1)')}        (leading whitespace/control-char bypass)\n"
+                f"  {_p('data:text/html,<script>alert(1)</script>')}\n"
+                f"CONFIRMED (the sanitizer is BYPASSED) if WAVE_RESULT still yields an EXECUTABLE URL -- "
+                f"after trimming whitespace/control chars it STILL starts with 'javascript:', 'data:text/html' "
+                f"or 'vbscript:' (for an OPEN-REDIRECT finding: an absolute 'http(s)://' or a protocol-relative "
+                f"'//<host>' external URL). REFUTED only if the output is NEUTRALIZED: emptied, 'about:blank', "
+                f"the scheme stripped or entity/percent-encoded (e.g. '&#106;' or '%6a'), or forced to a "
+                f"relative path. Cite the exact WAVE_RESULT string as the evidence. Supply ONLY the arg; the "
+                f"scaffold owns the module-loading glue.")
         else:
             extra = (f"\nA reproduction scaffold is ready at {cont} -- it loads this module and calls "
                      f"{fn}(ARG), printing WAVE_RESULT + WAVE_CALL_ERROR. The ARG is parsed as JSON if it can "

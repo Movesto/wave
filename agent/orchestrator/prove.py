@@ -30,12 +30,13 @@ from .models import Candidate
 # detector class -> CWE (the provers key on cwe); "" when there is no clean single mapping
 _CLASS_CWE = {"cmd": "CWE-78", "sqli": "CWE-89", "nosqli": "CWE-943", "ssrf": "CWE-918", "path": "CWE-22",
               "xss": "CWE-79", "deser": "CWE-502", "redirect": "CWE-601", "authz": "CWE-639",
-              "eval": "CWE-95", "other": ""}
+              "eval": "CWE-95", "ssti": "CWE-1336", "protopollution": "CWE-1321", "proto": "CWE-1321",
+              "prototype": "CWE-1321", "other": ""}
 # classes the cheap in-process canary oracle (rung1) can witness; others go straight to the model prover
 _CANARY_CLASSES = {"cmd", "sqli", "nosqli", "ssrf", "path"}
 # severity for working order (mirrors detector._SEV so the proof loop works the most dangerous first)
-_SEV = {"cmd": 9, "eval": 9, "deser": 8, "sqli": 8, "nosqli": 7, "ssrf": 6, "path": 6,
-        "xss": 4, "authz": 5, "redirect": 3, "other": 1}
+_SEV = {"cmd": 9, "eval": 9, "deser": 8, "ssti": 8, "sqli": 8, "nosqli": 7, "ssrf": 6, "path": 6,
+        "protopollution": 6, "proto": 6, "prototype": 6, "xss": 4, "authz": 5, "redirect": 3, "other": 1}
 
 _VERDICT_ORDER = ["confirmed", "anomalous_state", "refuted", "blocked", "believed"]
 # only these are DONE on resume; blocked (under-provisioned / transient 500) + believed are re-tried
@@ -124,12 +125,7 @@ def _prove_one(model, target, c, have_docker, max_steps):
     if model is None:
         return {"verdict": "believed", "evidence": "", "ran": 0, "oracle": "",
                 "why": f"no model to investigate -- canary unsettled ({reason})"}
-    if briefs._is_sanitizer(c):                              # sanitizer/escaper -> prove by RETURN VALUE
-        mode = "sanitizer"
-    elif c.cwe in briefs._XSS_CWES:                          # DOM XSS -> render in a real browser
-        mode = "render"
-    else:
-        mode = "call"
+    mode = briefs._proof_mode(c)                             # sanitizer/ssti/protopoll/deser/render/call
     scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"))
     img = briefs._image_for(c.file)
     if briefs._is_js(c.file):                                # JS/TS need tsx + the repo's node_modules;

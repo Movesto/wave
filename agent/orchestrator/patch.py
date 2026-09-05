@@ -104,12 +104,7 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
         return (mr.verdict == "proven"), f"rung1 -> {mr.verdict}: {mr.reason[:100]}"
     if not have_docker:
         return True, "cannot reverify (docker unavailable) -- treat as still-vulnerable (conservative)"
-    if briefs._is_sanitizer(c):                              # match prove: sanitizer -> return-value proof
-        mode = "sanitizer"
-    elif c.cwe in briefs._XSS_CWES:
-        mode = "render"
-    else:
-        mode = "call"
+    mode = briefs._proof_mode(c)                             # match prove's proof-shape routing
     scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"))
     img = briefs._image_for(c.file)
     if briefs._is_js(c.file):                                # tsx+node_modules; browser only for DOM render

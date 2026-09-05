@@ -49,6 +49,19 @@ class Observation:
     stubs: list = field(default_factory=list)       # which sink stubs applied
 
 
+def _has_operator(obj, depth=0):
+    """True if a Mongo filter contains a nested $-operator dict (an injected operator) -- the structural tell
+    of NoSQLi, vs a value that was coerced to a plain scalar."""
+    if depth > 6:
+        return False
+    if isinstance(obj, dict):
+        return any((isinstance(k, str) and k.startswith("$")) or _has_operator(v, depth + 1)
+                   for k, v in obj.items())
+    if isinstance(obj, (list, tuple)):
+        return any(_has_operator(x, depth + 1) for x in obj)
+    return False
+
+
 class _Tripwire:
     """Collects sink hits during a micro-exec. Each hit: (kind, statement/url, params_repr)."""
 
@@ -67,6 +80,11 @@ class _Tripwire:
     def cmd(self, command, shell=False):
         # meta = "shell" (string run through a shell -> injectable) vs "list" (argv, separated -> not shell-inj)
         self.hits.append(("cmd", str(command), "shell" if shell else "list"))
+
+    def nosql(self, query):
+        # meta = "operator" (the filter contains an injected $-operator dict -> NoSQLi) vs "scalar" (the input
+        # was coerced to a plain value -> equality, safe). We decide structurally from the real object here.
+        self.hits.append(("nosql", repr(query), "operator" if _has_operator(query) else "scalar"))
 
 
 class _FakeResult:
@@ -248,6 +266,48 @@ def _tripwires(tw):
         applied.append("open")
     except Exception:
         pass
+    # NoSQL (pymongo) -> record the query FILTER so a marker injected as a $-operator is observed. Fake the
+    # client + collection so a query at import/call needs no real Mongo server (like the psycopg2 stub).
+    try:
+        import pymongo
+
+        class _MCursor:
+            def __iter__(self): return iter([])
+            def limit(self, *a, **k): return self
+            def sort(self, *a, **k): return self
+            def skip(self, *a, **k): return self
+
+        class _MColl:
+            def find(self, filt=None, *a, **k): tw.nosql(filt); return _MCursor()
+            def find_one(self, filt=None, *a, **k): tw.nosql(filt); return None
+            def find_one_and_update(self, filt=None, *a, **k): tw.nosql(filt); return None
+            def update_one(self, filt=None, *a, **k): tw.nosql(filt); return None
+            def update_many(self, filt=None, *a, **k): tw.nosql(filt); return None
+            def delete_one(self, filt=None, *a, **k): tw.nosql(filt); return None
+            def delete_many(self, filt=None, *a, **k): tw.nosql(filt); return None
+            def count_documents(self, filt=None, *a, **k): tw.nosql(filt); return 0
+            def aggregate(self, pipeline=None, *a, **k): tw.nosql(pipeline); return _MCursor()
+            def __getattr__(self, name): return lambda *a, **k: None
+
+        class _MDb:
+            def __getitem__(self, name): return _MColl()
+            def __getattr__(self, name): return _MColl()
+
+        class _MClient:
+            def __init__(self, *a, **k): pass
+            def __getitem__(self, name): return _MDb()
+            def __getattr__(self, name): return _MDb()
+
+        patch(pymongo, "MongoClient", _MClient)
+        with contextlib.suppress(Exception):
+            import pymongo.collection as _pmc
+            for _fn in ("find", "find_one", "find_one_and_update", "update_one", "update_many",
+                        "delete_one", "delete_many", "count_documents", "aggregate"):
+                if hasattr(_pmc.Collection, _fn):
+                    patch(_pmc.Collection, _fn, getattr(_MColl, _fn))
+        applied.append("pymongo")
+    except Exception:
+        pass
     tw._stubs = applied
     try:
         yield
@@ -318,6 +378,9 @@ def _verdict_from_hits(hits, marker, cwe):
         # path traversal: the ../ must SURVIVE to the open() call (the traversal payload was not sanitized).
         if kind == "path" and marker in text and "../" in text:
             return ("proven", f"marker reached a file path with traversal intact: {text[:160]}")
+        # NoSQLi: the injected operator object reached the Mongo filter as an OPERATOR (not coerced to a scalar).
+        if kind == "nosql" and marker in text and params == "operator":
+            return ("proven", f"marker reached the Mongo query as an operator (NoSQLi): {text[:160]}")
     # marker only in params (parameterized) -> safe, if a SQL sink was hit at all
     if cwe == "CWE-89" and any(k == "sql" and marker in (p or "") for k, t, p in hits):
         return ("safe", "marker reached the SQL sink only as a bound parameter (parameterized)")
@@ -327,6 +390,9 @@ def _verdict_from_hits(hits, marker, cwe):
     # path reached but the traversal was neutralized (no ../ survived to the open call)
     if cwe == "CWE-22" and any(k == "path" and marker in t and "../" not in t for k, t, m in hits):
         return ("safe", "marker reached the file path but the traversal was neutralized (no ../ survived)")
+    # NoSQL input coerced to a plain scalar (equality) -> not an operator injection
+    if cwe == "CWE-943" and any(k == "nosql" and marker in t and m == "scalar" for k, t, m in hits):
+        return ("safe", "marker reached the Mongo query only as a plain scalar value (coerced equality)")
     return ("unknown", f"no sink reached with the marker in an unsafe position ({len(hits)} sink hit(s))")
 
 
@@ -349,6 +415,8 @@ def _payload(cwe):
         return f"http://wz{token}.wave.test/", f"wz{token}.wave.test"
     if cwe == "CWE-22":
         return f"../../../wz{token}", f"wz{token}"
+    if cwe == "CWE-943":                                    # NoSQLi: an OPERATOR object -> injectable if it
+        return {"$gt": "", "$ne": f"wz{token}", "$where": f"wz{token}"}, f"wz{token}"   # reaches the filter as-is
     return "WZ" + token, "WZ" + token
 
 
@@ -488,6 +556,43 @@ for _mod in ("pymysql", "MySQLdb"):
             return _Cn()
         setattr(_m, "connect", _myc)
     except Exception: pass
+def _hasop(o, d=0):
+    if d > 6: return False
+    if isinstance(o, dict): return any((isinstance(k,str) and k.startswith("$")) or _hasop(v,d+1) for k,v in o.items())
+    if isinstance(o, (list,tuple)): return any(_hasop(x,d+1) for x in o)
+    return False
+def _nosql(q): _HITS.append(("nosql", repr(q), "operator" if _hasop(q) else "scalar"))
+try:
+    import pymongo
+    class _MCur:
+        def __iter__(s): return iter([])
+        def limit(s,*a,**k): return s
+        def sort(s,*a,**k): return s
+        def skip(s,*a,**k): return s
+    class _MC:
+        def find(s,f=None,*a,**k): _nosql(f); return _MCur()
+        def find_one(s,f=None,*a,**k): _nosql(f); return None
+        def update_one(s,f=None,*a,**k): _nosql(f); return None
+        def update_many(s,f=None,*a,**k): _nosql(f); return None
+        def delete_one(s,f=None,*a,**k): _nosql(f); return None
+        def delete_many(s,f=None,*a,**k): _nosql(f); return None
+        def count_documents(s,f=None,*a,**k): _nosql(f); return 0
+        def aggregate(s,p=None,*a,**k): _nosql(p); return _MCur()
+        def __getattr__(s,n): return lambda *a,**k: None
+    class _MD:
+        def __getitem__(s,n): return _MC()
+        def __getattr__(s,n): return _MC()
+    class _MCl:
+        def __init__(s,*a,**k): pass
+        def __getitem__(s,n): return _MD()
+        def __getattr__(s,n): return _MD()
+    pymongo.MongoClient = _MCl
+    try:
+        import pymongo.collection as _pmc
+        for _fn in ("find","find_one","update_one","update_many","delete_one","delete_many","count_documents","aggregate"):
+            if hasattr(_pmc.Collection,_fn): setattr(_pmc.Collection,_fn,getattr(_MC,_fn))
+    except Exception: pass
+except Exception: pass
 MARKER = __MARKER__
 sys.path.insert(0, "/app")
 try:
@@ -504,7 +609,8 @@ try:
             _args[n] = MARKER if n == _tgt else ("1" if "id" in n.lower() else "")
         try: _fn(**_args)
         except Exception: pass
-        if any(MARKER in h[1] for h in _HITS): break
+        _mk = MARKER if isinstance(MARKER, str) else repr(MARKER)
+        if any(_mk in h[1] for h in _HITS): break
 except Exception as _e2:
     print("WAVE_MICRO_ERR::" + type(_e2).__name__ + ": " + str(_e2))
 print("WAVE_MICRO_RESULT::" + json.dumps({"hits": _HITS}))

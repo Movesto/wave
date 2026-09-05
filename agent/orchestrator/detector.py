@@ -25,8 +25,8 @@ from pathlib import Path
 from .repomap import _rel  # noqa: F401  (kept for symmetry with notebook; path handling below uses it indirectly)
 
 # severity for ranking survivors (the proof loop works the most dangerous first)
-_SEV = {"cmd": 9, "eval": 9, "deser": 8, "sqli": 8, "nosqli": 7, "ssrf": 6, "path": 6,
-        "xss": 4, "authz": 5, "redirect": 3, "other": 1}
+_SEV = {"cmd": 9, "eval": 9, "deser": 8, "ssti": 8, "sqli": 8, "nosqli": 7, "ssrf": 6, "path": 6,
+        "protopollution": 6, "proto": 6, "prototype": 6, "xss": 4, "authz": 5, "redirect": 3, "other": 1}
 
 _FALSIFY_SYS = (
     "You are a skeptical security reviewer. Another analyst flagged a POSSIBLE vulnerability in the code "

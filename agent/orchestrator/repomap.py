@@ -32,7 +32,10 @@ _SINKS_COMMON = [
     # $-operators / findOne / aggregate) so JS array methods don't false-pin as NoSQLi.
     ("NoSQLi",   re.compile(r"\$where\b|\.findOne\s*\(|\.find\s*\(\s*\{|\$regex\b|\.aggregate\s*\(")),
     ("ssrf",     re.compile(r"\bfetch\s*\(|\baxios\b|\.urlopen\s*\(|requests\.(get|post|put|request|head)\b|urllib\.request|http\.(get|request)\s*\(|\bgot\s*\(")),
-    ("xss",      re.compile(r"innerHTML|dangerouslySetInnerHTML|document\.write|render_template_string|\bMarkup\s*\(|\.send\s*\(\s*[`\"']?\s*<")),
+    # server-side TEMPLATE injection (a template ENGINE compiling user input) -- distinct from xss (raw
+    # HTML output). Proven by evaluation ({{7*7}}->49), not by DOM render.
+    ("ssti",     re.compile(r"render_template_string|\.from_string\s*\(|from_string\s*\(|Template\s*\([^)]*\)\s*\.render|Handlebars\.compile|ejs\.render|nunjucks\.render|pug\.(render|compile)|_\.template\s*\(")),
+    ("xss",      re.compile(r"innerHTML|dangerouslySetInnerHTML|document\.write|\bMarkup\s*\(|\.send\s*\(\s*[`\"']?\s*<")),
     ("redirect", re.compile(r"\bredirect\s*\(|res\.redirect\s*\(|sendRedirect")),
     ("deser",    re.compile(r"pickle\.loads?|yaml\.load\s*\(|marshal\.loads?|node-serialize|\bunserialize\s*\(|cPickle")),
 ]
@@ -47,6 +50,9 @@ _SINKS_JS = [
     ("cmd",   re.compile(r"child_process|\bexec(Sync|File(Sync)?)?\s*\(|\bspawn(Sync)?\s*\(|\.exec\s*\(")),
     ("eval",  re.compile(r"\beval\s*\(|new\s+Function\s*\(|vm\.(runIn|createContext)|setTimeout\s*\(\s*['\"]")),
     ("path",  re.compile(r"fs\.(readFile|writeFile|createReadStream|createWriteStream|sendFile|readdir|unlink)|res\.sendFile|\.sendFile\s*\(")),
+    # prototype pollution: a recursive merge/extend/set that copies attacker keys into an object (and thus
+    # Object.prototype). __proto__ appearing literally is a strong tell.
+    ("protopollution", re.compile(r"\bdefaultsDeep\b|\bmergeWith\b|_\.merge\s*\(|\.deepMerge\s*\(|deepmerge|\bsetWith\b|_\.set\s*\(|__proto__")),
 ]
 
 

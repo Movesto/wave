@@ -230,6 +230,46 @@ to decorrelate by **context asymmetry**, not by re-rolling the same prompt:
   that survive the clean-room disproof get promoted to the (expensive) proof loop.
 - **Zero extra VRAM** — the two calls run sequentially on the one GPU; the separation is contextual, not a
   second model.
+ | ✅ Built (`reachability.is_frontend`), verified on Teach |
+| Stage 3 escalation handler (`blocked: under-provisioned`) | ✅ Built (`investigate.py`) — [review-adopted] |
+| `anomalous_state: human-reviewable` verdict status | ✅ Built (`recorder.py` + `investigate.py`) — [review-adopted] |
+| Context discipline: file logs + `grep_output`/`tail_output` | ✅ Built (`investigate.py`) — [review-adopted] |
+| Local tool-calling on ollama native `/api/chat` (num_ctx) | ✅ Built (`model.py`) — fixes /v1 4096-cap 500s |
+| **Stage 4 — patch + reverify (language-agnostic)** | ✅ Built (`patch.py`); Python verified deterministically |
+| **One-shot pipeline `eyes → detect → prove [→ patch]`** | ✅ Built (`run all`) |
+| Stage 1 security-pinned ranking + Attack-Surface Ledger | ⬜ Planned — [review-adopted] |
+| GHSA real-CVE benchmark harness | ✅ Built; baseline 2/23 (see §8) |
+
+---
+
+## 8. Evaluation
+
+- **Regression fixtures** — VAmPI, DVNA, NodeGoat, the cmdi/xss targets: used to confirm fixes, not to
+  measure capability.
+- **Capability testing** — a *different* real repo each time (never reuse except to confirm a fix).
+- **GHSA benchmark** (`agent/bench/ghsa_bench.py`) — repurposes Cisco's 500-CVE
+  vulnerability-localization-benchmark: we fetch the vulnerable commit, run the pipeline, and score whether
+  wave **proved** a vuln that lands in the ground-truth patched files (stricter than their localization task).
+  **The harness now runs the NEW pipeline** (`run all --no-reach-gate`: eyes → detect → prove) and scores the
+  `confirmed` (+ `anomalous_state`/human-review) files from `wave_findings.jsonl`; `--no-reach-gate` because
+  the targets are libraries (public-API entry, no routes), which the route-tuned reachability gate would
+  wrongly downgrade. The **2/23 baseline was the deprecated legacy loop** — the new pipeline (all four stages
+  + gates) is pending re-measurement; that number is the next thing to move.
+
+---
+
+## 9. Design invariants (don't regress these)
+
+- Detection + exploitation stay **local**; only comprehension may use the cloud GLM (best-effort + local
+  fallback).
+- Execution is **sandboxed** (container / WSL2), never the host; no network by default.
+- `confirmed` **requires a cited, observed effect**. No observation → `believed` at most.
+- Don't assume the target ships tests, entry-point scripts, or a working `docker-compose` — most real repos
+  don't. The harness must provision what it needs.
+- One GPU job at a time; never stack parallel GPU jobs.
+- Verify your own output by hand — every builder here has passed its own gates while still being wrong.
+
+---
 
 This is the field's antidote to the ~50% FP rate and replaces the old closed "9-class oracle decides" with
 "the model discriminates, then a fresh instance tries to knock it down." **Honest limit:** it's still the
@@ -351,43 +391,7 @@ re-fire + differential regression) remains for the whole-app loop.
 | Stage 3 canary — rung1 tripwires cmd/path (+ SQL/SSRF) | ✅ Built (`rung1.py`), deterministic proven/refuted |
 | **Reachability gate — confirmed→human-review if no untrusted path** | ✅ Built (`reachability.py`), verified |
 | **Context gate — suppress server-side classes in frontend/browser code** | ✅ Built (`reachability.is_frontend`), verified on Teach |
-| Stage 3 escalation handler (`blocked: under-provisioned`) | ✅ Built (`investigate.py`) — [review-adopted] |
-| `anomalous_state: human-reviewable` verdict status | ✅ Built (`recorder.py` + `investigate.py`) — [review-adopted] |
-| Context discipline: file logs + `grep_output`/`tail_output` | ✅ Built (`investigate.py`) — [review-adopted] |
-| Local tool-calling on ollama native `/api/chat` (num_ctx) | ✅ Built (`model.py`) — fixes /v1 4096-cap 500s |
-| **Stage 4 — patch + reverify (language-agnostic)** | ✅ Built (`patch.py`); Python verified deterministically |
-| **One-shot pipeline `eyes → detect → prove [→ patch]`** | ✅ Built (`run all`) |
-| Stage 1 security-pinned ranking + Attack-Surface Ledger | ⬜ Planned — [review-adopted] |
-| GHSA real-CVE benchmark harness | ✅ Built; baseline 2/23 (see §8) |
-
----
-
-## 8. Evaluation
-
-- **Regression fixtures** — VAmPI, DVNA, NodeGoat, the cmdi/xss targets: used to confirm fixes, not to
-  measure capability.
-- **Capability testing** — a *different* real repo each time (never reuse except to confirm a fix).
-- **GHSA benchmark** (`agent/bench/ghsa_bench.py`) — repurposes Cisco's 500-CVE
-  vulnerability-localization-benchmark: we fetch the vulnerable commit, run the pipeline, and score whether
-  wave **proved** a vuln that lands in the ground-truth patched files (stricter than their localization task).
-  **The harness now runs the NEW pipeline** (`run all --no-reach-gate`: eyes → detect → prove) and scores the
-  `confirmed` (+ `anomalous_state`/human-review) files from `wave_findings.jsonl`; `--no-reach-gate` because
-  the targets are libraries (public-API entry, no routes), which the route-tuned reachability gate would
-  wrongly downgrade. The **2/23 baseline was the deprecated legacy loop** — the new pipeline (all four stages
-  + gates) is pending re-measurement; that number is the next thing to move.
-
----
-
-## 9. Design invariants (don't regress these)
-
-- Detection + exploitation stay **local**; only comprehension may use the cloud GLM (best-effort + local
-  fallback).
-- Execution is **sandboxed** (container / WSL2), never the host; no network by default.
-- `confirmed` **requires a cited, observed effect**. No observation → `believed` at most.
-- Don't assume the target ships tests, entry-point scripts, or a working `docker-compose` — most real repos
-  don't. The harness must provision what it needs.
-- One GPU job at a time; never stack parallel GPU jobs.
-- Verify your own output by hand — every builder here has passed its own gates while still being wrong.
+| **Proof-shape coverage — SSTI, NoSQLi, proto-pollution, deser** | ✅ Built (canary + brief-guided); NoSQLi canary verified deterministically |
 
 ---
 

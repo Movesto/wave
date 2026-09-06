@@ -241,6 +241,7 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
     have_docker = shutil.which("docker") is not None
     if not have_docker:
         print("[prove] docker not available -- canary-only; unsettled candidates stay 'believed'", flush=True)
+    n_todo = min(budget, sum(1 for s in survs if _key(s) not in skip))
     worked = 0
     with findings_log.open("a", encoding="utf-8") as fh:
         for surv in survs:
@@ -251,8 +252,8 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
                 break
             worked += 1
             c = _to_candidate(surv, rel_index, target)
-            print(f"[prove] {c.cwe or surv.get('class')}@{surv.get('file')}:{surv.get('line')} "
-                  f"({c.unit or 'no-func'}) ...", flush=True)
+            print(f"[prove] {worked}/{n_todo} {c.cwe or surv.get('class')}@{surv.get('file')}:"
+                  f"{surv.get('line')} ({c.unit or 'no-func'}) ...", flush=True)
             hyp_id = case.record("hypothesis", _subj(c), "seed", "believed", provenance=c.loc(),
                                  cwe=c.cwe, family=c.family).id
             rec = _prove_one(model, target, c, have_docker, max_steps, online=online)

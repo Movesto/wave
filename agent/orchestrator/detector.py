@@ -154,6 +154,7 @@ def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True):
             except Exception:
                 pass
 
+    n_todo = min(budget, sum(1 for f in findings if (f["file"], f["line"], f["class"]) not in done))
     worked = 0
     with detect_log.open("a", encoding="utf-8") as fh:
         for f in findings:
@@ -163,7 +164,7 @@ def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True):
             if worked >= budget:
                 break
             worked += 1
-            print(f"[detect] falsify {f['class']}@{f['file']}:{f['line']} ...", flush=True)
+            print(f"[detect] {worked}/{n_todo} falsify {f['class']}@{f['file']}:{f['line']} ...", flush=True)
             res = falsify(model, root, f)
             rec = {**f, **res}
             fh.write(json.dumps(rec) + "\n")

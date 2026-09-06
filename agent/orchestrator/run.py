@@ -225,6 +225,17 @@ def cmd_patch(args):
             print(f"      Gate B (still loads):      {r['gate_b']}  -- {r.get('gate_b_note', '')[:60]}")
 
 
+def _banner(n, title, detail=""):
+    import time as _t
+    _banner.t0 = getattr(_banner, "t0", _t.time())
+    el = int(_t.time() - _banner.t0)
+    bar = "=" * 66
+    print(f"\n{bar}\n== STAGE {n}/4 -- {title}   [+{el // 60}m{el % 60:02d}s]", flush=True)
+    if detail:
+        print(f"   {detail}", flush=True)
+    print(bar, flush=True)
+
+
 def cmd_all(args):
     """One-shot pipeline: eyes(notebook) -> detect -> prove -> (optional) patch, sharing ONE model."""
     from . import detector, notebook, prove, repomap
@@ -233,37 +244,51 @@ def cmd_all(args):
     model = Model()
 
     # Stage 1 -- whole-repo map + per-file notebook (model selects targets on big repos)
+    _banner(1, "EYES: map the repo + notebook", "building the code map (tree-sitter over every file) ...")
     res = repomap.build_map(t)
     s = res["stats"]
-    print(f"[all] map: {s['files']} files, {s['pinned_files']} pinned, {s['sink_pins']} sink-pins", flush=True)
+    print(f"[all] map done: {s['files']} files, {s['pinned_files']} pinned, {s['sink_pins']} sink-pins", flush=True)
     idx = notebook.ledger_index(res["cmap"], t, res["per_file"], res["pinned"])
     pinned, per_file = res["pinned"], res["per_file"]
     targets = None
     if len(pinned) > args.notes_budget:
+        print(f"[all] {len(pinned)} pinned > budget {args.notes_budget} -- MODEL is selecting which files to "
+              f"deep-read (one model call) ...", flush=True)
         picks = notebook.select_targets(model, t, per_file, pinned, args.notes_budget, index=idx)
         if args.interactive:
             picks = _steer(picks, pinned, t)
         targets = [pk["path"] for pk in picks]
         print(f"[all] selected {len(targets)} of {len(pinned)} pinned files to deep-read", flush=True)
+    print(f"[all] notebook: the model now READS each selected file into notes (one model call each -- "
+          f"watch [notebook] i/N below) ...", flush=True)
     notes, npaths = notebook.read_notes(model, t, per_file, pinned, budget=args.notes_budget, targets=targets)
     total = sum(len(n["findings"]) for n in notes)
-    print(f"[all] notebook: {len(notes)} files noted, {total} findings -> {npaths['md']}", flush=True)
+    print(f"[all] notebook DONE: {len(notes)} files noted, {total} findings -> {npaths['md']}", flush=True)
 
     # Stage 2 -- clean-room falsification -> survivors
+    _banner(2, "DETECTOR: clean-room falsify each finding",
+            f"one fresh model call per finding (up to {args.detect_budget}) -- watch [detect] i/N below ...")
     survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget)
-    print(f"[all] detect: {len(survivors)} survived, {len(refuted)} refuted -> {dpaths['candidates']}", flush=True)
+    print(f"[all] detect DONE: {len(survivors)} survived, {len(refuted)} refuted -> {dpaths['candidates']}",
+          flush=True)
     if not survivors:
         print("[all] no survivors -- pipeline done.")
         return
 
     # Stage 3 -- confirmation ladder (+ reachability gate)
+    _banner(3, "PROOF LOOP: prove the survivors",
+            f"canary + model investigation per survivor (up to {args.prove_budget}) -- watch [prove]/"
+            f"[investigate] below; first XSS builds the browser image once ...")
     by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online)
-    print(f"[all] prove: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
+    print(f"[all] prove DONE: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
           f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
 
     # Stage 4 -- patch + reverify (optional)
     fixed = []
     if args.patch and by["confirmed"]:
+        _banner(4, "PATCH + REVERIFY",
+                f"the model writes a fix for each confirmed finding, then the SAME proof re-runs "
+                f"({'writing' if args.write else 'dry-run, source restored'}) ...")
         from . import patch as patchmod
         pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write)
         fixed = [r for r in pres if r["status"] == "fixed"]

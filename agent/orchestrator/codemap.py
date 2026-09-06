@@ -274,11 +274,13 @@ def _walk(node, m, file, lang, enclosing, finfo, cls):
         _walk(c, m, file, lang, new_enc, finfo, new_cls)
 
 
-def build(target):
-    """Parse every source file under `target` into a CodeMap (structure + a per-file composition view)."""
+def build(target, progress=True):
+    """Parse every source file under `target` into a CodeMap (structure + a per-file composition view).
+    On a large repo this is the slowest deterministic step, so emit a heartbeat every 300 files."""
     from tree_sitter_language_pack import get_parser
     m = CodeMap()
     parsers = {}
+    n = 0
     for f in _iter_files(target):
         lang = _EXT_LANG[f.suffix.lower()]
         try:
@@ -294,4 +296,7 @@ def build(target):
         m.files[path] = finfo
         _walk(tree.root_node, m, path, lang, "<module>", finfo, None)
         finfo.imports = sorted(m.imports.get(path, ()))
+        n += 1
+        if progress and n % 300 == 0:
+            print(f"[codemap] parsed {n} files ...", flush=True)
     return m

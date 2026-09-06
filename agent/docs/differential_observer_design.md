@@ -1,8 +1,11 @@
 # Design: the Differential / State Observer (synthetic micro-harness)
 
-*Status: DESIGN — for review before building. The general proof mechanism for the vuln classes that have no
-dangerous sink (business logic, IDOR, workflow, broken access control) — the "complex, unseen" half of the
-North Star, beyond the 9 injection classes.*
+*Status: BUILT 2026-09-06 (commit acd2fc4) — Tier 1 (function harness) shipped as the `differential` proof
+mode: brief-guided 2-identity synthetic harness for IDOR / broken access control (CWE-639/284/862/863/566),
+always landing `anomalous_state` (human-review). Tiers 2 (app test-client for auth/cookie/header) and 3
+(whole-app boot) and the dedicated threat-model detection pin remain follow-ups; today the notebook surfaces
+authz findings (prompt-nudged), which route to the observer. The general proof mechanism for the vuln classes
+that have no dangerous sink — the "complex, unseen" half of the North Star, beyond the 9 injection classes.*
 
 ---
 

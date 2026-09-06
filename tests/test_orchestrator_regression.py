@@ -321,6 +321,36 @@ def test_pin_nosqli():
     assert _pin("javascript", "coll.find({ user: req.body.u })") == "NoSQLi"
 
 
+def test_pin_php():
+    assert _pin("php", '$r = $db->query("SELECT * FROM u WHERE id=".$id);') == "SQLi"
+    assert _pin("php", 'shell_exec("find ".$name);') == "cmd"
+    assert _pin("php", '$o = unserialize($data);') == "deser"
+
+
+def test_pin_ruby():
+    assert _pin("ruby", 'system("lookup " + id)') == "cmd"
+    assert _pin("ruby", 'eval(params[:code])') == "eval"
+    assert _pin("ruby", 'Marshal.load(data)') == "deser"
+
+
+def test_codemap_parses_ruby(tmp_path):
+    _write(tmp_path, "a.rb", "class C\n  def show(id)\n    fetch(id)\n  end\nend\ndef fetch(id)\n  system(id)\nend\n")
+    cmap = codemap.build(str(tmp_path), progress=False)
+    fi = next(f for p, f in cmap.files.items() if p.endswith("a.rb"))
+    assert any(f.name == "fetch" for f in fi.functions)
+    assert any(c.name == "C" and any(m.name == "show" for m in c.methods) for c in fi.classes)
+    assert "system" in [callee for _c, callee, _f, _l in cmap.calls]   # call edge fetch->system
+
+
+def test_codemap_parses_php(tmp_path):
+    _write(tmp_path, "a.php", "<?php\nclass C {\n  public function show($id){ return lookup($id); }\n}\nfunction lookup($n){ return shell_exec($n); }\n")
+    cmap = codemap.build(str(tmp_path), progress=False)
+    fi = next(f for p, f in cmap.files.items() if p.endswith("a.php"))
+    assert any(f.name == "lookup" for f in fi.functions)
+    assert any(c.name == "C" for c in fi.classes)
+    assert "lookup" in [callee for _c, callee, _f, _l in cmap.calls]    # show->lookup edge
+
+
 def test_frontend_file_suppresses_server_sink(tmp_path):
     _write(tmp_path, "api.js", "export async function apiFetch(url){ window.x=1; return fetch(url); }")
     cmap = codemap.build(str(tmp_path))

@@ -16,14 +16,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 _EXT_LANG = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
-             ".jsx": "javascript", ".ts": "typescript", ".tsx": "tsx", ".mts": "typescript"}
+             ".jsx": "javascript", ".ts": "typescript", ".tsx": "tsx", ".mts": "typescript",
+             ".rb": "ruby", ".php": "php"}
 _SKIP = {"node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build", "vendor",
          "site-packages", "test", "tests", "__tests__", "spec", "examples", "example"}
 
 _FUNC_DEF = {"function_definition", "function_declaration", "method_definition",
-             "generator_function_declaration", "function_expression", "arrow_function"}
-_CLASS_DEF = {"class_definition", "class_declaration"}
-_CALL = {"call", "call_expression"}
+             "generator_function_declaration", "function_expression", "arrow_function",
+             "method", "singleton_method",                # ruby
+             "method_declaration"}                        # php (function_definition already covers php funcs)
+_CLASS_DEF = {"class_definition", "class_declaration", "class"}   # +class = ruby (module handled separately)
+_CALL = {"call", "call_expression", "function_call_expression", "member_call_expression",
+         "scoped_call_expression", "method_call", "command"}      # +php +ruby
 
 
 @dataclass
@@ -127,18 +131,21 @@ def _txt(node):
 
 
 def _callee_name(call_node):
-    """The name being called: `foo(...)` -> foo, `a.b.foo(...)` -> foo, `obj.method(...)` -> method."""
-    fn = call_node.child_by_field_name("function")
+    """The name being called: `foo(...)` -> foo, `a.b.foo(...)` -> foo, `obj.method(...)` -> method.
+    ruby: the callee is the `method` field; php member-call is the `name` field."""
+    fn = (call_node.child_by_field_name("function") or call_node.child_by_field_name("method")
+          or call_node.child_by_field_name("name"))
     if fn is None:
         fn = call_node.children[0] if call_node.children else None
     if fn is None:
         return ""
-    if fn.type in ("identifier",):
+    if fn.type in ("identifier", "name", "constant"):          # py/js identifier, php name, ruby constant
         return _txt(fn)
-    if fn.type in ("attribute", "member_expression"):          # a.b.foo -> foo
-        last = fn.child_by_field_name("attribute") or fn.child_by_field_name("property")
+    if fn.type in ("attribute", "member_expression", "member_access_expression", "scoped_call_expression"):
+        last = (fn.child_by_field_name("attribute") or fn.child_by_field_name("property")
+                or fn.child_by_field_name("name"))
         return _txt(last) if last else _txt(fn).split(".")[-1]
-    return _txt(fn).split(".")[-1].split("(")[0]
+    return _txt(fn).split("::")[-1].split(".")[-1].split("(")[0].strip()
 
 
 def _def_name(node):
@@ -188,9 +195,11 @@ def _is_exported(node, lang):
             return True
         if lang == "python" and t == "module":                 # top-level def in a module = importable
             return True
+        if lang in ("ruby", "php") and t == "program":         # top-level def / public method = callable
+            return True
         p = p.parent
         depth += 1
-    return lang != "python" and _cjs_export(node)               # CommonJS: module.exports / exports.x
+    return lang not in ("python", "ruby", "php") and _cjs_export(node)   # CommonJS: module.exports / exports.x
 
 
 def _decorators(node):
@@ -210,7 +219,7 @@ def _params(node):
         if p is not None:
             return " ".join(_txt(p).split())[:200]
     for c in node.children:
-        if c.type in ("parameters", "formal_parameters"):
+        if c.type in ("parameters", "formal_parameters", "method_parameters"):   # +ruby method_parameters
             return " ".join(_txt(c).split())[:200]
         if c.type == "identifier":                        # arrow fn with a single bare param: x => ...
             return f"({_txt(c)})"
@@ -264,11 +273,13 @@ def _walk(node, m, file, lang, enclosing, finfo, cls):
         if callee:
             m.calls.append((enclosing, callee, file, node.start_point[0] + 1))
             m._callers[callee].add(enclosing)
-            if callee in ("require", "__import__"):            # require('x') -> import edge
+            if callee in ("require", "require_relative", "__import__", "load", "autoload"):  # +ruby require
                 args = node.child_by_field_name("arguments")
                 if args is not None:
                     m.imports[file].add(_txt(args).strip("()\"' "))
-    elif t in ("import_statement", "import_from_statement", "import_declaration"):
+    elif t in ("import_statement", "import_from_statement", "import_declaration",
+               "require_once_expression", "require_expression", "include_expression",   # php
+               "include_once_expression", "namespace_use_declaration"):
         m.imports[file].add(" ".join(_txt(node)[:120].split()))
     for c in node.children:
         _walk(c, m, file, lang, new_enc, finfo, new_cls)

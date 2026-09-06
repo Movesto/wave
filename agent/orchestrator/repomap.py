@@ -56,7 +56,37 @@ _SINKS_JS = [
 ]
 
 
+# PHP sinks (complete table -- PHP source doesn't use the py/js-shaped _SINKS_COMMON patterns)
+_SINKS_PHP = [
+    ("SQLi",     re.compile(r"->query\s*\(|mysqli_query|mysql_query|pg_query|->exec\s*\(|->prepare\s*\(\s*[\"'][^\"']*\$")),
+    ("cmd",      re.compile(r"\b(system|exec|shell_exec|passthru|proc_open|popen)\s*\(|`[^`]*\$")),
+    ("eval",     re.compile(r"\beval\s*\(|\bassert\s*\(\s*[\"']|create_function\s*\(|call_user_func\s*\(")),
+    ("path",     re.compile(r"\b(fopen|file_get_contents|file_put_contents|readfile|unlink|fwrite)\s*\(|"
+                            r"\b(include|include_once|require|require_once)\b[^;\n]*\$")),
+    ("ssrf",     re.compile(r"curl_exec|curl_init|fsockopen|file_get_contents\s*\(\s*[\"']?https?:")),
+    ("deser",    re.compile(r"\bunserialize\s*\(")),
+    ("xss",      re.compile(r"\becho\s+[^;]*\$|\bprint\s+[^;]*\$|print_r\s*\(\s*\$")),
+    ("redirect", re.compile(r"header\s*\(\s*[\"']\s*Location\s*:")),
+]
+# Ruby sinks (complete table)
+_SINKS_RUBY = [
+    ("SQLi",     re.compile(r"\.execute\s*\(|\.find_by_sql\s*\(|connection\.execute|\.exec_query\s*\(|"
+                            r"\bwhere\s*\(\s*[\"'][^\"']*#\{")),
+    ("cmd",      re.compile(r"\b(system|exec|spawn)\s*\(|`[^`]*#\{|%x[\(\{]|IO\.popen|Open3\.|Kernel\.(system|exec)")),
+    ("eval",     re.compile(r"\beval\s*\(|instance_eval|class_eval|module_eval|\.send\s*\(|__send__")),
+    ("path",     re.compile(r"File\.(open|read|write|delete|new)\s*\(|IO\.read\s*\(|Kernel\.load")),
+    ("ssrf",     re.compile(r"Net::HTTP|URI\.(open|parse)|open\s*\(\s*[\"']?https?:|HTTParty|RestClient|Faraday")),
+    ("deser",    re.compile(r"Marshal\.load|YAML\.load\b|Oj\.load|Psych\.load\b")),
+    ("xss",      re.compile(r"\.html_safe|\braw\s*\(|render\s+inline:")),
+    ("redirect", re.compile(r"redirect_to\s+")),
+]
+
+
 def _lang_sinks(lang):
+    if lang == "php":
+        return _SINKS_PHP
+    if lang == "ruby":
+        return _SINKS_RUBY
     return (_SINKS_PY if lang == "python" else _SINKS_JS) + _SINKS_COMMON
 
 

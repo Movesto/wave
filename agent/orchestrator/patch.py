@@ -97,13 +97,22 @@ def _gate_b(file):
 
 
 def _gate_a(model, target, c, rec, have_docker, max_steps):
-    """Re-run the SAME oracle on the patched code. Returns (still_vulnerable, note)."""
+    """Re-run the SAME proof on the patched code. Returns (status, note), status in:
+      'still'    -- the exploit RE-FIRED on the patched code (rung1 proven / investigate confirmed) -> the
+                    patch FAILED.
+      'cleared'  -- the proof re-ran and the exploit DEMONSTRABLY no longer fires (rung1 safe / investigate
+                    refuted) -> the patch holds.
+      'unproven' -- we could NOT re-witness either way (rung1 unknown / investigate believed|blocked|
+                    anomalous, or no docker) -> the patch is UNVERIFIED, must NOT be called fixed.
+    Only 'cleared' certifies a fix. A non-re-witness never counts as fixed (the false-'fixed' bug: a flaky
+    reverify that merely fails to re-confirm is not evidence the fix works)."""
     oracle = str(rec.get("oracle", ""))
     if oracle.startswith("rung1") or (c.provable and c.file.endswith(".py")):
-        mr = rung1.micro_exec(c, rt=None)
-        return (mr.verdict == "proven"), f"rung1 -> {mr.verdict}: {mr.reason[:100]}"
+        mr = rung1.micro_exec(c, rt=None)                   # deterministic -- re-run the exact canary
+        status = {"proven": "still", "safe": "cleared"}.get(mr.verdict, "unproven")
+        return status, f"rung1 -> {mr.verdict}: {mr.reason[:100]}"
     if not have_docker:
-        return True, "cannot reverify (docker unavailable) -- treat as still-vulnerable (conservative)"
+        return "unproven", "cannot reverify the fix (docker unavailable) -- patch UNVERIFIED, not fixed"
     mode = briefs._proof_mode(c)                             # match prove's proof-shape routing
     scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"))
     img = briefs._image_for(c.file)
@@ -122,7 +131,10 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
                                                                   (90 if briefs._is_js(c.file) else 45)))
     finally:
         repro.remove(target)
-    return (v.verdict == "confirmed"), f"investigate -> {v.verdict}: {(v.why or '')[:100]}"
+    # confirmed = re-fired (still); refuted = the model RAN it and saw it is now safe (cleared);
+    # believed/blocked/anomalous = could not re-witness -> UNPROVEN (never a fix).
+    status = {"confirmed": "still", "refuted": "cleared"}.get(v.verdict, "unproven")
+    return status, f"investigate -> {v.verdict}: {(v.why or '')[:100]}"
 
 
 def run(model, target, findings_path=None, budget=10, out_dir=None, write=False, max_steps=6):
@@ -199,14 +211,23 @@ def _patch_one(model, target, c, surv, have_docker, max_steps, write):
         return {"status": "apply-failed", "patch": patch, "note": "function slice not found in file"}
     kept = False
     try:
-        still, a_note = _gate_a(model, target, c, surv, have_docker, max_steps)
+        a_status, a_note = _gate_a(model, target, c, surv, have_docker, max_steps)   # still|cleared|unproven
         ok_b, b_note = _gate_b(c.file)
-        gate_a = "STILL-VULNERABLE" if still else "blocked"
+        gate_a = {"still": "STILL-VULNERABLE", "cleared": "cleared", "unproven": "UNPROVEN"}[a_status]
         gate_b = "pass" if ok_b else "regressed"
-        fixed = (not still) and ok_b
-        status = "fixed" if fixed else "patch-rejected"
-        if fixed and write:
-            kept = True                                     # keep the verified patch on disk
+        # A fix is CERTIFIED only when the exploit demonstrably no longer fires (cleared) AND the file still
+        # parses. `still` -> rejected. `unproven` (couldn't re-witness / flaky reverify) -> NOT fixed, report
+        # patch-unverified -- never certify a fix we could not actually re-prove holds.
+        if not ok_b:
+            status = "patch-rejected"                       # broke the file
+        elif a_status == "cleared":
+            status = "fixed"
+        elif a_status == "still":
+            status = "patch-rejected"                       # exploit re-fired
+        else:
+            status = "patch-unverified"                     # could not re-witness -> human/re-run needed
+        if status == "fixed" and write:
+            kept = True                                     # keep only a CERTIFIED patch on disk
         return {"status": status, "patch": patch, "gate_a": gate_a, "gate_b": gate_b,
                 "gate_a_note": a_note, "gate_b_note": b_note, "written": kept}
     finally:

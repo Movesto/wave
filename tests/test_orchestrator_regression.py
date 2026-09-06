@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.orchestrator import (briefs, codemap, detector, provision, reachability, rung1, search, taint)
 from agent.orchestrator import investigate as inv
+from agent.orchestrator import patch as patchmod
 from agent.orchestrator import prove
 from agent.orchestrator import repomap
 from agent.orchestrator.models import Candidate
@@ -353,7 +354,61 @@ def test_probe_refused_is_down():
         assert provision._probe("http://x")[0] is False
 
 
-# ============================ 10. web search/read degrade + url unwrap ============================
+# ============================ 10. patch Gate A: a fix must be CLEARED, not merely non-re-confirmed ========
+
+class _FakeV:
+    def __init__(self, verdict): self.verdict, self.why, self.ran, self.evidence, self.cwe, self.trail = verdict, "", 1, "", "", []
+
+
+class _FakeMR:
+    def __init__(self, verdict): self.verdict, self.reason, self.evidence, self.marker, self.stubs = verdict, "r", "", "", []
+
+
+def _patch_status(a_status, gate_b_ok=True):
+    with mock.patch.object(patchmod, "gen_patch", return_value="def f():\n    return 1\n"), \
+         mock.patch.object(patchmod, "_apply", return_value="ORIG"), \
+         mock.patch.object(patchmod, "_gate_a", return_value=(a_status, "n")), \
+         mock.patch.object(patchmod, "_gate_b", return_value=(gate_b_ok, "b")), \
+         mock.patch("pathlib.Path.write_text"):
+        return patchmod._patch_one(None, ".", _cand(cwe="CWE-502"), {}, True, 6, False)["status"]
+
+
+def test_gate_a_investigate_believed_is_unproven_not_still():
+    # the authentik false-'fixed' bug: a reverify that comes back `believed` (couldn't re-witness) must be
+    # `unproven`, NOT counted as cleared.
+    with mock.patch.object(patchmod.invmod, "investigate", return_value=_FakeV("believed")), \
+         mock.patch.object(patchmod.repro, "build", return_value=None), \
+         mock.patch.object(patchmod.repro, "remove"):
+        st, _ = patchmod._gate_a(None, ".", _cand(), {"oracle": "investigate (5 run(s))"}, True, 6)
+    assert st == "unproven"
+
+
+def test_gate_a_mappings_rung1():
+    for v, exp in (("proven", "still"), ("safe", "cleared"), ("unknown", "unproven")):
+        with mock.patch.object(patchmod.rung1, "micro_exec", return_value=_FakeMR(v)):
+            st, _ = patchmod._gate_a(None, ".", _cand(cwe="CWE-78", provable=True),
+                                     {"oracle": "rung1"}, True, 6)
+        assert st == exp, (v, st)
+
+
+def test_patch_fixed_only_when_cleared():
+    assert _patch_status("cleared", True) == "fixed"
+
+
+def test_patch_unverified_when_reverify_could_not_rewitness():
+    # a non-fix whose reverify was believed/blocked -> unproven -> patch-unverified, NEVER fixed
+    assert _patch_status("unproven", True) == "patch-unverified"
+
+
+def test_patch_rejected_when_still_vulnerable():
+    assert _patch_status("still", True) == "patch-rejected"
+
+
+def test_patch_rejected_when_gate_b_regressed():
+    assert _patch_status("cleared", False) == "patch-rejected"
+
+
+# ============================ 11. web search/read degrade + url unwrap ============================
 
 def test_web_read_empty_and_bad_url():
     assert search.web_read("") == ""

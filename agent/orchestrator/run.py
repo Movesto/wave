@@ -214,7 +214,10 @@ def cmd_patch(args):
     results, paths = patchmod.run(model, args.target, findings_path=args.findings, budget=args.budget,
                                   out_dir=out_dir, write=args.write)
     fixed = [r for r in results if r["status"] == "fixed"]
-    print(f"\nPATCH + REVERIFY: {len(fixed)} fixed, {len(results) - len(fixed)} rejected/failed  "
+    unver = [r for r in results if r["status"] == "patch-unverified"]
+    rej = [r for r in results if r["status"] not in ("fixed", "patch-unverified")]
+    print(f"\nPATCH + REVERIFY: {len(fixed)} fixed (exploit demonstrably no longer fires), "
+          f"{len(unver)} unverified (couldn't re-witness -- NOT fixed), {len(rej)} rejected/failed  "
           f"({'WROTE verified patches' if args.write else 'dry-run -- sources restored'})")
     print(f"patches -> {paths['patches']}")
     for r in results:

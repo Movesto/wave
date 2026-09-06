@@ -294,6 +294,25 @@ def test_asan_report_is_grounding_marker():
     assert not inv._real_exec("copied\nEXIT=0")
 
 
+def test_proof_mode_differential_for_access_control():
+    # IDOR / broken-access-control CWEs route to the differential (2-identity) observer, others do not
+    assert briefs._proof_mode(_cand(unit="get_order(id,user)", cwe="CWE-639")) == "differential"
+    assert briefs._proof_mode(_cand(unit="h()", cwe="CWE-862")) == "differential"
+    assert briefs._proof_mode(_cand(unit="q(x)", cwe="CWE-89")) == "call"
+
+
+def test_differential_brief_content():
+    b = briefs._brief_for(_cand(unit="get_order(order_id, user)", cwe="CWE-639", sink="db.get_order(order_id)"),
+                          ".", "n/a", mode="differential")
+    assert "TWO-IDENTITY" in b and "BASELINE" in b and "ATTACK" in b
+    assert "anomalous_state" in b and "NEVER" in b            # never `confirmed` for business logic
+
+
+def test_authz_class_maps_to_cwe_639():
+    for cls in ("authz", "idor", "access", "bola"):
+        assert prove._CLASS_CWE.get(cls) == "CWE-639"
+
+
 # ============================ 6. prove wiring (_to_candidate, _apply_gate) ============================
 
 def test_to_candidate_resolves_enclosing_function(tmp_path):

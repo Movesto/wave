@@ -48,7 +48,11 @@ def _is_sanitizer(candidate):
 
 # class CWE -> the proof-shape brief mode (the model's proof recipe for that class). Canary classes
 # (cmd/sqli/nosqli/ssrf/path) never reach here -- rung1 witnesses them deterministically.
-_MODE_BY_CWE = {"CWE-1336": "ssti", "CWE-94": "ssti", "CWE-1321": "protopoll", "CWE-502": "deser"}
+# CWE-639 (IDOR) / CWE-284/862/863 (broken access control) -> the differential/state observer: a no-sink
+# class proven behaviourally (run as user A requesting user B's resource, observe the crossed boundary).
+_MODE_BY_CWE = {"CWE-1336": "ssti", "CWE-94": "ssti", "CWE-1321": "protopoll", "CWE-502": "deser",
+                "CWE-639": "differential", "CWE-284": "differential", "CWE-862": "differential",
+                "CWE-863": "differential", "CWE-566": "differential"}
 _C_EXTS = (".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx")
 # C/C++ memory-safety / format-string: compile with AddressSanitizer + UBSan and let the SANITIZER be the
 # observer (a crafted input that trips ASan = a witnessed, near-zero-FP memory-safety proof, like a fuzzer).
@@ -127,12 +131,45 @@ def _asan_brief(candidate, target, rel, code, fn):
         f"actual sanitizer report.")
 
 
+def _differential_brief(candidate, target, rel, code, fn):
+    """The DIFFERENTIAL / STATE observer: a no-sink access-control class (IDOR / broken authz) is proven
+    BEHAVIOURALLY -- run the handler as user A requesting user B's resource and observe whether the ownership
+    boundary is crossed. The harness owns the recipe (a 2-identity synthetic mini-harness); the model owns the
+    framing (which arg is the caller identity vs. the target id) and drives it. Verdict is always human-review
+    (anomalous_state), never a witnessed injection."""
+    return (
+        f"File: {rel}. Function: {candidate.unit}. Suspected {candidate.cwe} ({candidate.family}); "
+        f"sink: {candidate.sink}.\n\nCode around the handler:\n{code}\n\n"
+        f"This is a possible BROKEN ACCESS CONTROL / IDOR -- there is NO injection sink to trip; the proof is "
+        f"BEHAVIOURAL: run the handler as ONE user requesting ANOTHER user's resource and observe whether it "
+        f"returns their data (a crossed ownership boundary). The repo is mounted at /work. Build a minimal "
+        f"TWO-IDENTITY harness at /work/wave_diff.py and run it:\n"
+        f"1. import the handler `{fn}` from its module (add /work to sys.path; stub any import it needs).\n"
+        f"2. STUB the data store it reads (the db/ORM/get call) with an in-memory dict seeded with TWO users' "
+        f"records, e.g.:  store = {{1: {{'owner':'userA','secret':'A-DATA'}}, 2: {{'owner':'userB',"
+        f"'secret':'B-DATA'}}}}  -- monkeypatch the exact function the handler calls so it returns store[id].\n"
+        f"3. Call the handler TWICE (you decide which parameter is the CALLER IDENTITY (user/session) and "
+        f"which is the TARGET id; if unsure, try both orderings):\n"
+        f"   - BASELINE: as userA requesting userA's OWN record (id=1) -> expect 'A-DATA'.\n"
+        f"   - ATTACK:   as userA requesting userB's record (id=2)     -> if it returns 'B-DATA', there is NO "
+        f"ownership check.\n"
+        f"4. print both results clearly (e.g. 'BASELINE: ...' and 'ATTACK: ...').\n"
+        f"CONCLUDE 'anomalous_state' (human-review) if the ATTACK call returned userB's data / mutated userB's "
+        f"record / elevated the role -- cite the two printed outputs as the observed DELTA. CONCLUDE 'refuted' "
+        f"if the handler raised/denied/returned nothing on the cross-user request (an ownership guard exists). "
+        f"This is a business-logic judgment anchored to a real observed state change -- use 'anomalous_state', "
+        f"NEVER 'confirmed' (that is reserved for a tool-witnessed injection). If you cannot import/stub the "
+        f"handler to drive it, conclude 'blocked'.")
+
+
 def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
     fn = str(candidate.unit).split("(")[0].strip()
     if mode == "asan":                                     # C/C++ compile-with-sanitizer proof (self-contained)
         return _asan_brief(candidate, target, rel, code, fn)
+    if mode == "differential":                             # IDOR / access-control 2-identity harness
+        return _differential_brief(candidate, target, rel, code, fn)
     extra = ""
     if scaffold:
         cont, run_hint = scaffold

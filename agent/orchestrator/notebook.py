@@ -33,7 +33,10 @@ _NOTE_SYS = (
     "You are a penetration tester taking NOTES on ONE source file, to return to later when planning "
     "exploits. The repo map has already flagged candidate sinks/routes in this file (shown as HINTS); "
     "confirm or DISMISS each against the actual code. Record ONLY reachable issues -- a parameterized "
-    "query, an escaped value, or a constant is NOT a finding. Output ONE JSON object, nothing else:\n"
+    "query, an escaped value, or a constant is NOT a finding. ALSO look for BROKEN ACCESS CONTROL / IDOR "
+    "(class 'authz'): a handler that reads or writes a resource by an id/owner from the request but never "
+    "checks the resource belongs to the CALLER (no ownership/role check) -- these have NO injection sink, so "
+    "the map won't hint them; you must spot them. Output ONE JSON object, nothing else:\n"
     '{"purpose": "<what this file/module does, one line>", '
     '"untrusted_inputs": "<request params/body/headers/args an external caller controls, or none>", '
     '"findings": [{"line": <int>, "function": "<name>", "class": "<sqli|nosqli|cmd|eval|path|ssrf|xss|'

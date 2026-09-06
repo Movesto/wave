@@ -38,6 +38,10 @@ _CANARY_CLASSES = {"cmd", "sqli", "nosqli", "ssrf", "path"}
 _SEV = {"cmd": 9, "eval": 9, "deser": 8, "ssti": 8, "sqli": 8, "nosqli": 7, "ssrf": 6, "path": 6,
         "protopollution": 6, "proto": 6, "prototype": 6, "xss": 4, "authz": 5, "redirect": 3, "other": 1}
 
+# intrinsically-dangerous sinks: executing them with a handed-in payload proves the MECHANISM (always true),
+# not attacker-control -> a `confirmed` here needs HIGH-confidence reachability (else -> anomalous_state).
+_INTRINSIC_CWE = {"CWE-502", "CWE-95", "CWE-1336"}          # deserialization / eval-exec / SSTI
+
 _VERDICT_ORDER = ["confirmed", "anomalous_state", "refuted", "blocked", "believed"]
 # only these are DONE on resume; blocked (under-provisioned / transient 500) + believed are re-tried
 _TERMINAL = {"confirmed", "refuted", "anomalous_state"}
@@ -201,11 +205,21 @@ def _apply_gate(rec, c, cmap):
         rec["why"] = ("[value-taint] the sink arguments do not derive from untrusted input in this function "
                       "-- likely a mislabel; human review. " + rec.get("why", ""))
         return rec
-    reachable, note = reachability.gate(cmap, c.unit)        # (3) reachability gate
+    reachable, conf, note = reachability.gate(cmap, c.unit)  # (3) reachability gate (+ confidence)
     rec["reachability"] = note
     if not reachable:
         rec["verdict"] = "anomalous_state"
         rec["why"] = f"[reachability] {note}. " + rec.get("why", "")
+        return rec
+    # (4) intrinsic-sink bar: deser/eval/ssti sinks are dangerous BY NATURE -- running them with a handed-in
+    # payload proves the MECHANISM (trivially true), not that an ATTACKER controls the input. So a `confirmed`
+    # here needs HIGH-confidence reachability from a real untrusted entry; if the only path is an ambiguous
+    # name-based edge, attacker-control is unproven -> human review (authentik pickle case).
+    if c.cwe in _INTRINSIC_CWE and conf != "high":
+        rec["verdict"] = "anomalous_state"
+        rec["why"] = (f"[intrinsic-sink] {c.cwe} executes arbitrary input (mechanism proven), but "
+                      f"attacker-control of that input is NOT established -- reachability is {conf}-confidence "
+                      f"({note}). Verify the caller/input source. " + rec.get("why", ""))
     return rec
 
 
@@ -259,6 +273,14 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
             rec = _prove_one(model, target, c, have_docker, max_steps, online=online)
             if gate:                                        # untrusted-reachability gate on confirmations
                 rec = _apply_gate(rec, c, cmap)
+            if rec.get("verdict") == "confirmed":           # final EVIDENCE AUDIT (only high-stakes confirms):
+                from . import audit                          # re-run the proof + a fresh clean-room skeptic
+                av, anote = audit.audit(model, c, rec)
+                if av != "confirmed":
+                    rec["verdict"] = av
+                    rec["why"] = anote + " " + rec.get("why", "")
+                rec["audit"] = anote
+                print(f"[prove]   audit -> {rec['verdict']}", flush=True)
             _record_outcome(case, hyp_id, c, rec)
             out = {"file": surv.get("file", ""), "line": int(surv.get("line") or 0),
                    "class": str(surv.get("class") or "other").lower(), "cwe": c.cwe, "unit": c.unit,

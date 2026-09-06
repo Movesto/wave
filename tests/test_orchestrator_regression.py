@@ -156,15 +156,41 @@ def internal_only(name):
 def test_reachability_route_reaches_sink(tmp_path):
     _write(tmp_path, "r.py", _REACH_SRC)
     cmap = codemap.build(str(tmp_path))
-    reachable, _ = reachability.gate(cmap, "do_it")
-    assert reachable
+    reachable, conf, _ = reachability.gate(cmap, "do_it")
+    assert reachable and conf == "high"          # unique name -> high confidence
 
 
 def test_reachability_internal_only_not_reached(tmp_path):
     _write(tmp_path, "r.py", _REACH_SRC)
     cmap = codemap.build(str(tmp_path))
-    reachable, _ = reachability.gate(cmap, "internal_only")
+    reachable, _conf, _ = reachability.gate(cmap, "internal_only")
     assert not reachable
+
+
+_AMBIG_SRC = '''class _App:
+    def get(self, p):
+        def deco(fn): return fn
+        return deco
+app = _App()
+@app.get("/x")
+def route_a(name):
+    handle(name)
+def handle(name):
+    decode(name)
+def decode(name):                 # decode #1 -- the sink, defined twice (ambiguous name)
+    __import__("os").system(name)
+class Other:
+    def decode(self, name):       # decode #2 -- makes `decode` an ambiguous name-based edge
+        return name
+'''
+
+
+def test_reachability_ambiguous_edge_is_low_confidence(tmp_path):
+    # `decode` is defined twice -> the route->...->decode chain leans on a name-based guess -> low confidence
+    _write(tmp_path, "a.py", _AMBIG_SRC)
+    cmap = codemap.build(str(tmp_path))
+    reachable, conf, _ = reachability.gate(cmap, "decode")
+    assert reachable and conf == "low"
 
 
 def test_is_frontend_browser_global():
@@ -255,6 +281,25 @@ def test_apply_gate_taint_never_overrides_canary(tmp_path):
     c = _cand(file=str(tmp_path / "r.py"), unit="run_route(name)", line=8, cwe="CWE-78")
     rec = {"verdict": "confirmed", "oracle": "rung1 micro-exec", "taint": "unrelated", "why": ""}
     # run_route IS a route (untrusted entry) so reachability keeps it; taint must NOT touch a canary confirm
+    assert prove._apply_gate(rec, c, cmap)["verdict"] == "confirmed"
+
+
+def test_apply_gate_intrinsic_sink_low_confidence_downgrades(tmp_path):
+    # a deser (CWE-502) confirm reachable ONLY via an ambiguous `decode` edge -> mechanism, not exploitability
+    _write(tmp_path, "a.py", _AMBIG_SRC)
+    cmap = codemap.build(str(tmp_path))
+    c = _cand(file=str(tmp_path / "a.py"), unit="decode(name)", line=12, cwe="CWE-502")
+    rec = {"verdict": "confirmed", "oracle": "investigate (4 run(s))", "taint": "flows", "why": ""}
+    out = prove._apply_gate(rec, c, cmap)
+    assert out["verdict"] == "anomalous_state" and "intrinsic-sink" in out["why"]
+
+
+def test_apply_gate_intrinsic_sink_high_confidence_kept(tmp_path):
+    # a deser confirm with a HIGH-confidence chain (unique names) stays confirmed
+    _write(tmp_path, "r.py", _REACH_SRC)
+    cmap = codemap.build(str(tmp_path))
+    c = _cand(file=str(tmp_path / "r.py"), unit="do_it(name)", line=11, cwe="CWE-502")
+    rec = {"verdict": "confirmed", "oracle": "investigate (4 run(s))", "taint": "flows", "why": ""}
     assert prove._apply_gate(rec, c, cmap)["verdict"] == "confirmed"
 
 
@@ -408,7 +453,55 @@ def test_patch_rejected_when_gate_b_regressed():
     assert _patch_status("cleared", False) == "patch-rejected"
 
 
-# ============================ 11. web search/read degrade + url unwrap ============================
+# ============================ 11. evidence audit (corroboration + fresh auditor) ==================
+
+from agent.orchestrator import audit as auditmod
+
+
+class _FakeModel:
+    def __init__(self, reply): self._reply = reply
+    def generate(self, *a, **k): return self._reply
+
+
+def test_audit_canary_must_reproduce(tmp_path):
+    # a canary confirm that does NOT re-fire on the independent re-run -> downgraded (non-deterministic)
+    p = _write(tmp_path, "v.py", "import os\ndef f(x):\n    os.system('a ' + x)\n")
+    c = _cand(file=str(p), unit="f(x)", line=3, cwe="CWE-78", provable=True)
+    with mock.patch.object(auditmod.rung1, "micro_exec",
+                           return_value=type("MR", (), {"verdict": "unknown", "reason": "no hit"})()):
+        v, _ = auditmod.audit(None, c, {"oracle": "rung1 micro-exec"})
+    assert v == "anomalous_state"
+
+
+def test_audit_fresh_auditor_downgrade(tmp_path):
+    # the clean-room auditor says 'downgrade' (mechanism only) -> confirmed becomes needs-review
+    p = _write(tmp_path, "v.py", "import pickle\ndef decode(d):\n    return pickle.loads(d)\n")
+    c = _cand(file=str(p), unit="decode(d)", line=3, cwe="CWE-502", provable=False)
+    m = _FakeModel('{"reason":"input comes from the DB, not attacker-controlled","verdict":"downgrade"}')
+    v, note = auditmod.audit(m, c, {"oracle": "investigate (5 run(s))", "evidence": "pickle executed"})
+    assert v == "anomalous_state" and "audit" in note
+
+
+def test_audit_fresh_auditor_upholds(tmp_path):
+    p = _write(tmp_path, "v.py", "import pickle\ndef decode(d):\n    return pickle.loads(d)\n")
+    c = _cand(file=str(p), unit="decode(d)", line=3, cwe="CWE-502", provable=False)
+    m = _FakeModel('{"reason":"the request body flows straight to pickle.loads","verdict":"upheld"}')
+    v, _ = auditmod.audit(m, c, {"oracle": "investigate (5 run(s))", "evidence": "pickle executed"})
+    assert v == "confirmed"
+
+
+def test_audit_failure_upholds(tmp_path):
+    # a glitch in the auditor must NOT silently clear a real confirmation -> upholds
+    p = _write(tmp_path, "v.py", "import pickle\ndef decode(d):\n    return pickle.loads(d)\n")
+    c = _cand(file=str(p), unit="decode(d)", line=3, cwe="CWE-502", provable=False)
+
+    class _Boom:
+        def generate(self, *a, **k): raise RuntimeError("boom")
+    v, _ = auditmod.audit(_Boom(), c, {"oracle": "investigate (5 run(s))", "evidence": "x"})
+    assert v == "confirmed"
+
+
+# ============================ 12. web search/read degrade + url unwrap ============================
 
 def test_web_read_empty_and_bad_url():
     assert search.web_read("") == ""

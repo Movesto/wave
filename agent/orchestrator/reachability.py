@@ -89,10 +89,26 @@ def reaches_untrusted_entry(cmap, sink_name, max_hops=12):
     return None, None
 
 
+def _ambiguous_names(cmap, path):
+    """Names in the chain that are defined in MORE THAN ONE place -- a name-based call edge to such a name is
+    a GUESS (the graph matched on name, not binding), e.g. `decode`/`load`/`run`. A chain that leans on one
+    is low-confidence (open question 10.1: false name-based edges)."""
+    return [n for n in path if len(cmap.funcs.get(n, [])) > 1]
+
+
 def gate(cmap, sink_func_name):
-    """Classify a proven sink by reachability. Returns (reachable: bool, note: str)."""
+    """Classify a proven sink by reachability. Returns (reachable: bool, confidence: str, note: str).
+    confidence 'high' = a clean chain with no ambiguous (common-name) edges; 'low' = the ONLY path relies on
+    an ambiguous name-based edge (likely a false chain -- caller of the intrinsic-sink bar in prove)."""
     entry, path = reaches_untrusted_entry(cmap, (sink_func_name or "").split("(")[0].strip())
-    if entry is not None:
-        return True, f"reachable from untrusted entry {entry.name} via {'->'.join(path)}"
-    return False, ("sink PROVEN to fire, but no path from an untrusted-facing entry (route / CLI / handler) "
-                   "reaches it -- may be internal/intended; needs human review (function-level, name-based)")
+    if entry is None:
+        return False, "high", (
+            "sink PROVEN to fire, but no path from an untrusted-facing entry (route / CLI / handler) reaches "
+            "it -- may be internal/intended; needs human review (function-level, name-based)")
+    ambig = _ambiguous_names(cmap, path)
+    conf = "low" if ambig else "high"
+    note = f"reachable from untrusted entry {entry.name} via {'->'.join(path)}"
+    if conf == "low":
+        note += (f"  [LOW confidence: {sorted(set(ambig))} is defined in multiple places -- this name-based "
+                 f"call edge may be false (open Q 10.1)]")
+    return True, conf, note

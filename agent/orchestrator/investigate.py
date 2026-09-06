@@ -263,6 +263,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
     run_log = ""                                            # the LAST run's full output (grep/tail read it)
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
     seen_cmds = set()                                       # to nudge a model re-running the same command
+    believed_nudged = False                                 # one-time: a belief must cite evidence
     for step in range(max_steps):
         try:
             msg = model.chat(messages, tools=tools, temperature=0.2)
@@ -287,8 +288,19 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
             if name == "conclude":
                 verdict, why = _finalize(str(args.get("verdict", "believed")).lower(),
                                          str(args.get("why", "")), ran, saw_prov, saw_real)
+                evidence = str(args.get("evidence", ""))
+                # a BELIEF is not a bare assertion -- it must cite evidence. One-time nudge if it doesn't.
+                if (verdict == "believed" and not believed_nudged and step < max_steps - 1
+                        and len((evidence + why).strip()) < 40):
+                    believed_nudged = True
+                    messages.append({"role": "user", "content":
+                        "A 'believed' verdict must PRESENT EVIDENCE, not assert. Re-read the exact line(s) "
+                        "that support it (grep_output / re-read the file), and if web_search is available and "
+                        "you are unsure, research to strengthen or overturn it. Then conclude again with the "
+                        "concrete evidence (a cited line / observation / source)."})
+                    continue
                 print(f"[investigate:native] concluded: {verdict} after {ran} run(s)", flush=True)
-                return Verdict(verdict, why, str(args.get("evidence", "")), str(args.get("cwe", "")), ran, trail)
+                return Verdict(verdict, why, evidence, str(args.get("cwe", "")), ran, trail)
             if name == "grep_output":
                 content = _grep(run_log, str(args.get("pattern", "")), int(args.get("lines") or 10))
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})

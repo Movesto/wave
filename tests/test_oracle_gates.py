@@ -78,4 +78,5 @@ check("good trace passes correspondence", correspondence(GOOD_TRACE, VULN)[0])
 check("good trace passes substantiveness", substantiveness(GOOD_TRACE)[0])
 
 print(f"\n{_passed} passed, {_failed} failed")
-sys.exit(1 if _failed else 0)
+if __name__ == "__main__":                 # don't sys.exit at import time -- it breaks pytest collection
+    sys.exit(1 if _failed else 0)

@@ -256,6 +256,34 @@ def test_proof_mode_call():
     assert briefs._proof_mode(_cand(unit="q(x)", cwe="CWE-89")) == "call"
 
 
+def test_proof_mode_asan_c_memory():
+    assert briefs._proof_mode(_cand(file="v.c", unit="f(x)", cwe="CWE-120")) == "asan"
+    assert briefs._proof_mode(_cand(file="v.cc", unit="f(x)", cwe="CWE-787")) == "asan"
+
+
+def test_proof_mode_asan_only_c():
+    # asan is C/C++ only -- a memory CWE on a .py file does not route to asan
+    assert briefs._proof_mode(_cand(file="v.py", unit="f(x)", cwe="CWE-120")) == "call"
+    # a cmd finding in C is not asan (it's the marker-side-effect witness)
+    assert briefs._proof_mode(_cand(file="v.c", unit="f(x)", cwe="CWE-78")) == "call"
+
+
+def test_asan_brief_content():
+    b = briefs._brief_for(_cand(file="v.c", unit="vuln(char* x)", cwe="CWE-120", sink="strcpy"), ".", "n/a",
+                          mode="asan")
+    assert "-fsanitize=address,undefined" in b and "gcc" in b and "AddressSanitizer" in b
+    bcpp = briefs._brief_for(_cand(file="v.cc", unit="f(x)", cwe="CWE-787", sink="memcpy"), ".", "n/a",
+                             mode="asan")
+    assert "g++ -fsanitize" in bcpp
+
+
+def test_asan_report_is_grounding_marker():
+    # an ASan/UBSan report counts as a REAL observed effect -> a confirm can be grounded on the sanitizer
+    assert inv._real_exec("==1==ERROR: AddressSanitizer: stack-buffer-overflow")
+    assert inv._real_exec("v.c:4:5: runtime error: signed integer overflow")
+    assert not inv._real_exec("copied\nEXIT=0")
+
+
 # ============================ 6. prove wiring (_to_candidate, _apply_gate) ============================
 
 def test_to_candidate_resolves_enclosing_function(tmp_path):

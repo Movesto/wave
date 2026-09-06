@@ -48,15 +48,25 @@ def _is_sanitizer(candidate):
 # class CWE -> the proof-shape brief mode (the model's proof recipe for that class). Canary classes
 # (cmd/sqli/nosqli/ssrf/path) never reach here -- rung1 witnesses them deterministically.
 _MODE_BY_CWE = {"CWE-1336": "ssti", "CWE-94": "ssti", "CWE-1321": "protopoll", "CWE-502": "deser"}
+_C_EXTS = (".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx")
+# C/C++ memory-safety / format-string: compile with AddressSanitizer + UBSan and let the SANITIZER be the
+# observer (a crafted input that trips ASan = a witnessed, near-zero-FP memory-safety proof, like a fuzzer).
+_ASAN_CWE = {"CWE-120", "CWE-121", "CWE-122", "CWE-124", "CWE-125", "CWE-134", "CWE-787", "CWE-190", "CWE-416"}
+
+
+def _is_c(path):
+    return (path or "").lower().endswith(_C_EXTS)
 
 
 def _proof_mode(candidate):
-    """Pick the investigate proof shape for a candidate: sanitizer (return-value) > per-class brief
-    (ssti/protopoll/deser) > render (DOM XSS) > call (default). Used by prove and patch so the scaffold,
-    image, and brief stay consistent."""
+    """Pick the investigate proof shape for a candidate: asan (C/C++ compile+sanitizer) > sanitizer
+    (return-value) > per-class brief (ssti/protopoll/deser) > render (DOM XSS) > call (default). Used by
+    prove and patch so the scaffold, image, and brief stay consistent."""
+    cwe = getattr(candidate, "cwe", "") or ""
+    if _is_c(getattr(candidate, "file", "")) and cwe in _ASAN_CWE:
+        return "asan"
     if _is_sanitizer(candidate):
         return "sanitizer"
-    cwe = getattr(candidate, "cwe", "") or ""
     if cwe in _MODE_BY_CWE:
         return _MODE_BY_CWE[cwe]
     if cwe in _XSS_CWES:
@@ -80,10 +90,42 @@ def _image_for(path):
     return "python:3.12-slim"
 
 
+def _asan_brief(candidate, target, rel, code, fn):
+    """C/C++ memory-safety proof: the model writes a self-contained PoC, compiles it with AddressSanitizer +
+    UBSan, and runs it -- the SANITIZER is the observer (a report = a witnessed, near-zero-FP proof)."""
+    cxx = rel.lower().endswith((".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"))
+    cc = "g++" if cxx else "gcc"
+    ext = "cpp" if cxx else "c"
+    return (
+        f"File: {rel}. Function: {candidate.unit}. Suspected {candidate.cwe} ({candidate.family}); "
+        f"sink: {candidate.sink}.\n\nCode around the sink:\n{code}\n\n"
+        f"This is a C/C++ MEMORY-SAFETY / format-string finding. PROVE it with AddressSanitizer -- the "
+        f"compiler's own bug detector -- as the witness (a fuzzer-grade, near-zero-false-positive oracle). "
+        f"The repo is mounted at /work. Steps:\n"
+        f"1. Write a SELF-CONTAINED proof-of-concept at /work/wave_poc.{ext}: include or COPY the vulnerable "
+        f"function `{fn}` (and only the minimal declarations/types it needs -- stub anything external), and a "
+        f"main() that calls it with a CRAFTED input that should trip the bug (an oversized buffer for an "
+        f"overflow, e.g. a 500-char string; a user-controlled format string like \"%n%n%s%s\" for a format "
+        f"bug; a negative/huge size for an integer/alloc bug).\n"
+        f"2. Compile WITH the sanitizers:\n"
+        f"   {cc} -fsanitize=address,undefined -g -w /work/wave_poc.{ext} -o /work/wave_poc\n"
+        f"   (if it won't compile standalone, copy in the missing struct/typedef/#define -- keep the "
+        f"vulnerable line identical; you only need it to build, not to be the whole program.)\n"
+        f"3. Run it:  /work/wave_poc <your crafted arg>   (also try a SHORT/benign arg as a control).\n"
+        f"CONFIRMED if the run prints an `ERROR: AddressSanitizer:` report (heap/stack/global-buffer-overflow, "
+        f"use-after-free, ...) or a `runtime error:` from UBSan on the crafted input but NOT on the benign one "
+        f"-- cite that exact report line as the evidence. REFUTED if both inputs run clean (a real guard: a "
+        f"bounds check, strncpy with a correct size, snprintf, a length validation). If you truly cannot get "
+        f"a standalone PoC to compile after trying, conclude 'blocked'. Do NOT conclude confirmed without an "
+        f"actual sanitizer report.")
+
+
 def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
     fn = str(candidate.unit).split("(")[0].strip()
+    if mode == "asan":                                     # C/C++ compile-with-sanitizer proof (self-contained)
+        return _asan_brief(candidate, target, rel, code, fn)
     extra = ""
     if scaffold:
         cont, run_hint = scaffold

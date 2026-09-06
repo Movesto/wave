@@ -115,10 +115,11 @@ _PROV_SIGNALS = (
     "executable file not found", "no such file or directory",
 )
 
-# a run that actually got the TARGET to execute (scaffold marker / injected effect / the fn threw) --
-# distinguishes "refuted because safe" from "refuted because nothing ever ran".
+# a run that actually got the TARGET to execute (scaffold marker / injected effect / the fn threw / a
+# sanitizer fired) -- distinguishes "refuted because safe" from "refuted because nothing ever ran".
 _REAL_EXEC_MARKERS = ("WAVE_RESULT", "WAVE_RENDER_CANARY", "WAVE_OUTPUT", "WAVE_CALL_ERROR", "WAVE_LOAD_ERROR",
-                      "uid=", "wave_HIT", "WAVE-PWNED")
+                      "uid=", "wave_HIT", "WAVE-PWNED",
+                      "AddressSanitizer", "runtime error:", "LeakSanitizer", "SUMMARY: ")  # C/C++ ASan/UBSan
 
 
 def _provision_signal(text):

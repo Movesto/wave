@@ -143,7 +143,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False):
             img = js_env.ensure_browser_runner() or js_env.prepare(target) or img
         else:
             img = js_env.prepare(target) or img
-    step_to = 120 if mode == "render" else (90 if briefs._is_js(c.file) else 45)
+    step_to = 120 if mode in ("render", "asan") else (90 if briefs._is_js(c.file) else 45)  # asan compiles
     try:
         # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
         # controlled egress point when online, not blanket container network access.

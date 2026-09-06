@@ -1,429 +1,222 @@
-# Wave — A Chain-of-Thought Source-Code Vulnerability Scanner
+# wave — a local, autonomous vulnerability-discovery & repair agent
 
-Fine-tuning an 8B open model (Qwen3-8B) with QLoRA to scan source code and emit a
-**structured, reasoned verdict**: is this code vulnerable, which CWE, where, how the
-tainted data flows from source to sink, and how to fix it — all on a single
-16 GB consumer GPU (RTX 5070 Ti).
+You point it at a codebase; it **finds** real vulnerabilities, **proves** them by making the bug actually
+happen in a sandbox, and proposes a **fix** that it then **re-verifies** — running on one workstation GPU, with
+no dependence on a frontier cloud model for the parts that matter.
 
-This README is the honest project log: what we built, the dead ends we hit, how we
-got past them, and the things we got **wrong**. The mistakes are the most useful part.
-
----
-
-## What the model does
-
-Given a code snippet wrapped in `<SCAN>…</SCAN>`, the model produces:
-
-```
-<think>
-1. `uid` enters from the route parameter /user/<uid> (untrusted).
-2. It is concatenated into a SQL string via an f-string.
-3. The string is passed to db.execute with no parameterization.
-4. An attacker controlling `uid` can alter the query — SQL injection.
-</think>
-status: confirmed
-cwe: CWE-89
-severity: HIGH
-line: 3
-trace: uid -> f-string -> q -> db.execute(q)
-fix: Use a parameterized query, e.g. cur.execute("...WHERE id = %s", (uid,))
-```
-
-The **headline metric is false-positive rate on safe code** (alert fatigue is what
-kills a scanner in practice); vuln recall is secondary.
+> This README is the honest project log. wave began as a chain-of-thought *scanner* (fine-tuning an 8B model
+> to emit reasoned verdicts — that history and its central finding live in
+> [`docs/TECHNICAL_REPORT.md`](docs/TECHNICAL_REPORT.md)). It has since **pivoted** to the neuro-symbolic
+> agent described below: the model reasons, deterministic tools prove. The full design is in
+> [`agent/docs/wave_architecture_plan.md`](agent/docs/wave_architecture_plan.md).
 
 ---
 
-## Usage
-
-`scan.py` is the CLI. It chunks code into functions, scans each, and reports findings
-with their reasoning.
+## Quickstart
 
 ```bash
-python scan.py app.py             # scan a file (pretty terminal output)
-python scan.py src/               # scan a directory
-cat snippet.py | python scan.py -  # scan stdin
-python scan.py app.py --explain    # include the model's <think> reasoning
-python scan.py app.py --json       # machine-readable
-python scan.py src/ --sarif        # SARIF 2.1.0 → GitHub Code Scanning / IDEs
+# 1. install (Docker must also be running -- proofs run in throwaway containers)
+pip install -r requirements.txt
+
+# 2. point at a model -- LOCAL via ollama (private, the design intent):
+export WAVE_API_BASE="http://localhost:11434/v1"
+export WAVE_MODEL="hf.co/<your-gguf>:<tag>"
+#    ...or a CLOUD OpenAI-compatible endpoint (stronger, off-box -- sends code out):
+# export WAVE_API_BASE="https://openrouter.ai/api/v1"
+# export WAVE_MODEL="deepseek/deepseek-v4-flash-0731"
+# export WAVE_API_KEY="<your key>"
+
+# 3. run the whole pipeline on a repo (find -> prove -> patch)
+python -m agent.orchestrator.run all /path/to/target-repo --patch
 ```
 
-Example output:
+Read the verdicts in `target-repo/wave_findings.jsonl` (and the full report in `casefile.json`). A
+`confirmed` was witnessed by a tool; `anomalous_state` needs human review; `believed`/`blocked` are unproven
+leads. It's resumable — re-run to continue. On Windows PowerShell, use `$env:WAVE_API_BASE="..."` instead of
+`export`. First run pulls a couple of Docker images (and, for XSS, a chromium image — a one-time download).
 
-```
-app.py
-  [HIGH] CWE-89 SQL Injection  (line 14, in get_user)
-      trace: request.args["id"] -> q -> db.execute
-      fix:   use a parameterized query
-  [MEDIUM] CWE-79 Cross-site Scripting  (line 31, in render)
-      trace: req.query.name -> innerHTML
-      fix:   escape output
+<details><summary>No model yet? Fastest path with ollama</summary>
 
-2 issues found.
-```
-
-- **SARIF output** carries CWE tags and `security-severity`, so it renders in GitHub's
-  Security tab and IDEs with no extra config.
-- **CI-friendly**: exits non-zero when any HIGH finding is present (fails the build).
-- Unlike grep-based linters, every finding includes the **source → sink data-flow trace**
-  and a fix — that's the point of a reasoning scanner.
-
----
-
-## The core architecture
-
-- **Teacher → student distillation.** A teacher generates chain-of-thought traces;
-  the 8B student is fine-tuned on them. The teacher was a *local, free* model
-  (`gpt-oss-20b`) — no API costs.
-- **"Shapes"** — trace formats: `shape1` (local single-file scan), `shape2`
-  (needs more context), `shape3` (cross-file), `shape4` (synthesis).
-- **The oracle.** For data sourced from CVE *patches*, the diff between vulnerable
-  and fixed code tells us exactly where the vulnerability is — ground truth for free.
-- **Verification gates** (`cot/gates.py`, `cot/oracle.py`) — a generated trace is
-  kept only if its CWE matches the label, its sink lands near the patched lines,
-  and it describes a concrete source→sink flow. Bad traces are dropped, not
-  hand-cleaned.
-
----
-
-## The journey (including the dead ends)
-
-### Era 0 — From-scratch / plain SFT (abandoned)
-The project began trying to train a small LM from scratch and then plain
-instruction-tuning. It plateaued and produced weak verdicts with no reasoning.
-**Lesson:** for a reasoning task, distilling chain-of-thought into a capable base
-beats training a small model from zero. Pivoted to the CoT + QLoRA approach.
-(The old code — `train.py`, `train_qwen_sft.py`, etc. — has been removed.)
-
-### Era 1 — The data-quality wars
-The first CoT pilot "worked" but the data was quietly broken in ways that train a
-model to do the *wrong* thing:
-- **Safe-branch contradictions** — `safe` records carried `cwe:` tags and
-  `severity: HIGH` in their fields (the generator stored raw model output without
-  normalizing). This literally teaches the model to flag safe code. Fixed with
-  `normalize_safe_assistant()`.
-- **Menu-echo placeholders** (`cwe: CWE-78 | none`) — 349 records cleaned.
-- **Fragment hunks** — imports/types only, no traceable logic.
-- **Deterministic-clone duplication** — a fixed-seed local model produced 736
-  "synthetic React" records that were really **12 unique snippets cloned ~60×**.
-  **Lesson:** synthetic/template data needs prompt-level diversity *and* temperature,
-  and you must always count unique snippets after generation.
-
-### Era 2 — The accuracy ceiling
-Across versions v2–v8, balanced accuracy sat at **~72–74%**, and every data tweak
-just slid the operating point along the same curve — lower FPR bought lower recall
-and vice-versa. The ceiling turned out to be **teacher quality**: a weak local
-teacher can't produce above-weak reasoning, so the student inherits the cap.
-
-### Era 3 — Verified regeneration (Trellis-inspired)
-Instead of hand-cleaning, **gate every generated trace against the oracle and drop
-failures.** Built `cot/oracle.py` (diff → changed lines/identifiers, with a Bandit
-fallback) and `cot/gates.py`. This made the weak teacher *usable* — we keep only the
-traces it gets right. Also discovered the deepest data bug: `morefixes_pairs.jsonl`
-`<SCAN>` blocks were concatenated diff-hunks, not coherent functions — so we switched
-to parsing the **32,008 raw `.patch` files** directly (99% oracle-locatable).
-
-### Era 4 — Bigger student: DeepSeek-R1-Distill-14B (FAILED)
-Hypothesis: a larger, reasoning-distilled student breaks the ceiling. We QLoRA-trained
-R1-Distill-Qwen-14B for ~27 hours. **It was unusable:**
-- **0/42 parse success** — its distilled reasoning reflex emits free-form prose, never
-  our structured format. (Exactly the "over-thinking" risk we'd flagged.)
-- **52% accuracy** even when we re-scored its prose leniently — chance level.
-
-**Verdict:** R1's reasoning is math/logic-tuned, not security-code-tuned, and a light
-LoRA can't override it. Capacity was never the bottleneck — data was. We shelved it.
-
-### Era 5 — Operating points (v6 / v7 / v8)
-With the verified pipeline scaled up, three models mapped the full ROC curve:
-| Model | recall | FPR | balanced acc |
-|---|---|---|---|
-| v7 (safe-leaning) | 44.9% | 11.5% | 66.7% |
-| v6 (middle) | 61.5% | 27.6% | 67.0% |
-| **v8 (vuln-leaning)** | 72.5% | 31.2% | **70.7%** |
-The one slice that genuinely *lifted* the curve was `shape1_verified` (oracle-gated
-data) — confirming that **only higher-quality data lifts the curve; weighting only
-slides along it.**
-
-### Era 6 — The great hardening, and a costly discovery
-We audited the entire corpus for label correctness and consistency. We found —
-and this is the big one — **1,147 training records whose code also appeared in the
-eval set** (normalized for whitespace). Exact-match de-leaking at train time had
-missed these formatting-variant near-duplicates, which means **past v6/v7/v8 eval
-numbers were somewhat inflated.** Removing them made the eval trustworthy.
-
-The corpus went through five gauntlets: structural/label consistency, contradiction
-removal (same code labeled both safe *and* vuln), normalized dedup, eval-leak removal,
-and over-length removal. Result: a clean, balanced, leak-free corpus.
-
-### Era 7 — Deterministic mining (no teacher needed)
-Key realization: **most conversion needs no model at all.**
-- **R2Vul** ships expert reasoning + CWE per row → reformat directly (+10,483
-  C/Java/C# traces, free).
-- **Patches** → the oracle gives the real sink; **per-CWE "contracts"**
-  (`cot/cwe_contracts.py`, authored once, above the ceiling) supply the reasoning
-  skeleton → assemble traces deterministically (`cot/template_reason.py`).
-- Mined JS/TS/React + PHP/C/Java/Go patches, CVEfixes, cve-fix-pairs, and FixJS.
-
-The corpus grew **8,132 → 26,177 traces** across 7 languages, with the old crypto /
-ReDoS / DoS / auth blind spots filled.
-
-### Era 8 — v9
-Retrained on the hardened, leak-free, 2.5×-larger corpus. (Validation/eval in
-progress at the time of writing.)
-
----
-
-## What we got wrong (the honest list)
-
-1. **Trusted exact-match de-leaking.** Formatting-variant duplicates leaked train↔eval
-   for many versions → inflated numbers. *Always normalize before dedup/leak checks.*
-2. **Bet on a bigger student (R1-14B) before exhausting data.** Burned ~27h proving
-   the bottleneck was data, not capacity — which we could have reasoned about first.
-3. **Synthetic data didn't transfer.** Synthetic React scored 100% on synthetic eval
-   and **29% on real React.** Toy data teaches toy patterns.
-4. **Over-strict verification, twice.** Gates built for *generation* (policing a weak
-   model on unlabeled code) were wrong for *cleaning labeled expert data* — they
-   false-quarantined **1,858 good R2Vul traces** (treating prose words like "SQL" as
-   missing code identifiers, and legit "if an attacker…" exploit explanations as
-   "speculation"). Caught only by sampling the quarantine. *Always eyeball what a
-   filter rejects before trusting it.*
-5. **First template assembler grounded the sink on the wrong token** — it grabbed a
-   *fix*-introduced identifier (`whitelisting`) instead of the real sink. Fixed by
-   locating the sink via contract markers in the *vulnerable* code.
-6. **Inherited a second model's two wrong premises** ("FP is fixed in v8" — it wasn't,
-   v8's FPR is 31–50%; "the traces are already improved" — they weren't) and had to
-   correct them against the actual eval.
-7. **Gemini-as-teacher dead end.** GCP free-trial credits aren't eligible for the
-   Generative Language API; a free-tier project couldn't be created. Abandoned;
-   teacher stayed local.
-8. **Underestimated eval time** (quoted 30–60 min; the full eval is ~11 h).
-
----
-
-## Key lessons
-
-- **Data quality is the ceiling, not model size.** Proven twice (R1-14B failure;
-  v6/v7/v8 plateau).
-- **A weak model never *authors* quality — it *applies* a contract you authored above
-  its ceiling, under a verifier.** Spend strong capability once (≈15 CWE contracts +
-  a verifier), not on every record.
-- **Headline metric = false positives.** A scanner that cries wolf is ignored.
-- **Verify labels structurally before training** — status↔label match, no
-  contradictions, no leakage — *that's where failure starts.*
-- **Sample what your filters reject.** Over-strict gates silently delete good data.
-
----
-
-## File-by-file reference
-
-### `cot/` — core library (shared, imported everywhere)
-| File | Purpose |
-|---|---|
-| `oracle.py` | Patch-diff → vulnerability location. `Region` = changed lines + touched identifiers; `locate_from_diff` / `locate_vuln` (with a Bandit fallback). This is the ground-truth localizer. |
-| `gates.py` | Verification gates for a trace: `correspondence` (identifiers exist in code), `localization` (sink near patched lines), `cwe_consistency`, `substantiveness`; `all_gates_pass`. |
-| `cwe_contracts.py` | 15 per-CWE "contracts" (markers + canonical sink + control) authored above the weak-model ceiling; `check_bleed` flags a trace that reads like a different CWE family. |
-| `template_reason.py` | **Deterministic trace assembler** — builds a `<think>`+fields trace from `(vuln, fixed, cwe)` using the oracle (real sink) + contract. No model. |
-| `postprocess.py` | Cleans raw model/template output: repairs fields, strips markdown + hallucinated CVE ids, trims run-on traces, enforces safe-verdict coherence. |
-| `fix_pairs.py` | Loads `(vuln_code, fixed_code, cwe, language)` from raw patches / morefixes / CSVs. `_EXT_LANG` (extension→language), `_RELEVANT` (sink-relevance filter), `classify`-tagging. |
-| `vuln_types.py` | Sink-pattern → vulnerability-type/CWE classifier (`classify(code)`). |
-| `generator.py` | Pluggable teacher dispatch via `WAVE_GENERATOR_BACKEND` (local / anthropic / gemini); N-sampling + critique-revise wrappers. |
-| `client.py`, `local_client.py`, `gemini_client.py` | Teacher backends: Anthropic API, local `gpt-oss-20b`, Gemini (Gemini abandoned — billing). |
-| `checkpoint.py` | Resumable JSONL checkpoint writer for long generation runs. |
-| `config.py`, `cost.py`, `code_analysis.py`, `runner.py`, `specificity.py` | Paths/config; token-cost tracking; code helpers; generation runner; candidate-specificity scorer. |
-| `shapes/` | One module per trace format: `shape1` (local scan), `shape2` (needs-context), `shape3` (cross-file), `shape4` (synthesis), plus `shape1_ts/react/verified` + `_safe` variants and `shape_react_syn`; `common.py`, `_safe_core.py`, `exemplars.py` shared helpers. |
-
-### `eval/` — evaluation harness
-| File | Purpose |
-|---|---|
-| `inference.py` | `QwenLoraPredictor` — loads base + LoRA adapter (4-bit), `predict()`, applies `postprocess`. |
-| `loader.py` | Loads the held-out eval set from `data/cot/eval/`. |
-| `parsers.py` | Parses model output → structured fields (`parse_shape1`, etc.). |
-| `scoring.py` | Metrics: headline FPR-on-safe, recall, precision, per-CWE, per-language, confusion. |
-| `config.py` | Generation config (`GEN_MAX_NEW_TOKENS`, temperature, seed). |
-| `judge.py`, `compare.py`, `report.py` | Optional Layer-2 LLM judge; run-to-run comparison; report rendering. |
-
-### Conversion / mining (raw source → traces)
-| Script | Purpose |
-|---|---|
-| `reformat_r2vul_to_shape1.py` | R2Vul → traces using its **pre-written expert reasoning** (no model). Env: `WAVE_R2VUL_LANGS/_OUT/_SPLITS`. |
-| `convert_patches_wave3.py` | CVE **patches** → traces via the template assembler. `--langs`, `--sources`, `--out`. |
-| `convert_cvefixes.py` | CVEfixes CSV → traces (`classify` for CWE; safe side capped for balance). |
-| `convert_fixjs.py` | FixJS 66K JS bug-fix pairs → **security** traces (assembler declines non-security = the filter). |
-| `convert_sft.py` | Remaining SFT `<SCAN>` pairs → traces (bandit/kaggle/etc.; label read from verdict). |
-| `convert_local.py`, `mine_r2vul_deeper.py`, `mine_clean_code.py`, `upgrade_r2vul_traces.py` | Earlier/auxiliary conversion + mining paths. |
-| `seed_verified_batch.py`, `seed_verified_batch2.py`, `manual_pilot.py` | Hand-authored seed traces (teacher = me, against the oracle). |
-
-### Generation pipeline (teacher-driven)
-| Script | Purpose |
-|---|---|
-| `run_pilot.py` | Orchestrates teacher generation of shapes into `data/cot/pilot/`. |
-| `run_verified.py` | Verified-regeneration with the **gate-feedback correction loop** (`--max-attempts`). |
-
-### Data-quality pipeline (the gauntlet)
-| Script | Purpose |
-|---|---|
-| `consolidate_traces.py` | Merge all per-shape traces into one flat `all_v8_traces.jsonl`. |
-| `clean_and_verify.py` | Clean (postprocess) → verify (status↔label, CWE, bleed) → **quarantine** failures. Reads flat file or `--pilot <file>`. |
-| `harden_corpus.py` | Removes **eval-leak**, normalized near-duplicates, over-length records; reports code↔CWE mismatches. |
-| `validate_corpus.py` | Full audit: label correctness, safe-purity, vuln-completeness, cross-label contradictions, dups. |
-| `dedup_contradictions.py` | Removes same-code-both-labels contradictions + exact duplicates. |
-| `balance_analysis.py` | Per-language / per-family vuln:safe balance report. |
-| `improve_traces.py` | Send traces to a **stronger** model to rewrite reasoning, ground truth fixed (Phase-2 lever). |
-| `rebuild_from_improved.py` | Turn improved traces back into training format (`data/cot/pilot_v9/`). |
-| `split_pilot_to_eval.py` | Carve a fixed, never-trained eval holdout from the pilot. |
-| `report_vuln_types.py` | Vuln-type coverage report across the corpus. |
-
-### Training & evaluation
-| Script | Purpose |
-|---|---|
-| `train_qwen_cot.py` | QLoRA trainer. Env: `WAVE_PILOT_DIR`, `WAVE_OUTPUT_DIR`, `WAVE_BEST_DIR`, `WAVE_SHAPE_WEIGHTS`, `WAVE_MODEL_NAME`, `WAVE_EPOCHS`, … |
-| `run_eval.py` | Full per-CWE eval (~11 h, 1,125 records). For final breakdowns. |
-| `smoke_eval.py` | **Fast 42-record smoke** (~20 min) — the day-to-day eval; same sample across versions. |
-
-### Data collection (one-off provenance — how the raw data was gathered)
-`collect_cvefixes_and_morefixes.py`, `collect_vuln_datasets.py`, `collect_security_repos.py`,
-`collect_github.py`, `collect_thestack.py`, `collect_high_priority.py`, `collect_vuln_pairs.py`,
-`collect_alpaca.py`, `collect_generate.py`, `collect_explain.py`, `collect_extra_datasets.py`.
-
-### Docs
-`README.md` (this file) · `DATA_INVENTORY.md` (every dataset on disk) ·
-`verified_regen_design.md` (oracle/gates design) · `wave_cot_workflow.md` (workflow notes).
-
-> Data and model checkpoints are **gitignored** (too large for git). The scripts above
-> regenerate the corpus from the raw sources in `data/downloads/`.
-
----
-
-## The exact process we ran (in order)
-
-This is the real sequence that produced the current corpus and models. Everything is
-deterministic and free unless noted.
-
-### 1 — Gather raw data (once)
 ```bash
-python collect_cvefixes_and_morefixes.py   # CVE patches + CVEfixes CSV
-python collect_vuln_datasets.py            # R2Vul, FixJS, etc.
-# → data/downloads/{morefixes-patches, CVEfixes, FixJS, ...}, data/r2vul_dataset/
+# install ollama (https://ollama.com), then serve a capable local model, e.g.:
+ollama pull <a-qwen3-family-model>
+ollama serve            # exposes the OpenAI-compatible API on :11434
 ```
-
-### 2 — Convert sources → traces (no model)
-```bash
-# R2Vul expert reasoning (py/js first, then C/Java/C#, then val/test splits)
-python reformat_r2vul_to_shape1.py
-WAVE_R2VUL_LANGS=java,c_sharp,c WAVE_R2VUL_OUT=data/cot/pilot/shape1_r2vul_ml.jsonl \
-  WAVE_R2VUL_SPLITS=train python reformat_r2vul_to_shape1.py
-WAVE_R2VUL_LANGS=python,javascript,java,c_sharp,c \
-  WAVE_R2VUL_OUT=data/cot/pilot/shape1_r2vul_valtest.jsonl \
-  WAVE_R2VUL_SPLITS=validation,test python reformat_r2vul_to_shape1.py
-
-# Patches → traces (JS/TS/React first, then other langs)
-python convert_patches_wave3.py --langs javascript,typescript,react \
-  --out data/cot/pilot/shape1_wave3_jsts.jsonl
-python convert_patches_wave3.py --langs php,c,cpp,java,go,ruby,csharp \
-  --out data/cot/pilot/shape1_wave3_other.jsonl
-
-# Lower-fidelity sources
-python convert_cvefixes.py --max-safe 4000   # CVEfixes
-python convert_fixjs.py                       # FixJS (security-filtered)
-python convert_sft.py                         # remaining SFT scan pairs
-```
-
-### 3 — Clean → verify → harden → audit (the gauntlet)
-```bash
-python clean_and_verify.py                                   # the 8,132 base set
-python clean_and_verify.py --pilot data/cot/pilot/shape1_r2vul_ml.jsonl --append
-# … repeat --pilot --append for each new source file …
-python dedup_contradictions.py    # same-code-both-labels + exact dups
-python harden_corpus.py           # eval-leak + near-dup + over-length
-python validate_corpus.py         # MUST report zero issues
-python balance_analysis.py        # sanity: per-language vuln:safe balance
-# → data/cot/pilot_clean/  (clean corpus)  +  data/cot/quarantine/  (rejects, kept)
-```
-
-### 4 — Train
-```bash
-WAVE_PILOT_DIR=data/cot/pilot_clean \
-WAVE_OUTPUT_DIR=data/qwen_cot_v10 WAVE_BEST_DIR=data/qwen_cot_v10_best \
-  python train_qwen_cot.py
-# (optional weight override, e.g. the v8 rebalance:)
-# WAVE_SHAPE_WEIGHTS='{"shape1_ts":2.0,"shape1_verified_safe":1.5}' python train_qwen_cot.py
-```
-
-### 5 — Evaluate (smoke for iteration, full eval only for final breakdown)
-```bash
-WAVE_ADAPTER_PATH=data/qwen_cot_v10_best python smoke_eval.py          # ~20 min
-WAVE_ADAPTER_PATH=data/qwen_cot_v10_best python run_eval.py eval \
-  --label cot_v10 --skip-judge                                          # ~11 h, per-CWE
-```
-
-> **Checkpoint discipline:** never overwrite `data/qwen_cot_best`; each version is
-> preserved as `data/qwen_cot_vN_best`, and `qwen_cot_best` is repointed only after a
-> version proves better on the smoke.
+Then set `WAVE_API_BASE`/`WAVE_MODEL` as above. A stronger model proves more; see **Models** below.
+</details>
 
 ---
 
-## Data sources
+## The one idea
 
-| Source | Size | Fidelity |
-|---|---|---|
-| R2Vul (C/Py/Java/JS/C#) | ~18.3K rows | high (expert reasoning + CWE) |
-| morefixes CVE patches | 32K `.patch` files | high (diff oracle) |
-| CVEfixes | ~31K rows | low (no CWE/oracle) |
-| FixJS (JS bug-fixes) | 66K pairs | low (general bugs, security-filtered) |
-| cve-fix-pairs | 40 rows | high |
+> **The model DECIDES and TRANSLATES. Deterministic tools PERCEIVE and PROVE.**
 
-166 distinct CWEs represented; heavily web-injection (XSS/SQLi/SSRF/path-traversal)
-with crypto / DoS / auth coverage added in the mining waves.
+The model reads code, forms a hypothesis, writes a payload or a patch, and renders the verdict. The tools hold
+the codebase's structure and run whatever the model asks in a sandbox, reporting **what actually happened** —
+facts the model cannot fabricate. The rule that keeps it honest:
+
+> **A verdict of `confirmed` requires an effect the model actually caused and a tool actually observed.**
+> Reasoning alone can only *propose* (`believed`); only an observed effect can *confirm*.
+
+Every false positive we ever saw came from a model concluding without acting. This makes acting mandatory for
+a confirmation.
 
 ---
 
-## Acknowledgments & Citations
+## The pipeline — four stages
 
-This project is built on the work of many others. Credit and thanks to the authors of
-the datasets, models, methods, and tools below. *(Citations verified June 2026; please
-still confirm each dataset's **license/terms** before redistribution.)*
+```
+TARGET REPO
+   │
+   ▼  STAGE 1  EYES        tree-sitter whole-repo map + call graph + security pins;
+   │                       a model "notebook" reads the pinned files into per-file notes
+   ▼  STAGE 2  DETECTOR    clean-room asymmetric falsification: a fresh model instance,
+   │                       shown only the slice, tries to DISPROVE each believed finding
+   ▼  STAGE 3  PROOF LOOP  the model drives a sandbox to make the exploit happen; a tool
+   │                       WITNESSES the effect (marker in a sink, ASan report, state delta)
+   ▼  STAGE 4  PATCH       the model writes a fix; the SAME proof re-runs; certified `fixed`
+                           only if the exploit demonstrably no longer fires
+```
 
-### Datasets
-- **R2Vul** — Weyssow, Yang, Chen, Widyasari, Zhang, Huang, Nguyen, Tun, Bui, Li, Ang,
-  Liauw, Ouh, Shar & Lo, *"R2Vul: Learning to Reason about Software Vulnerabilities with
-  Reinforcement Learning and Structured Reasoning Distillation,"* 2025.
-  [arXiv:2504.04699](https://arxiv.org/abs/2504.04699) · [Zenodo 16741648](https://zenodo.org/records/16741648).
-  The backbone of our high-quality traces (pre-written `positive`/`negative_reasoning` + CWE).
-- **CVEfixes** — Bhandari, Naseer & Moonen, *"CVEfixes: Automated Collection of
-  Vulnerabilities and Their Fixes from Open-Source Software,"* PROMISE '21.
-  [doi:10.1145/3475960.3475985](https://doi.org/10.1145/3475960.3475985).
-- **MoreFixes** — Akhoundali, Nouri, Rietveld & Gadyatskaya, *"MoreFixes: A Large-Scale
-  Dataset of CVE Fix Commits Mined through Enhanced Repository Discovery,"* PROMISE '24.
-  [doi:10.1145/3663533.3664036](https://doi.org/10.1145/3663533.3664036) ·
-  [Zenodo 13983082](https://zenodo.org/records/13983082). (Our 32K-patch corpus.)
-- **FixJS** — Csuvik & Vidács, *"FixJS: A Dataset of Bug-fixing JavaScript Commits,"*
-  MSR 2022. [doi:10.1145/3524842.3528480](https://doi.org/10.1145/3524842.3528480).
-- **The Stack** — Kocetkov et al. (BigCode), *"The Stack: 3 TB of Permissively
-  Licensed Source Code,"* 2022. (Pretrain corpus.)
-- Additional SFT/seed sources: CyberNative, SecureCode, and a synthetic vulnerability
-  fix-pairs dataset (Kaggle). *(verify individual licenses/attribution before reuse)*
+Between the stages sit **honesty gates** that keep verdicts trustworthy:
 
-### Models
-- **Qwen3-8B** — Qwen Team, Alibaba, *"Qwen3 Technical Report,"*
-  [arXiv:2505.09388](https://arxiv.org/abs/2505.09388) — the student model we fine-tune.
-- **gpt-oss-20b** — OpenAI, *"gpt-oss-120b & gpt-oss-20b Model Card,"*
-  [arXiv:2508.10925](https://arxiv.org/abs/2508.10925) (Apache-2.0) — the local (free) teacher.
-- **DeepSeek-R1-Distill-Qwen-14B** — DeepSeek-AI, *"DeepSeek-R1: Incentivizing Reasoning
-  Capability in LLMs via Reinforcement Learning,"*
-  [arXiv:2501.12948](https://arxiv.org/abs/2501.12948) — tested as a larger student (not adopted).
+- **Reachability gate** — a proven sink with no path from an untrusted-facing entry → human-review, not a
+  false confirm (and it flags *ambiguous* name-based call edges as low-confidence).
+- **Context gate** — a browser/frontend file can't host a server-side vuln (a client `fetch` is not SSRF).
+- **Value-taint** — does the *specific* untrusted value actually reach the sink, or a sanitized copy?
+- **Evidence audit** — every `confirmed` is re-checked by a fresh clean-room skeptic + an independent second
+  proof; it upholds only what it can ground.
 
-### Methods & papers
-- **LoRA** — Hu et al., *"LoRA: Low-Rank Adaptation of Large Language Models,"*
-  [arXiv:2106.09685](https://arxiv.org/abs/2106.09685) (2021).
-- **QLoRA** — Dettmers et al., *"QLoRA: Efficient Finetuning of Quantized LLMs,"*
-  [arXiv:2305.14314](https://arxiv.org/abs/2305.14314) (NeurIPS 2023).
-- **Chain-of-Thought prompting** — Wei et al., *"Chain-of-Thought Prompting Elicits
-  Reasoning in Large Language Models,"* [arXiv:2201.11903](https://arxiv.org/abs/2201.11903) (NeurIPS 2022).
-- **Verifier-gated / rejection-sampling generation** — the "verified regeneration"
-  approach: keep only generations that pass an oracle/verifier.
+---
 
-### Tools & standards
-- **CWE** — MITRE Common Weakness Enumeration ([cwe.mitre.org](https://cwe.mitre.org)) — the taxonomy.
-- **Bandit** — PyCQA static analyzer — oracle fallback and a source of labeled pairs.
-- **Hugging Face** `transformers` / `peft` / `datasets` and **bitsandbytes** — training,
-  LoRA adapters, and 4-bit quantization.
+## What it can do today
+
+**Languages mapped** (tree-sitter): Python, JavaScript/TypeScript, Ruby, PHP, Go, Java, C#, Rust, C, C++.
+
+**Vulnerability classes it can *prove* (a tool witnesses the effect):**
+
+| Class | How it's witnessed |
+|---|---|
+| Command injection | injected `; touch /work/wave_HIT` runs → the marker file appears |
+| SQL / NoSQL injection | the marker reaches the query in an unsafe (unparameterized / operator) position |
+| SSRF | the marker controls the outbound request host |
+| Path traversal | a `../` payload survives to the file open |
+| XSS | rendered in headless chromium (DOM) **or** a sanitizer's return still yields a `javascript:` URL |
+| SSTI / eval | `{{7*7}}` evaluates to `49` |
+| Prototype pollution | a `__proto__` payload pollutes a fresh object |
+| Deserialization | a crafted object fires a marker side-effect on load |
+| **C/C++ memory safety** | compiled with **AddressSanitizer** → a crafted input trips a sanitizer report |
+| **IDOR / broken access control** | a synthetic 2-identity harness: user A's call returns user B's data |
+
+Classes it can't yet witness (missing deps, business logic beyond IDOR, gadget chains) are reported as
+`believed` (a reasoned lead) or `blocked` — never a false `confirmed`.
+
+---
+
+## How to run it
+
+### 1. Prerequisites
+
+- **Python** 3.11+ and the repo's deps (`pip install -r requirements.txt`), including `tree-sitter-language-pack`.
+- **Docker** running (the proof loop executes everything in throwaway containers — never on your host).
+- **A model** (pick one, next section).
+
+### 2. Point it at a model
+
+**Local (default, private — the design intent):** an ollama server serving a capable local model.
+
+```powershell
+$env:WAVE_API_BASE = "http://localhost:11434/v1"
+$env:WAVE_MODEL    = "hf.co/<your-gguf>:<tag>"     # e.g. a Qwen3-family 27B
+```
+
+**Cloud (stronger reasoning, off-box — for testing / hard targets):** any OpenAI-compatible endpoint, e.g.
+OpenRouter. Note this sends code off-box; use it deliberately.
+
+```powershell
+$env:WAVE_API_BASE = "https://openrouter.ai/api/v1"
+$env:WAVE_MODEL    = "deepseek/deepseek-v4-flash-0731"
+$env:WAVE_API_KEY  = "<your OpenRouter key>"
+```
+
+### 3. Run the whole pipeline
+
+```powershell
+python -m agent.orchestrator.run all C:\path\to\target-repo --patch
+```
+
+Useful flags: `--online` (give the model opt-in `web_search`/`web_read` for unfamiliar APIs), `--patch`
+(run Stage 4 — dry-run by default; add `--write` to keep a patch that passed both gates), `--notes-budget N`
+/ `--detect-budget N` / `--prove-budget N` (bound each stage; the model *selects* which files to deep-read on
+large repos).
+
+Outputs land in the target repo: `wave_map.md`, `wave_notebook.md/.jsonl`, `wave_candidates.jsonl`,
+`wave_findings.jsonl` (the verdicts), and `casefile.json` (the full investigation report). Every stage is
+**resumable** — re-run to continue; a terminal verdict is skipped, a `believed`/`blocked` lead is retried.
+
+### 4. Or run a single stage
+
+```powershell
+python -m agent.orchestrator.run eyes   <repo> [--notes]   # map + deterministic index; --notes runs the notebook
+python -m agent.orchestrator.run detect <repo>             # clean-room falsify the notebook's findings
+python -m agent.orchestrator.run prove  <repo> [--online]  # the confirmation ladder
+python -m agent.orchestrator.run patch  <repo> [--write]   # patch + reverify the confirmed findings
+```
+
+---
+
+## Models & the local-model plan
+
+Detection and exploitation are meant to stay **local**; a strong cloud model is supported for capability
+testing and hard targets. A measured experiment (see the docs) showed a stronger reasoner turning the local
+model's *timeouts* into real, tool-witnessed confirms — so the harness is mature and the model is the ceiling.
+
+The path back to a capable *local* model is **trace distillation**: use a strong model to drive the harness,
+let the harness **certify** which drives ended in a real observed effect, and fine-tune the local model to
+imitate only those. The trace-logger and a plain-language guide are built:
+
+- turn capture on with `WAVE_TRACE=1` (or `WAVE_TRACE_DIR=<path>`) and run normally — every *verified* drive
+  is banked to `traces/wave_traces.jsonl`;
+- see [`agent/docs/trace_training.md`](agent/docs/trace_training.md) for the how and why.
+
+---
+
+## Repo layout
+
+```
+agent/orchestrator/     the pipeline
+  codemap.py  repomap.py       Stage 1  structure map + security pins (11 languages)
+  notebook.py                  Stage 1b per-file model notes
+  detector.py                  Stage 2  clean-room falsification
+  prove.py  rung1.py           Stage 3  driver + deterministic canary observer
+  investigate.py  execute.py   Stage 3  model tool-use loop + sandboxed executor
+  briefs.py  repro.py js_env.py Stage 3 per-class proof recipes + scaffolds
+  reachability.py  taint.py    the honesty gates
+  audit.py                     Stage 3  the fresh-auditor evidence audit
+  patch.py                     Stage 4  patch + reverify
+  traces.py                    trace-logger (training data)
+  model.py                     local/cloud model interface
+  run.py                       CLI entry
+agent/bench/ghsa_bench.py      the real-CVE benchmark harness
+agent/docs/                    the architecture plan + design docs
+tests/                         `pytest tests/ -q`  (deterministic; no GPU/docker/model)
+```
+
+---
+
+## Status & honest limits
+
+- **Proven end-to-end on real code and fixtures:** command injection, IDOR (differential), C/C++ buffer
+  overflow (ASan), deserialization — each a real, grounded, tool-witnessed confirmation.
+- **Detection is the current recall bottleneck for libraries** — the map is sink-driven, so a library whose
+  vuln lives in an exported function with no classic sink can go unsurfaced (the proof engine never gets a
+  shot). Apps with routes/sinks work well.
+- **No deterministic canary for non-Python/JS languages** — they prove via the model-driven path.
+- **The local model is the ceiling.** The harness is mature; a weak reasoner thrashes where a strong one
+  drives straight to a proof. That's what trace distillation is for.
+
+Run the tests to see what's verified:
+
+```
+pytest tests/ -q
+```

@@ -1,0 +1,135 @@
+"""Safe-side audit: prove code SAFE, to veto the agent's over-flagging (false 'vuln').
+
+The witness proves INSUFFICIENCY (vuln). This is its mirror: a positive proof of SAFETY,
+via two sound mechanisms:
+  1. a guard the witness RECOGNISES and proves SUFFICIENT (full proto blocklist, backslash-
+     hardened redirect) -- assess_guard(...).sufficient,
+  2. a NEUTRALISER applied to the value (execFile arg-array, basename, parameterised query,
+     textContent, DOMPurify) -- the value cannot reach the sink in a dangerous form.
+
+SOUNDNESS is the whole point: prove_safe must return None on every genuinely-vulnerable
+case, or it would hide real bugs. Verified offline against all harder_cases before use.
+"""
+import re
+from guard_witness import assess_guard
+
+# neutraliser constructs per sink kind: applying one makes the value safe for that sink
+_NEUT = {
+    "command": [("execFile arg-array",
+                 r"(?:execFile|execFileSync|spawn|spawnSync)\s*\(\s*[^,]+,\s*\["),
+                ("escapeshellarg", r"\bescapeshellarg\s*\("),
+                ("shlex.quote", r"\bshlex\.quote\s*\(")],
+    "path": [("basename", r"\bpath\.basename\s*\(|\bbasename\s*\(")],
+    "xss": [("textContent", r"\.textContent\s*="),
+            ("DOMPurify", r"DOMPurify\.sanitize\s*\(")],
+    "sql": [("parameterised query",
+             r"(?:query|execute)\s*\(\s*[`\"'][^`\"']*(?:\?|\$\d)[^`\"']*[`\"']\s*,")],
+    "redirect": [("encodeURIComponent", r"encodeURIComponent\s*\(")],
+}
+
+
+def prove_safe(code, kind):
+    """A reason string if the code is PROVABLY safe for `kind`, else None."""
+    if not kind:
+        return None
+    # 1. a recognised, sufficient guard
+    try:
+        v = assess_guard(code, kind)
+        if v.recognised and v.sufficient:
+            return "guard recognised and proven sufficient"
+    except Exception:
+        pass
+    # 2. a neutraliser on the value
+    for label, rx in _NEUT.get(kind, []):
+        if re.search(rx, code):
+            return f"neutraliser applied: {label}"
+    # 3. path: canonicalise-then-prefix-check (resolve/realpath + startsWith(base)) is the
+    #    canonical SUFFICIENT path guard -- a control-flow guard taint analysis can't see.
+    if kind == "path" and re.search(r"\b(resolve|realpath)\s*\(", code) \
+            and re.search(r"\.startsWith\s*\(", code):
+        return "path guard: canonicalise + prefix check"
+    # 4. xss: an HTML-entity encoder is SUFFICIENT -- but ONLY in HTML-body context. In an
+    #    attribute or inside a <script> string the same encoder is wrong, so we only affirm
+    #    safe when neither context shape is present (that is the whole point of XSS context).
+    if kind == "xss" and re.search(
+            r"htmlspecialchars\s*\(|htmlentities\s*\(|escapeHTML|escape_html", code, re.I):
+        from guard_witness import _XSS_ATTR_ECHO, _XSS_IN_SCRIPT
+        if not _XSS_ATTR_ECHO.search(code) and not _XSS_IN_SCRIPT.search(code):
+            return "html-entity encoder in body context"
+    return None
+
+
+def _line_containing(code, rx):
+    for ln in code.splitlines():
+        if rx.search(ln):
+            return ln.strip()
+    return None
+
+
+# per-class signature to locate the line a RECOGNISED-sufficient guard lives on
+_GUARD_SIG = {
+    "proto": re.compile(r"""['"](?:__proto__|constructor|prototype)['"]"""),
+    "redirect": re.compile(r"""startsWith\(\s*['"]/"""),
+    "ssrf": re.compile(r"127\.0\.0\.1|localhost|169\.254|0\.0\.0\.0|::1"),
+    "path": re.compile(r"""(?:includes|indexOf|strpos|\breplace)[^\n]*\.\."""),
+    "command": re.compile(r"escapeshellcmd|preg_match|fullmatch"),
+    "xss": re.compile(r"htmlspecialchars|htmlentities|escapeHTML", re.I),
+}
+
+
+def prove_safe_ev(code, kind):
+    """Like prove_safe, but also returns the EXACT code span the proof rests on.
+
+    Returns (reason, evidence) or None. `evidence` is the real call/line prove_safe fired
+    on -- so a composed trace quotes what actually made it safe, not the first random hit.
+    """
+    reason = prove_safe(code, kind)
+    if not reason:
+        return None
+    ev = None
+    if reason.startswith("neutraliser applied"):
+        for _label, rx in _NEUT.get(kind, []):
+            m = re.search(rx, code)
+            if m:
+                # quote the whole source line the call sits on (in-context, not a bare `foo(`)
+                start = code.rfind("\n", 0, m.start()) + 1
+                end = code.find("\n", m.end())
+                ev = code[start:(end if end != -1 else len(code))].strip()
+                break
+    elif reason.startswith("path guard"):
+        ev = _line_containing(code, re.compile(r"\b(?:resolve|realpath)\s*\("))
+    elif reason.startswith("html-entity"):
+        m = re.search(r"htmlspecialchars\s*\([^)]*\)|htmlentities\s*\([^)]*\)"
+                      r"|escapeHTML\s*\([^)]*\)", code, re.I)
+        ev = m.group(0).strip() if m else None
+    elif reason.startswith("guard recognised"):
+        sig = _GUARD_SIG.get(kind)
+        ev = _line_containing(code, sig) if sig else None
+    return reason, ev
+
+
+# ---------- soundness self-test against the real harder cases ----------
+def _selftest():
+    import json
+    _WK = {"CWE-22": "path", "CWE-59": "path", "CWE-78": "command", "CWE-89": "sql",
+           "CWE-918": "ssrf", "CWE-1321": "proto", "CWE-601": "redirect", "CWE-79": "xss"}
+    cases = [json.loads(l) for l in open("harder_cases.jsonl", encoding="utf-8")]
+    false_safe, fired = [], []
+    for i, c in enumerate(cases):
+        kind = _WK.get((c["cwe"] or "").upper())
+        why = prove_safe(c["code"], kind)
+        if why and c["label"] == "vuln":
+            false_safe.append((i, c["cwe"], why))          # UNSOUND -- proved a vuln 'safe'
+        if why:
+            fired.append((i, c["cwe"], c["label"], why))
+    print("prove_safe fired on:")
+    for i, cwe, lab, why in fired:
+        mark = "  " if lab == "safe" else "!!"
+        print(f"  {mark} case {i:2d} {cwe:8s} truth={lab:5s} -> {why}")
+    print(f"\nUNSOUND (proved a VULN case safe): {'NONE' if not false_safe else false_safe}")
+    return not false_safe
+
+
+if __name__ == "__main__":
+    ok = _selftest()
+    print("\nSOUND:", ok)

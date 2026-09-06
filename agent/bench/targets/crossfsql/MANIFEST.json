@@ -1,0 +1,7 @@
+{
+  "name": "crossfsql",
+  "stack": "python/flask",
+  "vulns": [
+    {"cwe": "CWE-89", "route": "search_items", "param": "term", "desc": "cross-function SQLi -- READER finds it, Rung 1 confirms (never boots)"}
+  ]
+}

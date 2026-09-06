@@ -1,0 +1,14 @@
+# Core runtime for the wave pipeline (running against an ollama or cloud OpenAI-compatible model).
+# Docker is also required but is not a pip dependency.
+tree-sitter-language-pack>=0.14
+requests>=2.31
+PyYAML>=6.0
+
+# --- Optional ---
+# crawl4ai            # richer `web_read` deep-reads (falls back to requests+strip if absent); needs a browser
+# Running a LOCAL transformers model + a trained LoRA adapter (WAVE_ADAPTER) instead of the ollama/cloud API
+# needs the ML stack; skip these if you use ollama or a cloud endpoint:
+# torch
+# transformers
+# peft
+# bitsandbytes

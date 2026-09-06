@@ -1,0 +1,7 @@
+{
+  "name": "redosvuln",
+  "stack": "python/flask",
+  "vulns": [
+    {"cwe": "CWE-1333", "route": "GET /validate", "param": "s", "desc": "ReDoS -- catastrophic regex backtracking"}
+  ]
+}

@@ -1,0 +1,222 @@
+rules:
+  # ============ PHP ============
+  - id: php-command
+    mode: taint
+    pattern-sources:
+      - pattern: "$_GET[...]"
+      - pattern: "$_POST[...]"
+      - pattern: "$_REQUEST[...]"
+      - pattern: "$_COOKIE[...]"
+      - pattern: "$_SERVER[...]"
+    pattern-sinks:
+      - pattern: "system(...)"
+      - pattern: "exec(...)"
+      - pattern: "shell_exec(...)"
+      - pattern: "passthru(...)"
+      - pattern: "popen(...)"
+      - pattern: "proc_open(...)"
+    pattern-sanitizers:
+      - pattern: "escapeshellarg(...)"
+    message: PHP command injection
+    languages: [php]
+    severity: ERROR
+  - id: php-lfi-path
+    mode: taint
+    pattern-sources:
+      - pattern: "$_GET[...]"
+      - pattern: "$_POST[...]"
+      - pattern: "$_REQUEST[...]"
+      - pattern: "$_COOKIE[...]"
+    pattern-sinks:
+      - pattern: "include(...)"
+      - pattern: "include_once(...)"
+      - pattern: "require(...)"
+      - pattern: "require_once(...)"
+      - pattern: "readfile(...)"
+      - pattern: "file_get_contents(...)"
+      - pattern: "fopen(...)"
+    pattern-sanitizers:
+      - pattern: "basename(...)"
+    message: PHP LFI / path traversal
+    languages: [php]
+    severity: ERROR
+  - id: php-sql
+    mode: taint
+    pattern-sources:
+      - pattern: "$_GET[...]"
+      - pattern: "$_POST[...]"
+      - pattern: "$_REQUEST[...]"
+    pattern-sinks:
+      - pattern: "mysqli_query(...)"
+      - pattern: "$C->query(...)"
+      - pattern: "mysql_query(...)"
+    message: PHP SQL injection
+    languages: [php]
+    severity: ERROR
+  - id: php-code
+    mode: taint
+    pattern-sources:
+      - pattern: "$_GET[...]"
+      - pattern: "$_POST[...]"
+      - pattern: "$_REQUEST[...]"
+    pattern-sinks:
+      - pattern: "eval(...)"
+      - pattern: "assert(...)"
+      - pattern: "create_function(...)"
+    message: PHP code injection
+    languages: [php]
+    severity: ERROR
+  - id: php-redirect
+    mode: taint
+    pattern-sources:
+      - pattern: "$_GET[...]"
+      - pattern: "$_POST[...]"
+      - pattern: "$_REQUEST[...]"
+    pattern-sinks:
+      - pattern: "header(...)"
+    message: PHP header injection / open redirect
+    languages: [php]
+    severity: WARNING
+  - id: php-ssrf
+    mode: taint
+    pattern-sources:
+      - pattern: "$_GET[...]"
+      - pattern: "$_POST[...]"
+      - pattern: "$_REQUEST[...]"
+    pattern-sinks:
+      - pattern: "curl_init(...)"
+      - pattern: "fsockopen(...)"
+    message: PHP SSRF
+    languages: [php]
+    severity: WARNING
+  - id: php-deser
+    mode: taint
+    pattern-sources:
+      - pattern: "$_GET[...]"
+      - pattern: "$_POST[...]"
+      - pattern: "$_REQUEST[...]"
+      - pattern: "$_COOKIE[...]"
+    pattern-sinks:
+      - pattern: "unserialize(...)"
+    message: PHP insecure deserialization
+    languages: [php]
+    severity: ERROR
+
+  # ============ PYTHON ============
+  - id: py-command
+    mode: taint
+    pattern-sources:
+      - pattern: "request.args.get(...)"
+      - pattern: "request.args[...]"
+      - pattern: "request.form.get(...)"
+      - pattern: "request.form[...]"
+      - pattern: "request.values.get(...)"
+    pattern-sinks:
+      - pattern: "os.system(...)"
+      - pattern: "os.popen(...)"
+      - pattern: "subprocess.run(...)"
+      - pattern: "subprocess.call(...)"
+      - pattern: "subprocess.Popen(...)"
+      - pattern: "subprocess.check_output(...)"
+    pattern-sanitizers:
+      - pattern: "shlex.quote(...)"
+    message: Python command injection
+    languages: [python]
+    severity: ERROR
+  - id: py-code
+    mode: taint
+    pattern-sources:
+      - pattern: "request.args.get(...)"
+      - pattern: "request.args[...]"
+      - pattern: "request.form.get(...)"
+      - pattern: "request.form[...]"
+    pattern-sinks:
+      - pattern: "eval(...)"
+      - pattern: "exec(...)"
+    message: Python code injection
+    languages: [python]
+    severity: ERROR
+  - id: py-path
+    mode: taint
+    pattern-sources:
+      - pattern: "request.args.get(...)"
+      - pattern: "request.args[...]"
+      - pattern: "request.form.get(...)"
+    pattern-sinks:
+      - pattern: "open(...)"
+    pattern-sanitizers:
+      - pattern: "os.path.basename(...)"
+    message: Python path traversal
+    languages: [python]
+    severity: ERROR
+  - id: py-ssrf
+    mode: taint
+    pattern-sources:
+      - pattern: "request.args.get(...)"
+      - pattern: "request.args[...]"
+      - pattern: "request.form.get(...)"
+    pattern-sinks:
+      - pattern: "requests.get(...)"
+      - pattern: "requests.post(...)"
+      - pattern: "urllib.request.urlopen(...)"
+      - pattern: "urlopen(...)"
+    message: Python SSRF
+    languages: [python]
+    severity: WARNING
+  - id: py-deser
+    mode: taint
+    pattern-sources:
+      - pattern: "request.args.get(...)"
+      - pattern: "request.form.get(...)"
+      - pattern: "request.cookies.get(...)"
+    pattern-sinks:
+      - pattern: "pickle.loads(...)"
+      - pattern: "yaml.load(...)"
+    message: Python insecure deserialization
+    languages: [python]
+    severity: ERROR
+
+  # ============ JS/TS ============
+  - id: js-command
+    mode: taint
+    pattern-sources:
+      - pattern: "req.body.$X"
+      - pattern: "req.query.$X"
+      - pattern: "req.params.$X"
+    pattern-sinks:
+      - pattern: "child_process.exec(...)"
+      - pattern: "exec(...)"
+      - pattern: "execSync(...)"
+    message: JS command injection
+    languages: [javascript, typescript]
+    severity: ERROR
+  - id: js-xss
+    mode: taint
+    pattern-sources:
+      - pattern: "req.body.$X"
+      - pattern: "req.query.$X"
+      - pattern: "location.$X"
+      - pattern: "event.data"
+    pattern-sinks:
+      - pattern: "$EL.innerHTML = $V"
+      - pattern: "document.write(...)"
+    pattern-sanitizers:
+      - pattern: "DOMPurify.sanitize(...)"
+    message: JS XSS
+    languages: [javascript, typescript]
+    severity: ERROR
+  - id: py-sql
+    mode: taint
+    pattern-sources:
+      - pattern: "request.args.get(...)"
+      - pattern: "request.args[...]"
+      - pattern: "request.form.get(...)"
+      - pattern: "request.form[...]"
+      - pattern: "request.values.get(...)"
+    pattern-sinks:
+      - pattern: "$CUR.execute(...)"
+      - pattern: "$CUR.executemany(...)"
+      - pattern: "$CUR.executescript(...)"
+    message: Python SQL injection
+    languages: [python]
+    severity: ERROR

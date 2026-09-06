@@ -1,0 +1,12 @@
+{
+  "name": "bizvuln",
+  "stack": "python/flask",
+  "vulns": [
+    {"cwe": "CWE-472", "route": "POST /checkout", "param": "price", "desc": "web parameter tampering (server trusts client-supplied price)"},
+    {"cwe": "CWE-915", "route": "POST /profile",  "param": "role",  "desc": "mass assignment (client sets privileged role)"},
+    {"cwe": "CWE-837", "route": "POST /claim",    "param": "-",     "desc": "replay / missing idempotency (bonus stacks)"},
+    {"cwe": "CWE-840", "route": "POST /confirm",  "param": "order", "desc": "workflow step bypass (confirm without payment)"},
+    {"cwe": "CWE-1284","route": "POST /order",    "param": "quantity", "desc": "unvalidated negative quantity (negative total -> credit)"},
+    {"cwe": "CWE-682", "route": "POST /withdraw", "param": "amount", "desc": "fund-flow reversal (negative amount credits attacker)"}
+  ]
+}

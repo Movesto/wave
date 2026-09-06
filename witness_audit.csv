@@ -1,0 +1,2 @@
+file,line,pair_id,source,language,cwe,kind,bypass,why,guard
+data/cot/filtered\shape1_contrastive.jsonl,1340,24fb763a385c,contrastive,python,CWE-22,path,/etc/passwd,absolute path escapes the base dir,if '..' in pathlib.PurePath(dirname).parts:

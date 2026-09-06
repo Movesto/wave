@@ -1,0 +1,7 @@
+{
+  "name": "microsql",
+  "stack": "python/flask",
+  "vulns": [
+    {"cwe": "CWE-89", "route": "run_report", "param": "owner", "desc": "SQL injection confirmed by Rung 1 micro-execution (never boots)"}
+  ]
+}

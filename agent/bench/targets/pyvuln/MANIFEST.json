@@ -1,0 +1,16 @@
+{
+  "name": "pyvuln",
+  "stack": "python/flask",
+  "vulns": [
+    {"cwe": "CWE-89",   "route": "GET /search",   "param": "q",    "desc": "SQL injection"},
+    {"cwe": "CWE-78",   "route": "GET /ping",     "param": "host", "desc": "OS command injection"},
+    {"cwe": "CWE-22",   "route": "GET /read",     "param": "file", "desc": "path traversal"},
+    {"cwe": "CWE-918",  "route": "GET /fetch",    "param": "url",  "desc": "SSRF"},
+    {"cwe": "CWE-1336", "route": "GET /greet",    "param": "name", "desc": "SSTI (Jinja2)"},
+    {"cwe": "CWE-94",   "route": "GET /calc",     "param": "expr", "desc": "code injection (eval)"},
+    {"cwe": "CWE-79",   "route": "GET /echo",     "param": "msg",  "desc": "reflected XSS"},
+    {"cwe": "CWE-639",  "route": "GET /doc/{id}", "param": "id",   "desc": "IDOR"},
+    {"cwe": "CWE-307",  "route": "POST /login",   "param": "-",    "desc": "no rate limiting (brute-force)"},
+    {"cwe": "CWE-620",  "route": "POST /change-password", "param": "-", "desc": "no old-password check"}
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "multivuln",
+  "stack": "python/flask",
+  "vulns": [
+    {"cwe": "CWE-89", "route": "GET /search", "param": "q", "desc": "SQLi (app ships its OWN app+postgres compose; wave reuses it)"}
+  ]
+}

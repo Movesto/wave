@@ -1,0 +1,14 @@
+# Python caches
+__pycache__/
+*.pyc
+
+# wave provisioning artifacts (generated into target dirs at run time; regenerated each run)
+_wave_entry.py
+_wave_sink_*.js
+_wave_sink_*.py
+Dockerfile.wave
+Dockerfile.otel
+wave.compose.yml
+wave.compose.full.yml
+casefile.json
+_wave_hooks/

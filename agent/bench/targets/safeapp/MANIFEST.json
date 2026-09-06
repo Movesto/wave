@@ -1,0 +1,7 @@
+{
+  "name": "safeapp",
+  "stack": "python/flask",
+  "safe": true,
+  "vulns": [],
+  "note": "Secure control: routes look vulnerable (detector flags them) but are correctly defended, so every oracle must DEFER. Any finding here is a FALSE POSITIVE."
+}

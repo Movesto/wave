@@ -160,6 +160,73 @@ PATTERNS = [
     (re.compile(r"\.(save|update|delete|get)\([^)]*\bid\s*=\s*(request|req|params|kwargs|self\.request)"
                 r"|filter_by\(\s*id\s*=\s*(request|req|params)", re.I),
      "CWE-639", "object access by user-supplied id without owner check (possible IDOR)", "py", True),
+
+    # ---- FLOW-FREE SINK PATTERNS -------------------------------------------
+    # The taint engine only starts a flow at a recognised request object IN THE SAME
+    # FUNCTION as the sink (_SRC_ATTR). A helper that takes the tainted value as a
+    # PARAMETER is therefore invisible to it -- which is the ordinary shape of real
+    # code: the route pulls request.args["x"] and hands it to a helper that does the
+    # work. Measured on a planted test: 5 of 7 vulnerabilities were never surfaced,
+    # including string-concatenated SQL and shell=True, so the model never saw them.
+    #
+    # These patterns need no flow: the CONSTRUCT itself is the defect wherever the
+    # value came from. Concatenation/interpolation into the dangerous call is the
+    # signal; a fully literal argument is not matched.
+    (re.compile(r"(?:execute|executemany|executescript|raw|query)\s*\(\s*"
+                r"(?:f[\"']|[\"'][^\"']*[\"']\s*(?:\+|%|\.format\()|[\w.]+\s*\+)",
+                re.I),
+     "CWE-89", "SQL built by concatenation/interpolation instead of parameters", "any", False),
+
+    (re.compile(r"shell\s*=\s*True"),
+     "CWE-78", "subprocess with shell=True", "py", False),
+
+    (re.compile(r"(?:os\.system|os\.popen|commands\.getoutput)\s*\(\s*"
+                r"(?:f[\"']|[\"'][^\"']*[\"']\s*(?:\+|%|\.format\()|[\w.]+\s*\+)"),
+     "CWE-78", "shell command built by concatenation/interpolation", "py", False),
+
+    (re.compile(r"(?:child_process\.)?(?:exec|execSync)\s*\(\s*(?:`[^`]*\$\{|"
+                r"[\"'][^\"']*[\"']\s*\+|[\w.]+\s*\+)"),
+     "CWE-78", "shell command built by concatenation/template literal", "js", False),
+
+    (re.compile(r"\bopen\s*\(\s*(?:f[\"']|[\"'][^\"']*[\"']\s*\+|[\w.]+\s*\+\s*[\w.]+)"
+                r"|os\.path\.join\s*\([^)]*\+"),
+     "CWE-22", "file path built by concatenation", "py", False),
+
+    (re.compile(r"(?:readFile|readFileSync|createReadStream|sendFile)\s*\(\s*"
+                r"(?:`[^`]*\$\{|[\"'][^\"']*[\"']\s*\+|[\w.]+\s*\+)"),
+     "CWE-22", "file path built by concatenation", "js", False),
+
+    (re.compile(r"(?:requests\.(?:get|post|put|head|delete)|urlopen|httpx\.(?:get|post))"
+                r"\s*\(\s*(?!['\"]https?://[\w.-]+['\"]\s*[,)])[\w.]+\s*[,)]"),
+     "CWE-918", "outbound request to a non-literal URL", "py", False),
+
+    # File-serving and redirect sinks fed by a VARIABLE (not a bare string literal).
+    # These often HAVE a guard -- `if (!file.includes("/"))` -- so they are exactly where
+    # the witness verifier earns its keep. The taint engine misses them because the value
+    # arrives as a function parameter, not a request object in the same scope.
+    (re.compile(r"(?:res|response)\.(?:sendFile|download)\s*\(\s*"
+                r"(?!['\"][^'\"]*['\"]\s*\))[\w.]"),
+     "CWE-22", "file served from a non-literal path (check the guard)", "js", False),
+    (re.compile(r"send_file\s*\(\s*(?!['\"][^'\"]*['\"]\s*\))[\w.]"),
+     "CWE-22", "file served from a non-literal path (check the guard)", "py", False),
+    (re.compile(r"(?:res|response)\.redirect\s*\(\s*"
+                r"(?!['\"][^'\"]*['\"]\s*\))[\w.]"),
+     "CWE-601", "redirect to a non-literal target (check the guard)", "js", False),
+
+    # Prototype pollution: a recursive descent `merge(target[k], source[k])` (two
+    # bracket-indexed args is the deep-merge idiom, rare elsewhere) or a deep merge/set
+    # library call. These copy a user object by dynamic key, so a key of __proto__/
+    # constructor reaches Object.prototype -- the witness then checks the key blocklist.
+    # A recursive descent into two objects by the SAME key. The call name must be MERGE-ish
+    # (merge/extend/assign/deep/clone/copy/defaults/mixin) so `merge(target[key],
+    # source[key])` matches but a coordinate op like `max(a[placement], b[placement])` or an
+    # array copy `swap(arr[i], arr[j])` does not.
+    (re.compile(r"\b\w*(?:merge|extend|assign|deep|clone|copy|defaults|mixin)\w*\s*\(\s*"
+                r"[\w$]+\[([a-zA-Z_$][\w$]+)\]\s*,\s*[\w$]+\[\1\]\s*\)", re.I),
+     "CWE-1321", "recursive merge by dynamic key (prototype pollution risk)", "any", False),
+    (re.compile(r"_\.(?:merge|mergeWith|defaultsDeep|set|setWith)\s*\(|"
+                r"\bdeepmerge\s*(?:\.all)?\s*\(|\$\.extend\s*\(\s*true\b"),
+     "CWE-1321", "deep merge / set library call (prototype pollution risk)", "js", False),
 ]
 _SEC_CTX = re.compile(r"password|passwd|token|secret|sign|hmac|hash_|cert|credential|auth|"
                       r"user_id|owner|current_user|permission", re.I)
@@ -191,19 +258,37 @@ def _pattern_scan(code, lang, filename, unit_lookup):
 _JS_SRC = re.compile(
     r"req(uest)?\.(query|params|body|cookies|headers)|ctx\.(query|params|request)|"
     r"event\.(body|queryStringParameters)|location\.(search|hash|href)|process\.argv|window\.location")
+# NestJS delivers request data through PARAMETER DECORATORS, not req.query -- so `@Body() payload`
+# makes `payload` untrusted. Missing these was why Station 1 found 5 candidates in a repo with 83
+# decorated request sources. Capture the parameter name right after the decorator call.
+_JS_NEST_SRC = re.compile(
+    r"@(?:Body|Query|Param|Headers|Req|Request|UploadedFiles?|Session|Ip|HostParam|RawBody|"
+    r"Cookies?|MessageBody|Payload)\s*\([^)]*\)\s*([A-Za-z_$][\w$]*)")
+# source->callee handoff: tainted value into `<recv>.<method>(<args>)` (optional `this.`). The
+# method body (the real sink) lives in the callee's file; the agent's retrieve tool follows it.
+# Covers NestJS `this.xService.m()` AND Express module-style `netService.runPing()`.
+_JS_CALL_HEAD = re.compile(r"(?:this\.)?([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(")
+_XSAFE = {"log", "debug", "warn", "error", "info", "verbose", "map", "filter", "forEach", "push",
+          "then", "catch", "json", "send", "status", "emit", "toString", "includes", "indexOf",
+          "test", "match", "split", "join", "trim", "slice", "substring", "replace"}
+# receivers that are builtins/response/framework -- not a service whose body we'd need to fetch.
+_XSAFE_RECV = {"console", "JSON", "Math", "Object", "Array", "String", "Number", "Promise", "res",
+               "response", "req", "request", "logger", "Logger", "process", "window", "document",
+               "localStorage", "module", "exports", "Buffer", "Date", "RegExp", "Reflect"}
 JS_SINKS = [
     (re.compile(r"dangerouslySetInnerHTML\s*=\s*\{\{?\s*__html:\s*([^}]+)"), "CWE-79", "xss"),
     (re.compile(r"\.innerHTML\s*=\s*([^;\n]+)|document\.write\(([^)]+)|\.html\(([^)]+)"), "CWE-79", "xss"),
     (re.compile(r"child_process\.(exec|execSync|spawn|spawnSync)\(([^)]+)|(?<![.\w])exec(Sync)?\(([^)]+)"), "CWE-78", "command injection"),
-    (re.compile(r"\.(query|execute)\(\s*([`\"'][^)]*)"), "CWE-89", "sql injection"),
-    (re.compile(r"fs\.(readFile|readFileSync|createReadStream|writeFile)\(([^),]+)|res\.sendFile\(([^)]+)"), "CWE-22", "path traversal"),
+    (re.compile(r"(?<![.\w])(?:eval|Function)\(\s*([^)]+)"), "CWE-95", "code injection"),
+    (re.compile(r"\.(query|execute|raw|createQueryBuilder)\(\s*([`\"'][^)]*|[^)]*\$\{)"), "CWE-89", "sql injection"),
+    (re.compile(r"fs\.(readFile|readFileSync|createReadStream|writeFile|writeFileSync|unlink)\(([^),]+)|res\.sendFile\(([^)]+)"), "CWE-22", "path traversal"),
     (re.compile(r"(?<![.\w])(fetch|axios(?:\.\w+)?)\(([^)]+)|http\.get\(([^)]+)"), "CWE-918", "ssrf"),
 ]
 
 
 def _js_taint(code, filename, unit_lookup):
     # 1. tainted vars (file-wide, fixpoint)
-    taint = set()
+    taint = set(_JS_NEST_SRC.findall(code))          # NestJS @Body/@Query/... decorated params
     assigns = re.findall(r"(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)", code)
     for _ in range(3):
         before = len(taint)
@@ -221,6 +306,64 @@ def _js_taint(code, filename, unit_lookup):
                 line = code[:m.start()].count("\n") + 1
                 out.append(Candidate(filename, unit_lookup(line), line, cwe, fam, "taint",
                                      m.group(0).strip().replace("\n", " ")[:120]))
+    # 3. CROSS-FILE HANDOFF: a tainted value passed into `this.xService.method(...)` -- the sink is
+    #    in the callee (another file), which intra-file taint can't see. Flag ONE per function so the
+    #    AGENT retrieves the callee and decides. This is the recall lever for NestJS controller->
+    #    service flows (the reason a 128-file repo surfaced only 5 candidates).
+    flagged_fns = {(c.file, c.unit) for c in out}
+    for m in _JS_CALL_HEAD.finditer(code):        # matches EVERY `recv.meth(` incl. nested calls
+        recv, meth = m.group(1), m.group(2)
+        if meth in _XSAFE or recv in _XSAFE_RECV:
+            continue
+        j, depth = m.end(), 1                     # read balanced args (handles res.json(svc.m(x)))
+        while j < len(code) and depth:
+            depth += (code[j] == "(") - (code[j] == ")")
+            j += 1
+        args = code[m.end():j - 1]
+        if not args.strip():
+            continue
+        if any(re.search(rf"\b{re.escape(t)}\b", args) for t in taint):
+            line = code[:m.start()].count("\n") + 1
+            unit = unit_lookup(line)
+            if (filename, unit) in flagged_fns:      # already a concrete sink here -> don't double
+                continue
+            flagged_fns.add((filename, unit))
+            out.append(Candidate(filename, unit, line, "CWE-20", "cross-file handoff", "xflow",
+                                 f"tainted -> {recv}.{meth}(...) [sink in callee]"[:120]))
+    return out
+
+
+# a value produced by a HAND-ROLLED sanitiser -- a string .replace() (blocklist) or
+# strip_tags. Not DOMPurify / a proper encoder: those are correct and must not be flagged.
+_JS_HANDROLL = re.compile(r"\.replace\s*\(\s*/|\.replace\s*\(\s*['\"]|strip_tags\s*\(", re.I)
+_JS_HTML_SINK = re.compile(
+    r"\.innerHTML\s*=\s*([^;\n]+)|\.outerHTML\s*=\s*([^;\n]+)|"
+    r"document\.write\(\s*([^)]+)|\.html\(\s*([^)]+)|"
+    r"insertAdjacentHTML\s*\([^,]+,\s*([^)]+)")
+
+
+def _js_dom_xss(code, filename, unit_lookup):
+    """Flow-free DOM-XSS: a hand-rolled sanitiser (a .replace() blocklist) reaching an HTML
+    sink -- the completeness case the taint pass misses when the input arrives as a function
+    PARAMETER (no recognised source). Scoped to a hand-rolled sanitiser so a raw innerHTML or
+    a proper encoder (DOMPurify) is NOT flagged; the witness then judges the blocklist.
+    """
+    # vars assigned from a hand-rolled sanitiser
+    sanitized = set()
+    for m in re.finditer(r"(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)", code):
+        if _JS_HANDROLL.search(m.group(2)):
+            sanitized.add(m.group(1))
+    out = []
+    for m in _JS_HTML_SINK.finditer(code):
+        rhs = next((g for g in m.groups() if g), "")
+        # the sink is fed by a sanitised var, or sanitises inline on the sink line
+        fed = _JS_HANDROLL.search(rhs) or any(
+            re.search(rf"\b{re.escape(v)}\b", rhs) for v in sanitized)
+        if fed:
+            line = code[:m.start()].count("\n") + 1
+            out.append(Candidate(filename, unit_lookup(line), line, "CWE-79",
+                                 "hand-rolled sanitiser reaches an HTML sink (check completeness)",
+                                 "pattern", m.group(0).strip().replace("\n", " ")[:120]))
     return out
 
 
@@ -248,6 +391,43 @@ def _js_unit_lookup(code):
     return look
 
 
+def _blank_comments(code, lang):
+    """Replace comment CONTENT with spaces (keeping newlines + length so line numbers are intact),
+    so sink patterns written in comments -- like `// ... readFileSync(BASE + name)` -- are not
+    flagged as real code. Respects string literals (won't blank `//` inside a string)."""
+    out = list(code)
+    i, n, in_str = 0, len(code), None
+    while i < n:
+        c = code[i]
+        if in_str:
+            if c == "\\" and i + 1 < n:
+                i += 2; continue
+            if c == in_str:
+                in_str = None
+            i += 1; continue
+        if c in "\"'`":
+            in_str = c; i += 1; continue
+        if lang != "py" and c == "/" and i + 1 < n and code[i + 1] == "/":
+            while i < n and code[i] != "\n":
+                out[i] = " "; i += 1
+            continue
+        if lang != "py" and c == "/" and i + 1 < n and code[i + 1] == "*":
+            out[i] = out[i + 1] = " "; i += 2
+            while i < n and not (code[i] == "*" and i + 1 < n and code[i + 1] == "/"):
+                if code[i] != "\n":
+                    out[i] = " "
+                i += 1
+            if i + 1 < n:
+                out[i] = out[i + 1] = " "; i += 2
+            continue
+        if lang == "py" and c == "#":
+            while i < n and code[i] != "\n":
+                out[i] = " "; i += 1
+            continue
+        i += 1
+    return "".join(out)
+
+
 def scan_file(path):
     lang = EXT_LANG.get(Path(path).suffix.lower())
     if not lang:
@@ -265,11 +445,13 @@ def scan_file(path):
         look = _py_unit_lookup(tree)
         for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
             out += _py_taint(fn, code, str(path))
-        out += _pattern_scan(code, "py", str(path), look)
+        out += _pattern_scan(_blank_comments(code, "py"), "py", str(path), look)
     else:
-        look = _js_unit_lookup(code)
-        out += _js_taint(code, str(path), look)
-        out += _pattern_scan(code, "js", str(path), look)
+        look = _js_unit_lookup(code)             # names from original code; scan the comment-blanked
+        scan = _blank_comments(code, "js")        # copy so a sink written in a comment isn't flagged
+        out += _js_taint(scan, str(path), look)
+        out += _js_dom_xss(scan, str(path), look)
+        out += _pattern_scan(scan, "js", str(path), look)
     return out
 
 
@@ -280,8 +462,12 @@ def gather(target):
     return [f for f in p.rglob("*")
             if f.suffix.lower() in EXT_LANG
             and "/.git/" not in str(f).replace("\\", "/")
-            and not any(x in str(f) for x in ("venv", "site-packages", "node_modules",
-                                              "__pycache__", "/tests/", "\\tests\\", ".min."))]
+            # skip third-party / generated code: dependencies, vendored bundles, build output.
+            # These are not the project's own code and only add noise on a real repo.
+            and not any(x in str(f).replace("\\", "/").lower() for x in (
+                "venv", "site-packages", "node_modules", "__pycache__",
+                "/tests/", "/test/", "/vendor/", "/assets/vendor/", "/dist/", "/build/",
+                ".min.", ".bundle.", "-bundle.", ".chunk."))]
 
 
 def main():

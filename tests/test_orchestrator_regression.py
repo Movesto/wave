@@ -268,6 +268,16 @@ def test_proof_mode_asan_only_c():
     assert briefs._proof_mode(_cand(file="v.c", unit="f(x)", cwe="CWE-78")) == "call"
 
 
+def test_proof_mode_asan_by_sink_when_class_mislabeled():
+    # the electron/c-fixture gap: the notebook labels a C strcpy as `other` (no CWE), but the SINK text
+    # (strcpy/memcpy/...) reliably routes it to asan anyway -- so the sanitizer brief fires by design.
+    assert briefs._proof_mode(_cand(file="records.c", unit="f(x)", cwe="", sink="strcpy(name, input)")) == "asan"
+    assert briefs._proof_mode(_cand(file="x.cc", unit="f(x)", cwe="", sink="memcpy(a,b,n)")) == "asan"
+    # guardrails: a memory-looking sink in Python is NOT asan; a non-memory C sink is NOT asan
+    assert briefs._proof_mode(_cand(file="x.py", unit="f(x)", cwe="", sink="memmove(a)")) == "call"
+    assert briefs._proof_mode(_cand(file="x.c", unit="f(x)", cwe="", sink="system(cmd)")) == "call"
+
+
 def test_asan_brief_content():
     b = briefs._brief_for(_cand(file="v.c", unit="vuln(char* x)", cwe="CWE-120", sink="strcpy"), ".", "n/a",
                           mode="asan")

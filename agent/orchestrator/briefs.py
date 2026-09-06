@@ -5,6 +5,7 @@ run_loop AND the new Stage-3 `prove.py` can build the model's investigation brie
 Pure and dependency-light on purpose: only stdlib + a duck-typed `candidate` (needs .file/.line/.unit/
 .cwe/.family/.sink). No model, no docker, no tree-sitter at import.
 """
+import re
 from pathlib import Path
 
 
@@ -52,6 +53,11 @@ _C_EXTS = (".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx")
 # C/C++ memory-safety / format-string: compile with AddressSanitizer + UBSan and let the SANITIZER be the
 # observer (a crafted input that trips ASan = a witnessed, near-zero-FP memory-safety proof, like a fuzzer).
 _ASAN_CWE = {"CWE-120", "CWE-121", "CWE-122", "CWE-124", "CWE-125", "CWE-134", "CWE-787", "CWE-190", "CWE-416"}
+# ...and the sink FUNCTIONS themselves -- so a C/C++ finding routes to asan even when the notebook mislabels
+# its class (e.g. `other`) and no CWE survives. The sink text is the reliable signal for memory bugs.
+_ASAN_SINKS = re.compile(r"\b(strcpy|strcat|stpcpy|sprintf|vsprintf|gets|memcpy|memmove|memset|alloca|"
+                         r"strncpy|strncat|scanf|sscanf|realloc|malloc|free|wcscpy|wcscat)\b|"
+                         r"\b(printf|fprintf|snprintf|syslog)\s*\(\s*\w+\s*\)")
 
 
 def _is_c(path):
@@ -63,7 +69,8 @@ def _proof_mode(candidate):
     (return-value) > per-class brief (ssti/protopoll/deser) > render (DOM XSS) > call (default). Used by
     prove and patch so the scaffold, image, and brief stay consistent."""
     cwe = getattr(candidate, "cwe", "") or ""
-    if _is_c(getattr(candidate, "file", "")) and cwe in _ASAN_CWE:
+    if _is_c(getattr(candidate, "file", "")) and (
+            cwe in _ASAN_CWE or _ASAN_SINKS.search(getattr(candidate, "sink", "") or "")):
         return "asan"
     if _is_sanitizer(candidate):
         return "sanitizer"

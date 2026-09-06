@@ -12,6 +12,41 @@ no dependence on a frontier cloud model for the parts that matter.
 
 ---
 
+## Quickstart
+
+```bash
+# 1. install (Docker must also be running -- proofs run in throwaway containers)
+pip install -r requirements.txt
+
+# 2. point at a model -- LOCAL via ollama (private, the design intent):
+export WAVE_API_BASE="http://localhost:11434/v1"
+export WAVE_MODEL="hf.co/<your-gguf>:<tag>"
+#    ...or a CLOUD OpenAI-compatible endpoint (stronger, off-box -- sends code out):
+# export WAVE_API_BASE="https://openrouter.ai/api/v1"
+# export WAVE_MODEL="deepseek/deepseek-v4-flash-0731"
+# export WAVE_API_KEY="<your key>"
+
+# 3. run the whole pipeline on a repo (find -> prove -> patch)
+python -m agent.orchestrator.run all /path/to/target-repo --patch
+```
+
+Read the verdicts in `target-repo/wave_findings.jsonl` (and the full report in `casefile.json`). A
+`confirmed` was witnessed by a tool; `anomalous_state` needs human review; `believed`/`blocked` are unproven
+leads. It's resumable — re-run to continue. On Windows PowerShell, use `$env:WAVE_API_BASE="..."` instead of
+`export`. First run pulls a couple of Docker images (and, for XSS, a chromium image — a one-time download).
+
+<details><summary>No model yet? Fastest path with ollama</summary>
+
+```bash
+# install ollama (https://ollama.com), then serve a capable local model, e.g.:
+ollama pull <a-qwen3-family-model>
+ollama serve            # exposes the OpenAI-compatible API on :11434
+```
+Then set `WAVE_API_BASE`/`WAVE_MODEL` as above. A stronger model proves more; see **Models** below.
+</details>
+
+---
+
 ## The one idea
 
 > **The model DECIDES and TRANSLATES. Deterministic tools PERCEIVE and PROVE.**

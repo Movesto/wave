@@ -7,6 +7,7 @@ _probe, is mocked). Fast enough to run on every change.
 
 Run: pytest tests/test_orchestrator_regression.py -q
 """
+import json
 import os
 import sys
 from unittest import mock
@@ -311,6 +312,28 @@ def test_differential_brief_content():
 def test_authz_class_maps_to_cwe_639():
     for cls in ("authz", "idor", "access", "bola"):
         assert prove._CLASS_CWE.get(cls) == "CWE-639"
+
+
+def test_trace_logger_saves_only_verified_model_drives(tmp_path):
+    from agent.orchestrator import traces
+    with mock.patch.dict("os.environ", {"WAVE_TRACE_DIR": str(tmp_path)}):
+        assert traces.enabled()
+        kw = dict(target="/r", file="a.py", line=1, cls="cmd", cwe="CWE-78", evidence="e",
+                  oracle="investigate", model="m", mode="call", ran=1)
+        traces.save(verdict="confirmed", transcript=[{"role": "system"}], **kw)     # positive -> saved
+        traces.save(verdict="refuted", transcript=[{"role": "system"}], **kw)       # negative -> saved
+        traces.save(verdict="believed", transcript=[{"role": "system"}], **kw)      # not verified -> skip
+        traces.save(verdict="confirmed", transcript=None, **kw)                     # canary (no drive) -> skip
+        recs = [json.loads(x) for x in (tmp_path / "wave_traces.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(recs) == 2
+    assert {r["verdict"] for r in recs} == {"confirmed", "refuted"}
+    assert {r["label"] for r in recs} == {"positive", "negative"}
+
+
+def test_trace_logger_disabled_by_default():
+    from agent.orchestrator import traces
+    with mock.patch.dict("os.environ", {}, clear=True):
+        assert not traces.enabled()
 
 
 # ============================ 6. prove wiring (_to_candidate, _apply_gate) ============================

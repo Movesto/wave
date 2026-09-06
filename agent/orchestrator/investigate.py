@@ -301,7 +301,8 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                         "concrete evidence (a cited line / observation / source)."})
                     continue
                 print(f"[investigate:native] concluded: {verdict} after {ran} run(s)", flush=True)
-                return Verdict(verdict, why, evidence, str(args.get("cwe", "")), ran, trail)
+                return Verdict(verdict, why, evidence, str(args.get("cwe", "")), ran, trail,
+                               transcript=list(messages))
             if name == "grep_output":
                 content = _grep(run_log, str(args.get("pattern", "")), int(args.get("lines") or 10))
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
@@ -347,6 +348,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
     fv = _force_conclude(model, messages, ran, saw_prov, saw_real)   # budget spent -> extract a real verdict
     if fv is not None:
         fv.trail = trail
+        fv.transcript = list(messages)
         print(f"[investigate:native] forced conclusion: {fv.verdict} after {ran} run(s)", flush=True)
         return fv
     verdict = "blocked" if (saw_prov and not saw_real) or ran == 0 else "believed"
@@ -355,12 +357,13 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
 
 @dataclass
 class Verdict:
-    verdict: str                       # confirmed | believed | refuted | blocked
+    verdict: str                       # confirmed | believed | refuted | blocked | anomalous_state
     why: str
     evidence: str = ""
     cwe: str = ""
     ran: int = 0                       # how many commands were actually executed
     trail: list = field(default_factory=list)   # [(command, result_summary)]
+    transcript: list = field(default_factory=list)   # the FULL model conversation (for the trace-logger)
 
 
 def _parse_action(txt):

@@ -159,7 +159,8 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False):
     if mode == "differential" and verdict == "confirmed":
         verdict = "anomalous_state"
     return {"verdict": verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
-            "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus}
+            "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
+            "_transcript": v.transcript, "_mode": mode}   # for the trace-logger (stripped before findings write)
 
 
 def _record_outcome(case, hyp_id, c, rec):
@@ -289,6 +290,15 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
                 rec["audit"] = anote
                 print(f"[prove]   audit -> {rec['verdict']}", flush=True)
             _record_outcome(case, hyp_id, c, rec)
+            transcript = rec.pop("_transcript", None)       # trace-logger fields -- not for the findings file
+            trace_mode = rec.pop("_mode", "")
+            from . import traces                             # capture the FINAL (post-gate/audit) verdict's drive
+            if traces.enabled() and transcript:
+                traces.save(target=target, file=surv.get("file", ""), line=int(surv.get("line") or 0),
+                            cls=str(surv.get("class") or "other").lower(), cwe=c.cwe, verdict=rec["verdict"],
+                            evidence=rec.get("evidence", ""), oracle=rec.get("oracle", ""),
+                            model=getattr(model, "model_id", ""), mode=trace_mode, ran=rec.get("ran", 0),
+                            transcript=transcript)
             out = {"file": surv.get("file", ""), "line": int(surv.get("line") or 0),
                    "class": str(surv.get("class") or "other").lower(), "cwe": c.cwe, "unit": c.unit,
                    "sink": surv.get("sink", ""), "confidence": surv.get("confidence", ""), **rec}

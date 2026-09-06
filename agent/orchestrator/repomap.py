@@ -82,12 +82,58 @@ _SINKS_RUBY = [
 ]
 
 
+_SINKS_GO = [
+    ("SQLi",     re.compile(r"\.(Query|Exec|QueryRow)\w*\s*\(|\.Raw\s*\(|db\.(Query|Exec)")),
+    ("cmd",      re.compile(r"exec\.Command\w*\s*\(|os/exec|syscall\.Exec")),
+    ("path",     re.compile(r"os\.(Open|OpenFile|ReadFile|Create|Remove)\s*\(|ioutil\.(ReadFile|WriteFile)\s*\(|"
+                            r"filepath\.Join\s*\(")),
+    ("ssrf",     re.compile(r"http\.(Get|Post|Head|NewRequest)\s*\(|client\.Do\s*\(|http\.Client")),
+    ("ssti",     re.compile(r"template\.HTML\s*\(|text/template|\.Parse\s*\(\s*[a-z]")),
+    ("redirect", re.compile(r"http\.Redirect\s*\(")),
+    ("deser",    re.compile(r"gob\.NewDecoder|yaml\.Unmarshal|xml\.Unmarshal")),
+]
+_SINKS_JAVA = [
+    ("SQLi",     re.compile(r"\.(executeQuery|executeUpdate|execute)\s*\(|createStatement\s*\(|"
+                            r"prepareStatement\s*\(\s*[\"'][^\"']*\+")),
+    ("cmd",      re.compile(r"Runtime\.getRuntime\(\)\.exec|ProcessBuilder\s*\(|\.exec\s*\(")),
+    ("path",     re.compile(r"new\s+File\s*\(|new\s+File(Input|Output|Reader|Writer)|Files\.(read|write|newInput)")),
+    ("ssrf",     re.compile(r"new\s+URL\s*\(|openConnection\s*\(|HttpURLConnection|RestTemplate|WebClient|HttpClient")),
+    ("deser",    re.compile(r"\.readObject\s*\(|ObjectInputStream|XMLDecoder|\.readUnshared\s*\(|yaml\.load")),
+    ("eval",     re.compile(r"ScriptEngine|\.eval\s*\(|Nashorn|GroovyShell")),
+    ("xss",      re.compile(r"\.getWriter\(\)\.(print|write)|response\.getWriter|out\.print\s*\(")),
+    ("redirect", re.compile(r"sendRedirect\s*\(|RedirectView")),
+]
+_SINKS_CSHARP = [
+    ("SQLi",     re.compile(r"SqlCommand\s*\(|\.(ExecuteReader|ExecuteNonQuery|ExecuteScalar)\s*\(|"
+                            r"\.FromSqlRaw\s*\(|new\s+SqlCommand")),
+    ("cmd",      re.compile(r"Process\.Start\s*\(|ProcessStartInfo|new\s+Process\s*\(")),
+    ("path",     re.compile(r"File\.(Read|Write|Open|Create|Delete)\w*\s*\(|new\s+StreamReader\s*\(|new\s+FileStream")),
+    ("ssrf",     re.compile(r"WebClient\s*\(|HttpClient\s*\(|WebRequest\.Create\s*\(|HttpWebRequest")),
+    ("deser",    re.compile(r"BinaryFormatter|XmlSerializer|JavaScriptSerializer|LosFormatter|NetDataContractSerializer")),
+    ("xss",      re.compile(r"Response\.Write\s*\(|Html\.Raw\s*\(")),
+    ("redirect", re.compile(r"Response\.Redirect\s*\(")),
+]
+_SINKS_RUST = [
+    ("cmd",      re.compile(r"Command::new\s*\(|process::Command|\.arg\s*\(")),
+    ("path",     re.compile(r"File::(open|create)\s*\(|fs::(read|write|remove_file|File)")),
+    ("ssrf",     re.compile(r"reqwest::|hyper::|ureq::|Client::new")),
+    ("SQLi",     re.compile(r"sqlx::query\s*\(|\.execute\s*\(\s*&?format!|diesel::sql_query|rusqlite")),
+    ("deser",    re.compile(r"bincode::deserialize|serde_yaml::from|serde_pickle")),
+]
+# C / C++: the signature classes are memory-safety (buffer/format) + command/path -- proving memory safety
+# needs a sanitizer we don't run, so those pin for RECALL but land needs-review downstream.
+_SINKS_C = [
+    ("cmd",      re.compile(r"\bsystem\s*\(|\bpopen\s*\(|\bexecl\w*\s*\(|\bexecv\w*\s*\(|ShellExecute")),
+    ("memory",   re.compile(r"\b(strcpy|strcat|sprintf|vsprintf|gets|memcpy|memmove|alloca)\s*\(")),
+    ("format",   re.compile(r"\b(printf|fprintf|snprintf|syslog)\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)")),
+    ("path",     re.compile(r"\bfopen\s*\(|\bopen\s*\(|std::ifstream|std::ofstream|\bfread\s*\(")),
+]
+
+
 def _lang_sinks(lang):
-    if lang == "php":
-        return _SINKS_PHP
-    if lang == "ruby":
-        return _SINKS_RUBY
-    return (_SINKS_PY if lang == "python" else _SINKS_JS) + _SINKS_COMMON
+    return {"php": _SINKS_PHP, "ruby": _SINKS_RUBY, "go": _SINKS_GO, "java": _SINKS_JAVA,
+            "csharp": _SINKS_CSHARP, "rust": _SINKS_RUST, "c": _SINKS_C, "cpp": _SINKS_C}.get(
+        lang, (_SINKS_PY if lang == "python" else _SINKS_JS) + _SINKS_COMMON)
 
 
 # --- Infrastructure / non-code files -----------------------------------------------------------------

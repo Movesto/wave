@@ -17,17 +17,29 @@ from pathlib import Path
 
 _EXT_LANG = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
              ".jsx": "javascript", ".ts": "typescript", ".tsx": "tsx", ".mts": "typescript",
-             ".rb": "ruby", ".php": "php"}
+             ".rb": "ruby", ".php": "php",
+             ".go": "go", ".java": "java", ".cs": "csharp", ".rs": "rust",
+             ".c": "c", ".h": "cpp", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
+             ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp"}
 _SKIP = {"node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build", "vendor",
          "site-packages", "test", "tests", "__tests__", "spec", "examples", "example"}
 
 _FUNC_DEF = {"function_definition", "function_declaration", "method_definition",
              "generator_function_declaration", "function_expression", "arrow_function",
              "method", "singleton_method",                # ruby
-             "method_declaration"}                        # php (function_definition already covers php funcs)
-_CLASS_DEF = {"class_definition", "class_declaration", "class"}   # +class = ruby (module handled separately)
+             "method_declaration",                        # php/java/c#/go
+             "constructor_declaration",                   # java / c#
+             "function_item"}                             # rust (function_definition covers php/c/cpp)
+_CLASS_DEF = {"class_definition", "class_declaration", "class",   # +class = ruby
+              "interface_declaration", "enum_declaration",        # java / c#
+              "struct_declaration",                               # c#
+              "struct_item", "impl_item", "trait_item",           # rust
+              "class_specifier", "struct_specifier"}              # c++
 _CALL = {"call", "call_expression", "function_call_expression", "member_call_expression",
-         "scoped_call_expression", "method_call", "command"}      # +php +ruby
+         "scoped_call_expression", "method_call", "command",      # +php +ruby
+         "method_invocation",                                     # java
+         "invocation_expression",                                 # c#
+         "macro_invocation"}                                      # rust (call_expression covers go/rust/c/cpp)
 
 
 @dataclass
@@ -139,19 +151,41 @@ def _callee_name(call_node):
         fn = call_node.children[0] if call_node.children else None
     if fn is None:
         return ""
-    if fn.type in ("identifier", "name", "constant"):          # py/js identifier, php name, ruby constant
+    if fn.type in ("identifier", "name", "constant", "field_identifier", "type_identifier"):
         return _txt(fn)
-    if fn.type in ("attribute", "member_expression", "member_access_expression", "scoped_call_expression"):
+    if fn.type in ("attribute", "member_expression", "member_access_expression", "scoped_call_expression",
+                   "selector_expression",          # go  exec.Command
+                   "field_expression",             # c/cpp/rust  obj.method / obj->method
+                   "scoped_identifier",            # rust/java  Command::new / a.b.c
+                   "qualified_identifier"):         # c++  ns::fn
         last = (fn.child_by_field_name("attribute") or fn.child_by_field_name("property")
-                or fn.child_by_field_name("name"))
-        return _txt(last) if last else _txt(fn).split(".")[-1]
-    return _txt(fn).split("::")[-1].split(".")[-1].split("(")[0].strip()
+                or fn.child_by_field_name("name") or fn.child_by_field_name("field")
+                or fn.child_by_field_name("selector"))
+        return _txt(last) if last else _txt(fn).split("::")[-1].split(".")[-1].split("->")[-1]
+    return _txt(fn).split("::")[-1].split(".")[-1].split("->")[-1].split("(")[0].split("<")[0].strip()
 
 
 def _def_name(node):
     n = node.child_by_field_name("name")
     if n is not None:
         return _txt(n)
+    # C/C++: function_definition has no `name` field -- the name is nested in the declarator chain
+    # (function_declarator -> declarator -> identifier/field_identifier/qualified_identifier).
+    if node.type in ("function_definition",):
+        d = node.child_by_field_name("declarator")
+        for _ in range(6):
+            if d is None:
+                break
+            if d.type in ("identifier", "field_identifier", "qualified_identifier", "operator_name",
+                          "destructor_name"):
+                return _txt(d).split("::")[-1]
+            nxt = d.child_by_field_name("declarator")
+            if nxt is None:
+                ids = [c for c in d.children
+                       if c.type in ("identifier", "field_identifier", "qualified_identifier")]
+                return _txt(ids[0]).split("::")[-1] if ids else ""
+            d = nxt
+        return ""
     # anonymous function bound to a name: `const f = () =>`, `exports.f =`, `module.exports = fn`, `{f: fn}`
     par = node.parent
     if par is not None and par.type in ("variable_declarator", "assignment", "assignment_expression", "pair"):
@@ -187,6 +221,16 @@ def _cjs_export(node):
 
 
 def _is_exported(node, lang):
+    if lang == "go":                                       # Go: an uppercase first letter = exported
+        nm = _def_name(node)
+        return bool(nm) and nm[:1].isupper()
+    if lang in ("java", "csharp", "rust", "c", "cpp"):     # visibility from the signature line
+        head = _txt(node)[:100].lower()
+        if lang == "rust":
+            return "pub " in head or "pub(" in head
+        if lang in ("java", "csharp"):
+            return "public" in head or "protected" in head
+        return True                                        # c/cpp: top-level functions are linkable
     p = node.parent
     depth = 0
     while p is not None and depth < 4:
@@ -219,8 +263,12 @@ def _params(node):
         if p is not None:
             return " ".join(_txt(p).split())[:200]
     for c in node.children:
-        if c.type in ("parameters", "formal_parameters", "method_parameters"):   # +ruby method_parameters
+        if c.type in ("parameters", "formal_parameters", "method_parameters", "parameter_list"):
             return " ".join(_txt(c).split())[:200]
+        if c.type in ("function_declarator",):             # c/cpp: params live inside the declarator
+            for cc in c.children:
+                if cc.type == "parameter_list":
+                    return " ".join(_txt(cc).split())[:200]
         if c.type == "identifier":                        # arrow fn with a single bare param: x => ...
             return f"({_txt(c)})"
     return ""
@@ -279,7 +327,8 @@ def _walk(node, m, file, lang, enclosing, finfo, cls):
                     m.imports[file].add(_txt(args).strip("()\"' "))
     elif t in ("import_statement", "import_from_statement", "import_declaration",
                "require_once_expression", "require_expression", "include_expression",   # php
-               "include_once_expression", "namespace_use_declaration"):
+               "include_once_expression", "namespace_use_declaration",
+               "import_spec", "using_directive", "use_declaration", "preproc_include"):  # go/c#/rust/c/cpp
         m.imports[file].add(" ".join(_txt(node)[:120].split()))
     for c in node.children:
         _walk(c, m, file, lang, new_enc, finfo, new_cls)

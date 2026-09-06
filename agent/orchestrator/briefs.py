@@ -65,16 +65,18 @@ def _proof_mode(candidate):
 
 
 def _image_for(path):
-    """A runtime image that can run this candidate's language (the model can install more if it needs)."""
+    """A runtime/toolchain image that can BUILD+RUN this candidate's language (the model can install more if
+    it needs). Compiled languages get an SDK image so the model can actually compile a repro."""
     if _is_js(path):
         return "node:20-slim"
     p = (path or "").lower()
-    if p.endswith(".php"):
-        return "php:8.2-cli"
-    if p.endswith(".rb"):
-        return "ruby:3-slim"
-    if p.endswith(".go"):
-        return "golang:1-alpine"
+    for ext, img in ((".php", "php:8.2-cli"), (".rb", "ruby:3-slim"), (".go", "golang:1-alpine"),
+                     (".java", "eclipse-temurin:21-jdk"), (".cs", "mcr.microsoft.com/dotnet/sdk:8.0"),
+                     (".rs", "rust:1-slim"),
+                     (".cc", "gcc:13"), (".cpp", "gcc:13"), (".cxx", "gcc:13"), (".hpp", "gcc:13"),
+                     (".hh", "gcc:13"), (".hxx", "gcc:13"), (".c", "gcc:13"), (".h", "gcc:13")):
+        if p.endswith(ext):
+            return img
     return "python:3.12-slim"
 
 

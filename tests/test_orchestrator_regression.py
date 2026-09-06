@@ -351,6 +351,42 @@ def test_codemap_parses_php(tmp_path):
     assert "lookup" in [callee for _c, callee, _f, _l in cmap.calls]    # show->lookup edge
 
 
+def test_pin_go():
+    assert _pin("go", 'rows, _ := db.Query("SELECT * WHERE id="+id)') == "SQLi"
+    assert _pin("go", 'exec.Command("sh","-c",x)') == "cmd"
+
+
+def test_pin_java():
+    assert _pin("java", 'Runtime.getRuntime().exec(cmd)') == "cmd"
+    assert _pin("java", 'ois.readObject()') == "deser"
+
+
+def test_pin_csharp():
+    assert _pin("csharp", 'new SqlCommand(q).ExecuteReader()') == "SQLi"
+    assert _pin("csharp", 'new BinaryFormatter().Deserialize(s)') == "deser"
+
+
+def test_pin_rust():
+    assert _pin("rust", 'Command::new("sh").arg(x)') == "cmd"
+
+
+def test_pin_c_memory_and_format():
+    assert _pin("c", 'strcpy(dst, src);') == "memory"
+    assert _pin("c", 'printf(user);') == "format"
+    assert _pin("cpp", 'system(cmd);') == "cmd"
+
+
+def test_codemap_parses_go_java_c(tmp_path):
+    _write(tmp_path, "m.go", 'package m\nfunc Handle(x string){ Run(x) }\nfunc Run(x string){ exec.Command(x) }\n')
+    _write(tmp_path, "M.java", 'class C { public void run(String x){ helper(x); } void helper(String y){} }')
+    _write(tmp_path, "m.c", 'void run(char* x){ system(x); }\nint main(){ run("y"); }\n')
+    cmap = codemap.build(str(tmp_path), progress=False)
+    langs = {fi.lang for fi in cmap.files.values()}
+    assert {"go", "java", "c"} <= langs
+    callees = [callee for _c, callee, _f, _l in cmap.calls]
+    assert "Run" in callees and "helper" in callees and "system" in callees   # call edges resolve
+
+
 def test_frontend_file_suppresses_server_sink(tmp_path):
     _write(tmp_path, "api.js", "export async function apiFetch(url){ window.x=1; return fetch(url); }")
     cmap = codemap.build(str(tmp_path))

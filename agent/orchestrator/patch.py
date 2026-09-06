@@ -106,8 +106,11 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
                     anomalous, or no docker) -> the patch is UNVERIFIED, must NOT be called fixed.
     Only 'cleared' certifies a fix. A non-re-witness never counts as fixed (the false-'fixed' bug: a flaky
     reverify that merely fails to re-confirm is not evidence the fix works)."""
+    # Reverify with the SAME oracle that actually PROVED the finding. Using rung1 for a finding that was
+    # proven by investigate (because rung1 couldn't drive it in the first place) just re-produces "0 sink
+    # hits -> unknown" regardless of whether the patch works -- the wrong test. So rung1 only if rung1 proved it.
     oracle = str(rec.get("oracle", ""))
-    if oracle.startswith("rung1") or (c.provable and c.file.endswith(".py")):
+    if oracle.startswith("rung1"):
         mr = rung1.micro_exec(c, rt=None)                   # deterministic -- re-run the exact canary
         status = {"proven": "still", "safe": "cleared"}.get(mr.verdict, "unproven")
         return status, f"rung1 -> {mr.verdict}: {mr.reason[:100]}"

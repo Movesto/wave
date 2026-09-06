@@ -67,15 +67,18 @@ def fetch_extract(row, workdir):
     return dirs[0] if dirs else Path(workdir)
 
 
-def run_wave(repo_dir, timeout):
+def run_wave(repo_dir, timeout, notes=15, detect=40, prove=10):
     """Run the NEW pipeline (`run all`: eyes -> detect -> prove) as a subprocess and read the proven files
     from wave_findings.jsonl. Returns (confirmed_files, anomalous_files, out).
 
     --no-reach-gate: the GHSA targets are LIBRARIES (public-API entry, no HTTP routes), so the reachability
     gate -- tuned for routes -- would wrongly downgrade a real library vuln to anomalous_state. The notebook
-    is sink-pin-driven (not route-driven), so no --reader-all hack is needed for libraries anymore."""
+    is sink-pin-driven (not route-driven), so no --reader-all hack is needed for libraries anymore.
+    Budgets default SMALL: a library's vuln lives in 1-3 files, so large budgets just cause the timeouts we
+    saw (the prove stage -- multi-turn model runs -- is the time sink)."""
     cmd = [sys.executable, "-u", "-m", "agent.orchestrator.run", "all", str(repo_dir),
-           "--notes-budget", "40", "--detect-budget", "100", "--prove-budget", "25", "--no-reach-gate"]
+           "--notes-budget", str(notes), "--detect-budget", str(detect), "--prove-budget", str(prove),
+           "--no-reach-gate"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(_ROOT),
                            encoding="utf-8", errors="replace")
@@ -108,6 +111,9 @@ def main():
     ap.add_argument("--max-kb", type=float, default=2000, help="skip repos whose vulnerable zip is larger")
     ap.add_argument("--limit", type=int, default=8)
     ap.add_argument("--timeout", type=int, default=900, help="per-repo seconds")
+    ap.add_argument("--notes-budget", type=int, default=15, help="files the notebook deep-reads per repo")
+    ap.add_argument("--detect-budget", type=int, default=40, help="findings falsified per repo")
+    ap.add_argument("--prove-budget", type=int, default=10, help="survivors proven per repo (the time sink)")
     ap.add_argument("--out", default=str(_ROOT / "ghsa_bench_results.json"),
                     help="write per-CVE results + scorecard here (so a run is checkable after it ends)")
     a = ap.parse_args()
@@ -130,7 +136,8 @@ def main():
                 print(f"  download failed: {type(e).__name__}: {e}", flush=True)
                 rows_out.append({"id": row["alpha_id"], "status": "download_fail"})
                 continue
-            proven, anomalous, out = run_wave(repo, a.timeout)
+            proven, anomalous, out = run_wave(repo, a.timeout, notes=a.notes_budget,
+                                              detect=a.detect_budget, prove=a.prove_budget)
             if proven is None:
                 print("  wave: TIMEOUT", flush=True)
                 rows_out.append({"id": row["alpha_id"], "status": "timeout"})

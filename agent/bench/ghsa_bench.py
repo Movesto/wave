@@ -116,11 +116,19 @@ def main():
     ap.add_argument("--prove-budget", type=int, default=10, help="survivors proven per repo (the time sink)")
     ap.add_argument("--out", default=str(_ROOT / "ghsa_bench_results.json"),
                     help="write per-CVE results + scorecard here (so a run is checkable after it ends)")
+    ap.add_argument("--keep-artifacts", action="store_true",
+                    help="copy each CVE's wave_* artifacts + full run log to ghsa_artifacts/<id>/ (so a "
+                         "miss or timeout is diagnosable -- the temp dir is otherwise cleaned)")
+    ap.add_argument("--only", default=None,
+                    help="run only these alpha_ids (comma-separated) -- for focused re-runs of specific CVEs")
     a = ap.parse_args()
 
     if not MANIFEST.is_file():
         sys.exit(f"manifest not found at {MANIFEST} -- clone the benchmark into data/downloads/vlb first")
     lane = select(tuple(a.ecosystems.split(",")), a.max_kb, a.limit)
+    if a.only:                                              # focused re-run of specific CVEs
+        want = {x.strip() for x in a.only.split(",")}
+        lane = [r for r in lane if r["alpha_id"] in want]
     print(f"selected {len(lane)} entries (ecosystems={a.ecosystems}, <= {a.max_kb}kb)\n", flush=True)
 
     rows_out = []
@@ -138,6 +146,16 @@ def main():
                 continue
             proven, anomalous, out = run_wave(repo, a.timeout, notes=a.notes_budget,
                                               detect=a.detect_budget, prove=a.prove_budget)
+            if a.keep_artifacts:                            # copy the per-CVE evidence out before the temp dir
+                dest = _ROOT / "ghsa_artifacts" / row["alpha_id"]   # is cleaned -- so a miss is diagnosable
+                dest.mkdir(parents=True, exist_ok=True)
+                import shutil
+                for name in ("wave_findings.jsonl", "wave_notebook.jsonl", "wave_candidates.jsonl",
+                             "wave_detect.jsonl", "casefile.json"):
+                    src = Path(repo) / name
+                    if src.exists():
+                        shutil.copy(src, dest / name)
+                (dest / "run.log").write_text(out or "", encoding="utf-8")   # the full pipeline stdout
             if proven is None:
                 print("  wave: TIMEOUT", flush=True)
                 rows_out.append({"id": row["alpha_id"], "status": "timeout"})

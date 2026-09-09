@@ -15,25 +15,29 @@ no dependence on a frontier cloud model for the parts that matter.
 ## Quickstart
 
 ```bash
-# 1. install (Docker must also be running -- proofs run in throwaway containers)
-pip install -r requirements.txt
+# 1. install as a CLI (Docker must also be running -- proofs run in throwaway containers)
+pip install -e .                     # gives you the `wave` command
 
-# 2. point at a model -- LOCAL via ollama (private, the design intent):
-export WAVE_API_BASE="http://localhost:11434/v1"
-export WAVE_MODEL="hf.co/<your-gguf>:<tag>"
+# 2. point at a model ONCE (saved to ~/.wave/config -- no need to re-set it each run)
+wave config set base  "http://localhost:11434/v1"        # LOCAL via ollama (private, the design intent)
+wave config set model "hf.co/<your-gguf>:<tag>"
 #    ...or a CLOUD OpenAI-compatible endpoint (stronger, off-box -- sends code out):
-# export WAVE_API_BASE="https://openrouter.ai/api/v1"
-# export WAVE_MODEL="deepseek/deepseek-v4-flash-0731"
-# export WAVE_API_KEY="<your key>"
+# wave config set base  "https://openrouter.ai/api/v1"
+# wave config set model "deepseek/deepseek-v4-flash-0731"
+# wave config set key   "<your key>"
 
 # 3. run the whole pipeline on a repo (find -> prove -> patch)
-python -m agent.orchestrator.run all /path/to/target-repo --patch
+wave all /path/to/target-repo --patch
 ```
 
-Read the verdicts in `target-repo/wave_findings.jsonl` (and the full report in `casefile.json`). A
-`confirmed` was witnessed by a tool; `anomalous_state` needs human review; `believed`/`blocked` are unproven
-leads. It's resumable — re-run to continue. On Windows PowerShell, use `$env:WAVE_API_BASE="..."` instead of
-`export`. First run pulls a couple of Docker images (and, for XSS, a chromium image — a one-time download).
+Then read **`target-repo/wave_results/wave_report.md`** — a human-readable report of what the model found:
+what it **proved** (with the cited evidence), what **needs review**, what it **cleared as safe**, and any
+**fixes**. A `confirmed` was witnessed by a tool; `anomalous_state` needs human judgment; `believed`/`blocked`
+are unproven leads. (`wave report <repo>` regenerates it; the raw machine artifacts are `wave_findings.jsonl`
++ `casefile.json`.)
+
+It's resumable — re-run to continue. The first run pulls a couple of Docker images (and, for XSS, a chromium
+image — a one-time download).
 
 <details><summary>No model yet? Fastest path with ollama</summary>
 
@@ -117,32 +121,38 @@ Classes it can't yet witness (missing deps, business logic beyond IDOR, gadget c
 
 ### 1. Prerequisites
 
-- **Python** 3.11+ and the repo's deps (`pip install -r requirements.txt`), including `tree-sitter-language-pack`.
+- **Python** 3.11+; install the CLI with `pip install -e .` (pulls `tree-sitter-language-pack`, `requests`,
+  `PyYAML`). This gives you the `wave` command.
 - **Docker** running (the proof loop executes everything in throwaway containers — never on your host).
 - **A model** (pick one, next section).
 
-### 2. Point it at a model
+### 2. Point it at a model (once)
+
+`wave config set` saves to `~/.wave/config`, so you set it a single time and never pass env again. (An
+existing `WAVE_*` env var or `.env` still wins if present.)
 
 **Local (default, private — the design intent):** an ollama server serving a capable local model.
 
-```powershell
-$env:WAVE_API_BASE = "http://localhost:11434/v1"
-$env:WAVE_MODEL    = "hf.co/<your-gguf>:<tag>"     # e.g. a Qwen3-family 27B
+```bash
+wave config set base  "http://localhost:11434/v1"
+wave config set model "hf.co/<your-gguf>:<tag>"     # e.g. a Qwen3-family 27B
 ```
 
 **Cloud (stronger reasoning, off-box — for testing / hard targets):** any OpenAI-compatible endpoint, e.g.
-OpenRouter. Note this sends code off-box; use it deliberately.
+OpenRouter. This sends code off-box; use it deliberately.
 
-```powershell
-$env:WAVE_API_BASE = "https://openrouter.ai/api/v1"
-$env:WAVE_MODEL    = "deepseek/deepseek-v4-flash-0731"
-$env:WAVE_API_KEY  = "<your OpenRouter key>"
+```bash
+wave config set base  "https://openrouter.ai/api/v1"
+wave config set model "deepseek/deepseek-v4-flash-0731"
+wave config set key   "<your OpenRouter key>"
 ```
+
+`wave config show` prints the current settings.
 
 ### 3. Run the whole pipeline
 
-```powershell
-python -m agent.orchestrator.run all C:\path\to\target-repo --patch
+```bash
+wave all /path/to/target-repo --patch
 ```
 
 Useful flags: `--online` (give the model opt-in `web_search`/`web_read` for unfamiliar APIs), `--patch`
@@ -150,17 +160,19 @@ Useful flags: `--online` (give the model opt-in `web_search`/`web_read` for unfa
 / `--detect-budget N` / `--prove-budget N` (bound each stage; the model *selects* which files to deep-read on
 large repos).
 
-Outputs land in the target repo: `wave_map.md`, `wave_notebook.md/.jsonl`, `wave_candidates.jsonl`,
-`wave_findings.jsonl` (the verdicts), and `casefile.json` (the full investigation report). Every stage is
-**resumable** — re-run to continue; a terminal verdict is skipped, a `believed`/`blocked` lead is retried.
+Read **`<repo>/wave_results/wave_report.md`** — the human-readable findings (regenerate anytime with
+`wave report <repo>`). The machine artifacts also land in the repo: `wave_findings.jsonl` (verdicts) and
+`casefile.json` (full investigation report). Every stage is **resumable** — re-run to continue; a terminal
+verdict is skipped, a `believed`/`blocked` lead is retried.
 
 ### 4. Or run a single stage
 
-```powershell
-python -m agent.orchestrator.run eyes   <repo> [--notes]   # map + deterministic index; --notes runs the notebook
-python -m agent.orchestrator.run detect <repo>             # clean-room falsify the notebook's findings
-python -m agent.orchestrator.run prove  <repo> [--online]  # the confirmation ladder
-python -m agent.orchestrator.run patch  <repo> [--write]   # patch + reverify the confirmed findings
+```bash
+wave eyes   <repo> [--notes]   # map + deterministic index; --notes runs the notebook
+wave detect <repo>             # clean-room falsify the notebook's findings
+wave prove  <repo> [--online]  # the confirmation ladder
+wave patch  <repo> [--write]   # patch + reverify the confirmed findings
+wave report <repo>             # (re)generate the readable report
 ```
 
 ---

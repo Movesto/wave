@@ -6,8 +6,10 @@ More stages (provision, auth, exploit, oracle, remediate) land as the loop is bu
 """
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
 # The model can emit non-cp1252 Unicode (e.g. a non-breaking hyphen U+2011); a bare print() of it to a
 # Windows cp1252 console raises UnicodeEncodeError and kills the whole run. Force UTF-8 (replace on any
@@ -298,6 +300,9 @@ def cmd_all(args):
         print(f"[all] patch: {len(fixed)} fixed of {len(pres)} confirmed "
               f"({'wrote' if args.write else 'dry-run'})", flush=True)
 
+    from . import report as _report                        # the readable, human-facing findings report
+    rp = _report.generate(t, model=getattr(model, "model_id", ""))
+
     print(f"\n=== PIPELINE on {t} ===")
     print(f"  findings={total}  survivors={len(survivors)}  CONFIRMED={len(by['confirmed'])}  "
           f"anomalous={len(by['anomalous_state'])}  fixed={len(fixed)}")
@@ -306,10 +311,71 @@ def cmd_all(args):
               f"-- {(d.get('evidence') or '')[:70]}")
     for d in by["anomalous_state"]:
         print(f"  [ANOMALOUS {d.get('cwe')}] {d['file']}:{d['line']}  -- {d.get('why', '')[:70]}")
+    print(f"\n\U0001f4c4 readable report -> {rp}")
+
+
+def cmd_report(args):
+    """(Re)generate the human-readable report from an already-run repo's artifacts."""
+    from . import report as _report
+    rp = _report.generate(args.target, model=os.environ.get("WAVE_MODEL", ""))
+    print(f"report -> {rp}")
+
+
+# ---- CLI config: set the model/endpoint ONCE (~/.wave/config), so `wave` runs need no env each time -------
+def _config_path():
+    return Path(os.path.expanduser("~")) / ".wave" / "config"
+
+
+def _load_config():
+    """Load ~/.wave/config then ./.env into the environment (without overriding vars already set), so the
+    CLI behaves like a configured tool -- set the model once, then just `wave all <repo>`."""
+    for path in (_config_path(), Path(".env")):
+        try:
+            if not path.is_file():
+                continue
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+        except OSError:
+            pass
+
+
+def cmd_config(args):
+    """`wave config set <key> <value>` / `wave config show`. Keys: model, base, key (aliases for
+    WAVE_MODEL / WAVE_API_BASE / WAVE_API_KEY) or any WAVE_* name."""
+    alias = {"model": "WAVE_MODEL", "base": "WAVE_API_BASE", "url": "WAVE_API_BASE",
+             "key": "WAVE_API_KEY", "trace": "WAVE_TRACE"}
+    cfg = _config_path()
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if cfg.is_file():
+        for line in cfg.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.strip().startswith("#"):
+                k, v = line.split("=", 1)
+                existing[k.strip()] = v.strip()
+    if args.action == "show":
+        if not existing:
+            print(f"(no config at {cfg})")
+        for k, v in existing.items():
+            print(f"{k}={'***' if 'KEY' in k else v}")
+        return
+    key = alias.get((args.key or "").lower(), (args.key or "").upper())
+    if not key.startswith("WAVE_"):
+        raise SystemExit(f"unknown config key {args.key!r} (use: model | base | key | trace | a WAVE_* name)")
+    existing[key] = args.value or ""
+    cfg.write_text("\n".join(f"{k}={v}" for k, v in existing.items()) + "\n", encoding="utf-8")
+    print(f"set {key} -> {cfg}")
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="orchestrator")
+    _load_config()                                          # set env once via `wave config`; then just run
+    ap = argparse.ArgumentParser(prog="wave",
+                                 description="wave — a local, autonomous vulnerability-discovery & repair agent")
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("discover", help="SAST front-end: static candidate discovery")
     d.add_argument("target")
@@ -410,6 +476,16 @@ def main():
     al.add_argument("--online", action="store_true", help="give the model opt-in web_search/web_read (egress)")
     al.add_argument("--interactive", action="store_true", help="steer the notebook's target selection")
     al.set_defaults(func=cmd_all)
+
+    rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")
+    rpt.add_argument("target")
+    rpt.set_defaults(func=cmd_report)
+
+    cf = sub.add_parser("config", help="set the model/endpoint once (~/.wave/config), so runs need no env")
+    cf.add_argument("action", choices=["set", "show"])
+    cf.add_argument("key", nargs="?", help="model | base | key | trace | a WAVE_* name")
+    cf.add_argument("value", nargs="?", help="the value to set")
+    cf.set_defaults(func=cmd_config)
 
     args = ap.parse_args()
     args.func(args)

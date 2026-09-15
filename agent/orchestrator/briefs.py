@@ -75,7 +75,9 @@ def _is_rust(path):
 # other COMPILED languages that (like Rust) can't be imported+called -- each gets a minimal build-and-run
 # repro recipe. ext -> proof mode.
 _COMPILED_MODE = {".go": "go", ".java": "java", ".cs": "dotnet",
-                  ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift", ".scala": "scala", ".sc": "scala"}
+                  ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift", ".scala": "scala", ".sc": "scala",
+                  ".ex": "elixir", ".exs": "elixir", ".sh": "bash", ".bash": "bash", ".lua": "lua",
+                  ".hs": "haskell", ".dart": "dart", ".pl": "perl", ".pm": "perl"}
 
 
 def _compiled_mode_for(path):
@@ -119,6 +121,9 @@ def _image_for(path):
                      (".rs", "rust:1-slim"),
                      (".kt", "zenika/kotlin"), (".kts", "zenika/kotlin"), (".swift", "swift:5.10"),
                      (".scala", "virtuslab/scala-cli"), (".sc", "virtuslab/scala-cli"),
+                     (".ex", "elixir:latest"), (".exs", "elixir:latest"), (".sh", "bash:5"),
+                     (".bash", "bash:5"), (".lua", "nickblah/lua:5.4"), (".hs", "haskell:latest"),
+                     (".dart", "dart:stable"), (".pl", "perl:latest"), (".pm", "perl:latest"),
                      (".cc", "gcc:13"), (".cpp", "gcc:13"), (".cxx", "gcc:13"), (".hpp", "gcc:13"),
                      (".hh", "gcc:13"), (".hxx", "gcc:13"), (".c", "gcc:13"), (".h", "gcc:13")):
         if p.endswith(ext):
@@ -246,7 +251,55 @@ _COMPILED = {
               "run": "scala-cli run repro.scala   (or scala repro.scala)",
               "crash": "an `Exception in thread \"main\"` stack trace (NPE, IndexOutOfBounds, a thrown parse error)",
               "cmd": "sys.process.Process(Seq(\"sh\", \"-c\", <tainted>)).! -> `; touch /tmp/wave_HIT`"},
+    "elixir": {"name": "Elixir", "image": "elixir:latest (elixir/mix)",
+               "setup": "write repro.exs: `defmodule R do ... end` copying the function, then call it at the bottom",
+               "deps": "Mix.install([...]) at the top of the script pulls hex deps (needs network 'host')",
+               "file": "repro.exs",
+               "run": "elixir repro.exs",
+               "crash": "an `** (` exception (e.g. `** (RuntimeError)`, `** (MatchError)`, `** (ArgumentError)`)",
+               "cmd": "System.cmd(\"sh\", [\"-c\", <tainted>]) -> `; touch /tmp/wave_HIT`"},
+    "bash": {"name": "Bash/shell", "image": "bash:5 (or any image with bash)",
+             "setup": "write repro.sh that defines (or `source`s) the function, then calls it with your arg",
+             "deps": "none",
+             "file": "repro.sh",
+             "run": "bash repro.sh <arg>",
+             "crash": "bash rarely 'crashes' -- the risk here is command execution; witness that (below). A "
+                      "nonzero exit is not proof by itself",
+             "cmd": "the function passes input to eval / `sh -c` / backticks / `$(...)` -> inject `; touch "
+                    "/tmp/wave_HIT` and confirm the file appears (that IS the proof)"},
+    "lua": {"name": "Lua", "image": "nickblah/lua:5.4 (best-effort; install lua if missing)",
+            "setup": "write repro.lua copying the function, then call it",
+            "deps": "luarocks (heavier); stdlib needs none",
+            "file": "repro.lua",
+            "run": "lua repro.lua",
+            "crash": "a `lua: ...:` runtime error (nil index, bad argument)",
+            "cmd": "os.execute(<tainted>) / io.popen(<tainted>) -> `; touch /tmp/wave_HIT`"},
+    "haskell": {"name": "Haskell", "image": "haskell:latest (ghc/runghc)",
+                "setup": "write Repro.hs with `main :: IO ()` and copy the function",
+                "deps": "cabal (heavier); base/process modules need none",
+                "file": "Repro.hs",
+                "run": "runghc Repro.hs",
+                "crash": "an exception (`*** Exception:`, a `Prelude.head: empty list`-style partial-function error)",
+                "cmd": "System.Process.callCommand(<tainted>) -> `; touch /tmp/wave_HIT`"},
+    "dart": {"name": "Dart", "image": "dart:stable",
+             "setup": "write repro.dart with `void main() { ... }` and copy the function",
+             "deps": "dart pub add <pkg> (needs network 'host')",
+             "file": "repro.dart",
+             "run": "dart run repro.dart",
+             "crash": "an `Unhandled exception:` (RangeError, a Null check operator `!` on null)",
+             "cmd": "Process.runSync('sh', ['-c', <tainted>]) -> `; touch /tmp/wave_HIT`"},
+    "perl": {"name": "Perl", "image": "perl:latest",
+             "setup": "write repro.pl copying the sub, then call it",
+             "deps": "cpanm <Module> (needs network 'host'); core modules need none",
+             "file": "repro.pl",
+             "run": "perl repro.pl <arg>",
+             "crash": "a fatal error (`Can't locate`, `died at`, an `undefined subroutine`)",
+             "cmd": "system(<tainted>) / `qx//` / backticks / open with a `|` pipe -> `; touch /tmp/wave_HIT`"},
 }
+
+
+# every proof mode that stands up a standalone repro and runs it (needs a longer step timeout for build/fetch)
+COMPILED_MODES = {"rust", *_COMPILED}
 
 
 def _compiled_brief(candidate, target, rel, code, fn, lang):
@@ -257,8 +310,9 @@ def _compiled_brief(candidate, target, rel, code, fn, lang):
     return (
         f"File: {rel}. Function: {candidate.unit}. Suspected {candidate.cwe} ({candidate.family}); "
         f"sink: {candidate.sink}.\n\nCode around the sink:\n{code}\n\n"
-        f"This is {c['name']} -- a COMPILED language: you cannot import+call it like Python, you must BUILD a "
-        f"minimal repro and RUN it. The repo is mounted at /work (read it for the exact logic/types). Because "
+        f"This is {c['name']}: you cannot reliably import+call one function of it in isolation like Python -- "
+        f"stand up a minimal standalone repro and RUN it. The repo is mounted at /work (read it for the exact "
+        f"logic/types). Because "
         f"EACH command runs in a FRESH container, do the WHOLE repro in ONE command, and use network 'host' on "
         f"it if you must fetch dependencies (image: {c['image']}). Recipe:\n"
         f"1. {c['setup']}.\n"
@@ -320,7 +374,7 @@ def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
         return _asan_brief(candidate, target, rel, code, fn)
     if mode == "rust":                                     # Rust: minimal cargo repro + run (panic/overflow/marker)
         return _rust_brief(candidate, target, rel, code, fn)
-    if mode in ("go", "java", "dotnet", "kotlin", "swift", "scala"):   # compiled langs: build a repro + run
+    if mode in _COMPILED:                                  # go/java/c#/kotlin/swift/scala/elixir/bash/lua/...
         return _compiled_brief(candidate, target, rel, code, fn, mode)
     if mode == "differential":                             # IDOR / access-control 2-identity harness
         return _differential_brief(candidate, target, rel, code, fn)

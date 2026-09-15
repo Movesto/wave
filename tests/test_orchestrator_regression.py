@@ -933,3 +933,35 @@ def test_scala_cmd_sink_pins(tmp_path):
 
 def test_swift_fatal_error_is_grounding_marker():
     assert inv._real_exec("Fatal error: Unexpectedly found nil while unwrapping an Optional value")
+
+
+# ============================ 19. Elixir / Bash / Lua / Haskell / Dart / Perl (backend niche) ============
+
+def test_niche_langs_functions_extracted(tmp_path):
+    _write(tmp_path, "c.ex", "defmodule M do\n  def get_user(id) do\n    System.cmd(\"sh\", [\"-c\", id])\n  end\nend\n")
+    _write(tmp_path, "d.sh", "handle() {\n  eval \"$1\"\n}\n")
+    _write(tmp_path, "a.lua", "local function getUser(id)\n  return os.execute(id)\nend\n")
+    _write(tmp_path, "M.hs", "getUser :: String -> IO ()\ngetUser n = callCommand n\n")
+    _write(tmp_path, "a.dart", "class C {\n  String getUser(String id) { return run(id); }\n}\n")
+    _write(tmp_path, "c.pl", "sub get_user {\n  system(shift);\n}\n")
+    cm = codemap.build(str(tmp_path))
+    assert cm.funcs.get("get_user") and cm.funcs.get("handle") and cm.funcs.get("getUser")
+    assert "M" in cm.classes                                # elixir defmodule -> module/class
+
+def test_niche_langs_route_and_image():
+    for ext, mode, img in ((".ex", "elixir", "elixir:latest"), (".sh", "bash", "bash:5"),
+                           (".lua", "lua", "nickblah/lua:5.4"), (".hs", "haskell", "haskell:latest"),
+                           (".dart", "dart", "dart:stable"), (".pl", "perl", "perl:latest")):
+        c = _cc("x" + ext)
+        assert briefs._proof_mode(c) == mode and briefs._image_for("x" + ext) == img
+
+def test_niche_lang_sinks_pin(tmp_path):
+    _write(tmp_path, "c.ex", "defmodule M do\n  def r(id), do: System.cmd(\"sh\", [\"-c\", id])\nend\n")
+    _write(tmp_path, "d.sh", "f() { eval \"$1\"; }\n")
+    _write(tmp_path, "c.pl", "sub r { system(shift); }\n")
+    pinned = repomap.build_map(str(tmp_path)).get("pinned", [])
+    assert len(pinned) >= 3                                 # each shell/system/eval sink pins
+
+def test_elixir_and_haskell_crash_markers():
+    assert inv._real_exec("** (RuntimeError) something bad")     # elixir
+    assert inv._real_exec("*** Exception: Prelude.head: empty list")  # haskell

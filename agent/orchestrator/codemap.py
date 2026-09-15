@@ -20,6 +20,8 @@ _EXT_LANG = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs":
              ".rb": "ruby", ".php": "php",
              ".go": "go", ".java": "java", ".cs": "csharp", ".rs": "rust",
              ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift", ".scala": "scala", ".sc": "scala",
+             ".ex": "elixir", ".exs": "elixir", ".sh": "bash", ".bash": "bash", ".lua": "lua",
+             ".hs": "haskell", ".dart": "dart", ".pl": "perl", ".pm": "perl",
              ".c": "c", ".h": "cpp", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
              ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp"}
 _SKIP = {"node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build", "vendor",
@@ -30,17 +32,23 @@ _FUNC_DEF = {"function_definition", "function_declaration", "method_definition",
              "method", "singleton_method",                # ruby
              "method_declaration",                        # php/java/c#/go
              "constructor_declaration",                   # java / c#
-             "function_item"}                             # rust (function_definition covers php/c/cpp)
+             "function_item",                             # rust (function_definition covers php/c/cpp)
+             "subroutine_declaration_statement",          # perl
+             "function_signature",                        # dart (name field; body is a sibling)
+             "function"}                                  # haskell (a bare `function` keyword token elsewhere
+                                                          # has no name -> skipped by the `if name` guard)
 _CLASS_DEF = {"class_definition", "class_declaration", "class",   # +class = ruby
               "interface_declaration", "enum_declaration",        # java / c#
               "struct_declaration",                               # c#
               "struct_item", "impl_item", "trait_item",           # rust
               "class_specifier", "struct_specifier"}              # c++
 _CALL = {"call", "call_expression", "function_call_expression", "member_call_expression",
-         "scoped_call_expression", "method_call", "command",      # +php +ruby
+         "scoped_call_expression", "method_call", "command",      # +php +ruby +bash(command)
          "method_invocation",                                     # java
          "invocation_expression",                                 # c#
-         "macro_invocation"}                                      # rust (call_expression covers go/rust/c/cpp)
+         "macro_invocation",                                      # rust (call_expression covers go/rust/c/cpp)
+         "function_call",                                         # lua
+         "apply"}                                                 # haskell
 
 
 @dataclass
@@ -240,6 +248,8 @@ def _is_exported(node, lang):
         if lang in ("kotlin", "scala", "swift"):           # public by default; only `private` hides it
             return "private" not in head
         return True                                        # c/cpp: top-level functions are linkable
+    if lang in ("bash", "lua", "perl", "haskell", "dart", "elixir"):  # top-level defs are callable
+        return True
     p = node.parent
     depth = 0
     while p is not None and depth < 4:
@@ -324,10 +334,62 @@ def _module_doc(root, lang):
     return ""
 
 
+def _elixir_def(node):
+    """Elixir def/defp/defmodule are `call` MACROS, not distinct node types. Return ('func'|'module', name)
+    or (None, None). `def get_user(id) do` = call(identifier 'def', arguments call(identifier 'get_user'...));
+    `defmodule My.Ctrl do` = call(identifier 'defmodule', arguments alias 'My.Ctrl')."""
+    if not node.children or node.children[0].type != "identifier":
+        return None, None
+    kw = _txt(node.children[0])
+    args = node.child_by_field_name("arguments")
+    if args is None:                                        # `arguments` is a child TYPE, not always a named field
+        args = next((c for c in node.children if c.type == "arguments"), None)
+    if args is None:
+        return None, None
+    if kw in ("def", "defp", "defmacro", "defmacrop"):
+        for c in args.children:
+            if c.type == "call" and c.children and c.children[0].type == "identifier":
+                return "func", _txt(c.children[0])          # def name(args)
+            if c.type == "identifier":
+                return "func", _txt(c)                      # def name  (no parens)
+    elif kw == "defmodule":
+        for c in args.children:
+            if c.type in ("alias", "identifier"):
+                return "module", _txt(c)
+    return None, None
+
+
 def _walk(node, m, file, lang, enclosing, finfo, cls):
     t = node.type
     new_enc = enclosing
     new_cls = cls
+    if lang == "elixir" and t == "call":                   # def/defmodule are macros -> handle, else fall through
+        kind, name = _elixir_def(node)
+        if kind == "func" and name:
+            fobj = Func(name=name, file=file, line=node.start_point[0] + 1, end=node.end_point[0] + 1,
+                        exported=True, sig=_params(node))
+            m.funcs[name].append(fobj)
+            if cls is not None:
+                cls.methods.append(fobj)
+            elif finfo is not None:
+                finfo.functions.append(fobj)
+                if name not in finfo.exports:
+                    finfo.exports.append(name)
+            for c in node.children:
+                _walk(c, m, file, lang, name, finfo, cls)   # body calls attributed to this fn
+            return
+        if kind == "module" and name:
+            c_obj = Cls(name=name, file=file, line=node.start_point[0] + 1, end=node.end_point[0] + 1,
+                        exported=True)
+            m.classes[name].append(c_obj)
+            if finfo is not None:
+                finfo.classes.append(c_obj)
+                if name not in finfo.exports:
+                    finfo.exports.append(name)
+            for c in node.children:
+                _walk(c, m, file, lang, enclosing, finfo, c_obj)   # defs inside = its methods
+            return
+        # not a def macro -> a real call: fall through to the generic _CALL handling below
     if t in _CLASS_DEF:
         cname = _def_name(node)
         if cname:

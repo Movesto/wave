@@ -142,8 +142,10 @@ _REAL_EXEC_MARKERS = ("WAVE_RESULT", "WAVE_RENDER_CANARY", "WAVE_OUTPUT", "WAVE_
                       "called `Result::unwrap()`", "called `Option::unwrap()`",
                       "panic:", "goroutine ",                                             # go runtime panics
                       "Exception in thread", "\tat ",                                     # java/kotlin/scala (JVM)
-                      "Unhandled exception",                                              # c#/.net stack traces
-                      "Fatal error:")                                                     # swift runtime trap
+                      "Unhandled exception",                                              # c#/.net + dart
+                      "Fatal error:",                                                     # swift runtime trap
+                      "** (",                                                             # elixir exceptions
+                      "*** Exception")                                                    # haskell exceptions
 
 
 def _provision_signal(text):

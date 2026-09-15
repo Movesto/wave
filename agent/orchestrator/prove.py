@@ -144,7 +144,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False):
             img = js_env.ensure_browser_runner() or js_env.prepare(target) or img
         else:
             img = js_env.prepare(target) or img
-    step_to = (300 if mode in ("rust", "go", "java", "dotnet", "kotlin", "swift", "scala")  # compiled: build
+    step_to = (300 if mode in briefs.COMPILED_MODES               # build/fetch a standalone repro
                else (120 if mode in ("render", "asan")
                      else (90 if briefs._is_js(c.file) else 45)))
     try:

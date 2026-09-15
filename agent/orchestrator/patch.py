@@ -131,8 +131,7 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
                                                         mode=mode),
                                image=img, mount=target, network="none",
                                max_steps=max_steps,
-                               step_timeout=(300 if mode in ("rust", "go", "java", "dotnet",
-                                                             "kotlin", "swift", "scala") else
+                               step_timeout=(300 if mode in briefs.COMPILED_MODES else
                                              (120 if mode in ("render", "asan") else
                                               (90 if briefs._is_js(c.file) else 45))))
     finally:

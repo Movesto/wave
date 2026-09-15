@@ -157,10 +157,50 @@ _SINKS_SCALA = _SINKS_JAVA + [
 ]
 
 
+# --- niche / backend languages ------------------------------------------------------------------------
+_SINKS_ELIXIR = [
+    ("cmd",   re.compile(r"System\.cmd\s*\(|System\.shell\s*\(|:os\.cmd|Code\.eval_string|Code\.eval_quoted")),
+    ("path",  re.compile(r"File\.(read|write|open|stream|rm|cp|mkdir)|Path\.join")),
+    ("ssrf",  re.compile(r"HTTPoison\.|Finch\.|Tesla\.|:httpc\.|Req\.(get|post)|Mint\.")),
+    ("SQLi",  re.compile(r"Repo\.query\s*\(|Ecto\.Adapters\.SQL\.query|fragment\s*\(\s*\"")),
+]
+_SINKS_BASH = [
+    ("cmd",   re.compile(r"\beval\b|\$\(|`|\|\s*(ba)?sh\b|\bsh\b\s+-c|\bbash\b\s+-c|\bexec\b")),
+    ("path",  re.compile(r"\brm\s+-rf|\bcat\s+[\"']?\$|>\s*[\"']?\$|\bcp\b|\bmv\b")),
+    ("ssrf",  re.compile(r"\bcurl\b|\bwget\b")),
+]
+_SINKS_LUA = [
+    ("cmd",   re.compile(r"os\.execute\s*\(|io\.popen\s*\(")),
+    ("eval",  re.compile(r"\bload(string)?\s*\(|\bdofile\s*\(|\bloadfile\s*\(")),
+    ("path",  re.compile(r"io\.open\s*\(|io\.lines\s*\(")),
+    ("ssrf",  re.compile(r"http\.request|socket\.http|ngx\.location\.capture")),
+]
+_SINKS_HASKELL = [
+    ("cmd",   re.compile(r"\b(callCommand|callProcess|readProcess|readCreateProcess|spawnCommand|system|"
+                         r"rawSystem|runCommand|createProcess)\b")),
+    ("path",  re.compile(r"\b(readFile|writeFile|appendFile|openFile|removeFile)\b")),
+    ("ssrf",  re.compile(r"\b(httpLBS|httpBS|parseRequest|simpleHttp|getResponseBody)\b")),
+    ("SQLi",  re.compile(r"\b(rawQuery|execute_|query_)\b|\bsql\b\s*\$")),
+]
+_SINKS_DART = [
+    ("cmd",   re.compile(r"Process\.(run|start|runSync)\s*\(")),
+    ("path",  re.compile(r"\bFile\s*\(|\bDirectory\s*\(|\.readAsString|\.writeAsString")),
+    ("ssrf",  re.compile(r"HttpClient\s*\(|http\.(get|post|read)\s*\(|\.getUrl\s*\(|Uri\.parse\s*\(")),
+    ("SQLi",  re.compile(r"\.rawQuery\s*\(|\.execute\s*\(\s*[\"']|database\.query")),
+]
+_SINKS_PERL = [
+    ("cmd",   re.compile(r"\bsystem\s*\(|\bexec\s*\(|\bqx\s*[/({]|`|open\s*\([^)]*\|")),
+    ("eval",  re.compile(r"\beval\s*[\"'{]")),
+    ("path",  re.compile(r"\bopen\s*\(|\bunlink\s*\(|\bsysopen\b")),
+]
+
+
 def _lang_sinks(lang):
     return {"php": _SINKS_PHP, "ruby": _SINKS_RUBY, "go": _SINKS_GO, "java": _SINKS_JAVA,
             "csharp": _SINKS_CSHARP, "rust": _SINKS_RUST, "c": _SINKS_C, "cpp": _SINKS_C,
-            "kotlin": _SINKS_JAVA, "scala": _SINKS_SCALA, "swift": _SINKS_SWIFT}.get(
+            "kotlin": _SINKS_JAVA, "scala": _SINKS_SCALA, "swift": _SINKS_SWIFT,
+            "elixir": _SINKS_ELIXIR, "bash": _SINKS_BASH, "lua": _SINKS_LUA, "haskell": _SINKS_HASKELL,
+            "dart": _SINKS_DART, "perl": _SINKS_PERL}.get(
         lang, (_SINKS_PY if lang == "python" else _SINKS_JS) + _SINKS_COMMON)
 
 

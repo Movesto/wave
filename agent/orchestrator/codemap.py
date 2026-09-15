@@ -11,9 +11,38 @@ resolution is best-effort, not type-sound; the audit + ensemble cover the gaps.
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# Checked-in THIRD-PARTY / minified / bundled assets (not the app's own source). Reading these burns the
+# budget on library code and yields library "findings" (e.g. vaultwarden's static/scripts/bootstrap.bundle.js
+# -- 6k lines of Bootstrap -- ate a whole run). Matched on the basename; content-minification caught separately.
+_VENDOR_RE = re.compile(
+    r"\.min\.(js|css|mjs)$|\.bundle\.(js|css|mjs)$|-min\.(js|css)$|\.min-|"
+    r"^(jquery|bootstrap|popper|react|react-dom|vue|angular|lodash|underscore|moment|d3|chart|chartjs|"
+    r"tailwind|datatables|select2|fontawesome|font-awesome|bulma|foundation|ember|backbone|knockout|zepto|"
+    r"modernizr|axios|three|babel|core-js|polyfill|swagger-ui|htmx|alpine|preact|redux|rxjs|highlight|prism|"
+    r"codemirror|monaco|ace|tinymce|ckeditor|leaflet|mapbox|plotly|echarts|jquery-ui|slick|owl\.carousel)"
+    r"[.\-]", re.I)
+
+
+def _is_vendored(path):
+    """A checked-in third-party / minified / bundled asset (skip: not the app's own code)."""
+    return bool(_VENDOR_RE.search(Path(path).name))
+
+
+def _looks_minified(src_bytes, threshold=2000):
+    """Minified/generated code packs everything onto a few enormous lines; real source wraps. A line longer
+    than `threshold` bytes = skip (catches a .min file even when it's named .js)."""
+    longest = 0
+    for line in src_bytes[:400_000].split(b"\n"):
+        if len(line) > longest:
+            longest = len(line)
+            if longest > threshold:
+                return True
+    return False
 
 _EXT_LANG = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
              ".jsx": "javascript", ".ts": "typescript", ".tsx": "tsx", ".mts": "typescript",
@@ -136,7 +165,8 @@ class CodeMap:
 def _iter_files(target):
     p = Path(target)
     for f in p.rglob("*"):
-        if f.suffix.lower() in _EXT_LANG and not any(s in f.parts for s in _SKIP):
+        if (f.suffix.lower() in _EXT_LANG and not any(s in f.parts for s in _SKIP)
+                and not _is_vendored(f)):                   # skip checked-in third-party/minified assets
             try:
                 if f.stat().st_size < 400_000:
                     yield f
@@ -444,6 +474,8 @@ def build(target, progress=True):
         lang = _EXT_LANG[f.suffix.lower()]
         try:
             src = f.read_bytes()
+            if _looks_minified(src):                        # a .js/.css that's actually minified -> skip
+                continue
             if lang not in parsers:
                 parsers[lang] = get_parser(lang)
             tree = parsers[lang].parse(src)

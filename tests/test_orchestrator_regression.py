@@ -1035,3 +1035,28 @@ def test_ruby_php_briefs_run_the_interpreter():
 
 def test_ruby_php_images():
     assert briefs._image_for("app.rb") == "ruby:3-slim" and briefs._image_for("i.php") == "php:8.2-cli"
+
+
+# ============================ 23. skip vendored / minified assets ============================
+
+def test_is_vendored_matches_libraries_and_bundles():
+    for name in ("bootstrap.bundle.js", "jquery.min.js", "app.min.css", "react.production.min.js",
+                 "vendor/popper.js", "d3.min.js", "chart-min.js", "select2.min.css"):
+        assert codemap._is_vendored(name), name
+
+def test_is_vendored_spares_app_source():
+    for name in ("app.js", "src/user_model.rs", "handlers.py", "bundle_helper.rb", "main.go",
+                 "reactor.py", "charts_controller.rb"):
+        assert not codemap._is_vendored(name), name
+
+def test_looks_minified():
+    assert codemap._looks_minified(b"var a=1,b=2,c=3;" * 400)          # one huge line
+    assert not codemap._looks_minified(b"def f(x):\n    return x + 1\n" * 200)
+
+def test_vendored_file_excluded_from_map(tmp_path):
+    _write(tmp_path, "app.js", "function handle(id){ return exec(id); }\n")
+    _write(tmp_path, "static/bootstrap.bundle.js", "// bootstrap\n" + "function _b(){}\n" * 50)
+    _write(tmp_path, "static/jquery.min.js", "!function(e){}(window);\n")
+    cm = codemap.build(str(tmp_path))
+    files = "\n".join(cm.files.keys())
+    assert "app.js" in files and "bootstrap.bundle.js" not in files and "jquery.min.js" not in files

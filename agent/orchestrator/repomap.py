@@ -23,6 +23,15 @@ _ROUTE = re.compile(
     r"|@(Get|Post|Put|Delete|Patch|All)\s*\("                                        # nestjs controllers
     r"|\b(app|router|r|api|route)\.(get|post|put|delete|patch|use|all|head)\s*\(\s*['\"]"  # express
     r"|\.add_(url_rule|route)\s*\(|\brouter\.(register|add)"                          # flask/connexion/etc
+    r"|#\[\s*(get|post|put|delete|patch|head|options|route)\s*\("                     # rust: rocket/actix macros
+    r"|@(Get|Post|Put|Delete|Patch|Request)Mapping\b"                                 # java: spring
+    r"|\[\s*Http(Get|Post|Put|Delete|Patch)\b|\[\s*Route\s*\("                        # c#: asp.net attrs
+    r"|\.Map(Get|Post|Put|Delete|Group)\s*\("                                         # c#: minimal-api
+    r"|\bRoute::\s*(get|post|put|patch|delete|any|match|resource|apiResource)\s*\("    # php: laravel
+    r"|#\[\s*Route\s*\("                                                              # php: symfony attr
+    r"|\b\w+\.(GET|POST|PUT|DELETE|PATCH|Handle|HandleFunc)\s*\(\s*[\"`]"              # go: gin/echo/chi/mux
+    r"|^\s*(get|post|put|patch|delete|match)\s+['\"]"                                  # ruby: rails routes.rb
+    r"|^\s*(resources?|namespace)\s+:"                                                 # ruby: rails resources
 )
 
 # --- The 9 injection classes the detector tries FIRST (class label -> sink regex) ---------------------

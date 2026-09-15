@@ -246,14 +246,42 @@ def _is_exported(node, lang):
     return lang not in ("python", "ruby", "php") and _cjs_export(node)   # CommonJS: module.exports / exports.x
 
 
+_ATTR_TYPES = ("attribute_item", "attribute_list", "attribute", "annotation", "marker_annotation")
+
+
 def _decorators(node):
+    """Decorators / attribute macros / annotations attached to a definition, ACROSS languages -- these are
+    the primary route/entry-point signal (reachability + repomap read them):
+      Python  @app.get(...)           -> a `decorated_definition` wrapper holds `decorator` children
+      Rust    #[get("/x")]            -> `attribute_item` PRECEDING siblings (Rocket/Actix macros)
+      Java    @GetMapping(...)        -> `annotation`/`marker_annotation` inside a `modifiers` child (Spring)
+      C#      [HttpGet("x")]          -> `attribute_list` child or preceding sibling (ASP.NET)
+      PHP     #[Route('/x')]          -> `attribute_list` preceding sibling (Symfony)
+    Best-effort + defensive: an unknown grammar just yields nothing (same as before)."""
     out = []
     p = node.parent
-    if p is not None and p.type == "decorated_definition":
+    if p is not None and p.type == "decorated_definition":         # Python
         for c in p.children:
             if c.type == "decorator":
                 out.append(_txt(c).strip())
-    return out
+    for c in node.children:                                        # Java/Kotlin modifiers, C# attribute_list
+        if c.type == "modifiers":
+            for cc in c.children:
+                if cc.type in _ATTR_TYPES:
+                    out.append(_txt(cc).strip())
+        elif c.type in ("attribute_list", "attribute_item"):
+            out.append(_txt(c).strip())
+    sib = node.prev_sibling                                        # Rust/C#/PHP preceding attributes
+    while sib is not None and sib.type in _ATTR_TYPES + ("line_comment", "block_comment", "comment"):
+        if sib.type in _ATTR_TYPES:
+            out.append(_txt(sib).strip())
+        sib = sib.prev_sibling
+    seen, uniq = set(), []                                         # dedup, preserve order
+    for d in out:
+        if d and d not in seen:
+            seen.add(d)
+            uniq.append(d)
+    return uniq
 
 
 def _params(node):

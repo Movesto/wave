@@ -48,9 +48,15 @@ def is_frontend(path, source="", imports=()):
         return True
     return bool(source and _BROWSER_SIGNAL.search(source))
 
-# decorator / name signals that a function receives external, attacker-controllable input DIRECTLY
+# decorator / attribute-macro / annotation signals that a function receives external input DIRECTLY.
+# Matched (lowercased) against a function's captured decorators -- codemap now captures Rust #[get], Java
+# @GetMapping, C#/PHP [Http*]/#[Route] as decorators too, so these cover the non-py/js web frameworks.
 _ROUTE_HINTS = ("route", ".get(", ".post(", ".put(", ".delete(", ".patch(", "app.", "router.", "blueprint",
-                "@get", "@post", "@put", "@delete", "@patch", "endpoint", "api_route", "websocket", "on_event")
+                "@get", "@post", "@put", "@delete", "@patch", "endpoint", "api_route", "websocket", "on_event",
+                "#[get", "#[post", "#[put", "#[delete", "#[patch", "#[head", "#[options", "#[route",  # rust
+                "@getmapping", "@postmapping", "@putmapping", "@deletemapping", "@patchmapping",       # spring
+                "@requestmapping",
+                "[httpget", "[httppost", "[httpput", "[httpdelete", "[httppatch", "[route(", "#[route")  # c#/symfony
 _ENTRY_NAMES = {"main", "handler", "handle", "lambda_handler", "handle_request", "on_message", "on_request"}
 
 

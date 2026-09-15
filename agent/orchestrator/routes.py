@@ -152,10 +152,164 @@ def _flask_routes(target):
     return routes
 
 
+# ---- Rust: Rocket / Actix attribute macros -- #[get("/path")] fn name(...) --------------------
+_RUST_ATTR = re.compile(r'#\[\s*(get|post|put|delete|patch|head|options)\s*\(\s*"([^"]*)"')
+
+
+def _rust_routes(target):
+    routes = []
+    for f in _iter(target, {".rs"}):
+        try:
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for i, line in enumerate(lines):
+            m = _RUST_ATTR.search(line)
+            if not m:
+                continue
+            method, path = m.group(1).upper(), "/" + m.group(2).lstrip("/").split("?")[0]
+            func = ""
+            for j in range(i + 1, min(i + 6, len(lines))):     # `pub async fn name(` on a following line
+                fm = re.search(r"\bfn\s+([A-Za-z_]\w*)\s*[(<]", lines[j])
+                if fm:
+                    func = fm.group(1)
+                    break
+            routes.append(Route(method, path, str(f), func))
+    return routes
+
+
+# ---- Java: Spring @GetMapping("/sub") + class @RequestMapping("/base") -------------------------
+_SPRING_M = re.compile(r'@(Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*|path\s*=\s*)?["\']([^"\']*)["\']')
+_SPRING_R = re.compile(r'@RequestMapping\s*\(\s*(?:value\s*=\s*|path\s*=\s*)?["\']([^"\']*)["\']')
+
+
+def _spring_routes(target):
+    routes = []
+    for f in _iter(target, {".java"}):
+        try:
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        rm = _SPRING_R.search("\n".join(lines[:60]))           # class-level base (first @RequestMapping)
+        base = ("/" + rm.group(1).strip("/")) if rm and rm.group(1) else ""
+        for i, line in enumerate(lines):
+            m = _SPRING_M.search(line)
+            if not m:
+                continue
+            sub = m.group(2).strip("/")
+            path = "/" + "/".join(x for x in [base.strip("/"), sub] if x)
+            func = ""
+            for j in range(i + 1, min(i + 5, len(lines))):     # `public X name(` method decl
+                fm = re.search(r"\b(?:public|private|protected)\s+[\w<>,\[\]\s.]+?\s+([A-Za-z_]\w*)\s*\(", lines[j])
+                if fm:
+                    func = fm.group(1)
+                    break
+            routes.append(Route(m.group(1).upper(), path, str(f), func))
+    return routes
+
+
+# ---- C#: ASP.NET [HttpGet("x")]/[Route("base")] + minimal-api app.MapGet("/x", handler) --------
+_CS_HTTP = re.compile(r'\[\s*Http(Get|Post|Put|Delete|Patch)\s*(?:\(\s*"([^"]*)")?')
+_CS_ROUTE = re.compile(r'\[\s*Route\s*\(\s*"([^"]*)"')
+_CS_MINIMAL = re.compile(r'\.Map(Get|Post|Put|Delete)\s*\(\s*"([^"]*)"')
+
+
+def _csharp_routes(target):
+    routes = []
+    for f in _iter(target, {".cs"}):
+        try:
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        base_m = _CS_ROUTE.search("\n".join(lines[:80]))
+        base = ("/" + base_m.group(1).strip("/").replace("[controller]", "")) if base_m else ""
+        for i, line in enumerate(lines):
+            mm = _CS_MINIMAL.search(line)                      # minimal API
+            if mm:
+                routes.append(Route(mm.group(1).upper(), "/" + mm.group(2).lstrip("/"), str(f), ""))
+                continue
+            m = _CS_HTTP.search(line)
+            if not m:
+                continue
+            sub = (m.group(2) or "").strip("/")
+            path = "/" + "/".join(x for x in [base.strip("/"), sub] if x)
+            func = ""
+            for j in range(i + 1, min(i + 5, len(lines))):
+                fm = re.search(r"\b(?:public|private|protected|internal)\s+[\w<>,\[\]\s.]+?\s+([A-Za-z_]\w*)\s*\(",
+                               lines[j])
+                if fm:
+                    func = fm.group(1)
+                    break
+            routes.append(Route(m.group(1).upper(), path, str(f), func))
+    return routes
+
+
+# ---- Go: gin/echo r.GET("/x", h) / chi r.Get(...) / net-http mux.HandleFunc("/x", h) -----------
+_GO = re.compile(r"\b\w+\.(GET|POST|PUT|DELETE|PATCH|Get|Post|Put|Delete|Patch|Handle|HandleFunc)\s*"
+                 r'\(\s*[`"]([^`"]+)[`"]\s*,\s*(.+?)\)\s*$')
+
+
+def _go_routes(target):
+    routes = []
+    for f in _iter(target, {".go"}):
+        try:
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = _GO.search(line.strip())
+            if not m:
+                continue
+            verb = m.group(1).upper()
+            if verb in ("HANDLE", "HANDLEFUNC"):
+                verb = "ANY"
+            h = re.findall(r"([A-Za-z_]\w*)\s*\)?\s*$", m.group(3))
+            routes.append(Route(verb, m.group(2), str(f), h[-1] if h else ""))
+    return routes
+
+
+# ---- Ruby (Rails routes.rb) + PHP (Laravel Route::get) -----------------------------------------
+_RAILS = re.compile(r"""^\s*(get|post|put|patch|delete)\s+['"]([^'"]+)['"].*?(?:to:\s*['"]([^'"#]+)#(\w+))?""")
+_LARAVEL = re.compile(r"""Route::(get|post|put|patch|delete|any)\s*\(\s*['"]([^'"]+)['"]\s*,\s*"""
+                      r"""(?:\[\s*[\w\\]+::class\s*,\s*['"](\w+)['"]|['"][\w\\]+@(\w+))""")
+
+
+def _rails_routes(target):
+    routes = []
+    for f in _iter(target, {".rb"}):
+        if "routes" not in f.name.lower():                     # only the routes DSL file (avoid controller FPs)
+            continue
+        try:
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = _RAILS.match(line)
+            if m:
+                routes.append(Route(m.group(1).upper(), "/" + m.group(2).lstrip("/"), str(f), m.group(4) or ""))
+    return routes
+
+
+def _laravel_routes(target):
+    routes = []
+    for f in _iter(target, {".php"}):
+        try:
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = _LARAVEL.search(line)
+            if m:
+                routes.append(Route(m.group(1).upper(), "/" + m.group(2).lstrip("/"), str(f),
+                                    m.group(3) or m.group(4) or ""))
+    return routes
+
+
 def extract_routes(target, profile=None):
     """All routes across supported frameworks (deduped)."""
     routes = []
-    for fn in (_openapi_routes, _express_routes, _nest_routes, _flask_routes):
+    for fn in (_openapi_routes, _express_routes, _nest_routes, _flask_routes,
+               _rust_routes, _spring_routes, _csharp_routes, _go_routes, _rails_routes, _laravel_routes):
         try:
             routes += fn(target)
         except Exception:

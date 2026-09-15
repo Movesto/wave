@@ -144,20 +144,29 @@ def cmd_eyes(args):
     out_dir = str(__import__("pathlib").Path(args.out).parent) if args.out else None
     pinned, per_file, budget = res["pinned"], res["per_file"], args.notes_budget
 
-    targets = None                                         # None -> read all pinned (density order)
-    if len(pinned) > budget:                               # large repo: let the model pick what to deep-read
+    pinset = set(pinned)
+    all_src = pinned + [p for p in per_file if p not in pinset]   # pinned-first, then the rest
+    if args.all_files:                                     # completeness: read EVERY source file
+        targets = all_src
+        print(f"\nALL-FILES: reading every source file ({len(targets)}); pinning is priority order only")
+    elif len(pinned) > budget:                             # large repo: let the model pick what to deep-read
         print(f"\nSELECTION: {len(pinned)} pinned files > budget {budget} — model picks the "
               f"{budget} worth deep-reading ...")
         picks = notebook.select_targets(model, args.target, per_file, pinned, budget, index=idx)
-        print(f"\nProposed ({len(picks)} of {len(pinned)} pinned):")
+        targets = [pk["path"] for pk in picks]
+    else:
+        targets = pinned                                   # read every pinned file (budget covers it)
+    if args.interactive:                                   # propose the read set; user prunes/extends
+        from .repomap import _rel
+        picks = [{"file": _rel(args.target, p), "path": p,
+                  "reason": ("pinned" if p in pinset else "unpinned")} for p in targets]
+        print(f"\nProposed read set ({len(picks)} files):")
         for n, pk in enumerate(picks, 1):
-            print(f"  {n:>2} {pk['file']}  — {pk['reason'][:80]}")
-        if args.interactive:
-            picks = _steer(picks, pinned, args.target)
+            print(f"  {n:>2} {pk['file']}  ({pk['reason']})")
+        picks = _steer(picks, all_src, args.target)        # add-pool = ALL files
         targets = [pk["path"] for pk in picks]
 
-    n_read = len(targets) if targets is not None else min(len(pinned), budget)
-    print(f"\nNOTEBOOK: reading {n_read} files (persisted + resumable)")
+    print(f"\nNOTEBOOK: reading {len(targets)} files (persisted + resumable)")
     notes, paths = notebook.read_notes(model, args.target, per_file, pinned, budget=budget,
                                        out_dir=out_dir, targets=targets)
     total = sum(len(n["findings"]) for n in notes)
@@ -255,15 +264,28 @@ def cmd_all(args):
     print(f"[all] map done: {s['files']} files, {s['pinned_files']} pinned, {s['sink_pins']} sink-pins", flush=True)
     idx = notebook.ledger_index(res["cmap"], t, res["per_file"], res["pinned"])
     pinned, per_file = res["pinned"], res["per_file"]
-    targets = None
-    if len(pinned) > args.notes_budget:
+    pinset = set(pinned)
+    all_src = pinned + [p for p in per_file if p not in pinset]   # pinned-first, then the rest
+    if args.all_files:                                       # completeness: read EVERY source file
+        targets = all_src
+        print(f"[all] ALL-FILES: reading every source file ({len(targets)}); pinning is priority order only",
+              flush=True)
+    elif len(pinned) > args.notes_budget:
         print(f"[all] {len(pinned)} pinned > budget {args.notes_budget} -- MODEL is selecting which files to "
               f"deep-read (one model call) ...", flush=True)
         picks = notebook.select_targets(model, t, per_file, pinned, args.notes_budget, index=idx)
-        if args.interactive:
-            picks = _steer(picks, pinned, t)
         targets = [pk["path"] for pk in picks]
         print(f"[all] selected {len(targets)} of {len(pinned)} pinned files to deep-read", flush=True)
+    else:
+        targets = pinned                                     # read every pinned file (budget covers it)
+    if args.interactive:                                     # propose the read set; user prunes/extends
+        from .repomap import _rel
+        picks = [{"file": _rel(t, p), "path": p,
+                  "reason": ("pinned" if p in pinset else "unpinned")} for p in targets]
+        for n, pk in enumerate(picks, 1):
+            print(f"  {n:>2} {pk['file']}  ({pk['reason']})")
+        picks = _steer(picks, all_src, t)                    # add-pool = ALL files
+        targets = [pk["path"] for pk in picks]
     print(f"[all] notebook: the model now READS each selected file into notes (one model call each -- "
           f"watch [notebook] i/N below) ...", flush=True)
     notes, npaths = notebook.read_notes(model, t, per_file, pinned, budget=args.notes_budget, targets=targets)
@@ -427,6 +449,9 @@ def main():
                    help="how many files the notebook reads (default 40); at or below this, ALL pinned files "
                         "are read (full coverage); only when pinned EXCEEDS this does the model SELECT the N "
                         "worth deep-reading")
+    e.add_argument("--all-files", action="store_true",
+                   help="deep-read EVERY parsed source file, not just pinned ones (full coverage; pinning "
+                        "becomes priority order). Best for small/medium repos; costs scale with repo size")
     e.add_argument("--interactive", action="store_true",
                    help="when the model selects targets on a large repo, pause to let you steer the list "
                         "(drop/add) before deep-reading; without it, auto-proceeds")
@@ -476,7 +501,9 @@ def main():
     al.add_argument("--write", action="store_true", help="keep patches that pass both gates (with --patch)")
     al.add_argument("--no-reach-gate", action="store_true", help="disable the reachability gate in prove")
     al.add_argument("--online", action="store_true", help="give the model opt-in web_search/web_read (egress)")
-    al.add_argument("--interactive", action="store_true", help="steer the notebook's target selection")
+    al.add_argument("--all-files", action="store_true",
+                    help="deep-read EVERY parsed source file, not just pinned (full coverage)")
+    al.add_argument("--interactive", action="store_true", help="propose the read set; prune/extend it before reading")
     al.set_defaults(func=cmd_all)
 
     rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")

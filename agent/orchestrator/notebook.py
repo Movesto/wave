@@ -179,8 +179,12 @@ def _windows_for(src, focus_lines, window=_WINDOW, max_windows=_MAX_WINDOWS):
     actually in view. Falls back to the head when there are no pins. Each window is one generate call."""
     lines = src.splitlines()
     n = len(lines)
-    starts = sorted({((fl - 1) // window) * window for fl in focus_lines if 1 <= fl <= n})
-    starts = (starts or [0])[:max_windows]
+    if focus_lines:                                          # pinned: windows COVER the pin lines
+        starts = sorted({((fl - 1) // window) * window for fl in focus_lines if 1 <= fl <= n})
+        starts = (starts or [0])[:max_windows]
+    else:                                                    # no pins (all-files read): cover head-to-tail, capped
+        nwin = max(1, (n + window - 1) // window)
+        starts = [i * window for i in range(min(nwin, max_windows))]
     out = []
     for s in starts:
         chunk = lines[s:s + window]

@@ -1060,3 +1060,16 @@ def test_vendored_file_excluded_from_map(tmp_path):
     cm = codemap.build(str(tmp_path))
     files = "\n".join(cm.files.keys())
     assert "app.js" in files and "bootstrap.bundle.js" not in files and "jquery.min.js" not in files
+
+
+# ============================ 24. all-files coverage: unpinned files read head-to-tail ============================
+
+def test_windows_cover_unpinned_file_head_to_tail():
+    src = "\n".join(f"line {i}" for i in range(1, 400))     # 399-line file, NO pins
+    wins = nb._windows_for(src, focus_lines=[])
+    assert len(wins) >= 3 and [w[0] for w in wins] == [1, 151, 301]   # sequential head-to-tail, not head-only
+
+def test_windows_still_cover_pins_when_present():
+    src = "\n".join(f"line {i}" for i in range(1, 400))
+    wins = nb._windows_for(src, focus_lines=[307])           # a pin deep in the file
+    assert any(w[0] <= 307 <= w[0] + 149 for w in wins)      # a window actually covers the pinned line

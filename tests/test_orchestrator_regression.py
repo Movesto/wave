@@ -1105,3 +1105,40 @@ def test_taint_unsupported_lang_is_unknown(tmp_path):
     f = _write_taint_js(tmp_path, "e.go", "func h(id string) { db.Query(id) }\n")
     c = Candidate(file=f, unit="h", line=1, cwe="CWE-89", family="t", detector="d", sink="db.Query", provable=False, rank=1)
     assert taint.analyze(c)[0] == "unknown"
+
+
+# ============================ 26. no-sink IDOR/authz recall pin ============================
+
+def _authz_pins_for(tmp_path, body):
+    _write(tmp_path, "h.py", body)
+    cm = codemap.build(str(tmp_path))
+    finfo = next(iter(cm.files.values()))
+    _r, sinks, _d = repomap.scan_pins(finfo)
+    return [(ln, code) for ln, lbl, code in sinks if lbl == "authz"]
+
+def test_authz_pin_fires_on_idor_handler(tmp_path):
+    pins = _authz_pins_for(tmp_path, "from x import *\n"
+        "@router.get('/orders/{order_id}')\n"
+        "def get_order(order_id: int):\n"
+        "    return db.query(Order).get(order_id)\n")
+    assert len(pins) == 1 and "get_order" in pins[0][1]
+
+def test_authz_pin_skips_ownership_checked(tmp_path):
+    pins = _authz_pins_for(tmp_path, "from x import *\n"
+        "@router.get('/orders/{order_id}')\n"
+        "def get_order(order_id: int, user=Depends(current_user)):\n"
+        "    o = db.query(Order).get(order_id)\n"
+        "    if o.owner_id != user.id: raise HTTPException(403)\n"
+        "    return o\n")
+    assert pins == []
+
+def test_authz_pin_skips_internal_helper(tmp_path):
+    # not a route/untrusted-entry -> not flagged (internal getter, called by trusted code)
+    pins = _authz_pins_for(tmp_path, "def _load(order_id):\n    return db.query(Order).get(order_id)\n")
+    assert pins == []
+
+def test_authz_pin_skips_route_without_id_param(tmp_path):
+    pins = _authz_pins_for(tmp_path, "from x import *\n"
+        "@router.get('/health')\n"
+        "def health():\n    return db.query(Status).first()\n")
+    assert pins == []

@@ -366,6 +366,38 @@ def _is_import(line):
     return bool(_IMPORT_LINE.match(line))
 
 
+# --- no-sink BROKEN OBJECT AUTHORIZATION (IDOR) ------------------------------------------------------
+# IDOR has no injection sink -- it's a MISSING ownership check on a resource fetched by an attacker-supplied
+# id. Deterministic recall for the class the sink tables structurally cannot see.
+_ID_PARAM = re.compile(r"\b(id|pk|uuid|guid|slug|\w+_id|\w+Id)\b", re.I)          # an id-like parameter name
+_STORE_ACCESS = re.compile(r"\.(get|find|findOne|findById|query|fetch|select|first|filter|find_by|"
+                           r"get_object_or_404|load|retrieve|read)\s*\(|\bSELECT\b", re.I)  # fetches a resource
+_OWNERSHIP = re.compile(r"current_user|request\.user|req\.user|\.user_id|\bowner|is_admin|isadmin|authorize|"
+                        r"permission|\bcan_|login_required|ensure_owner|check_owner|belongs_to|\.scope|"
+                        r"@roles|hasrole|require_role|AdminToken|AdminUser|CurrentUser", re.I)
+
+
+def _authz_pins(finfo, src_lines):
+    """No-sink IDOR / broken-object-authorization LEADS: a route HANDLER that fetches a resource by an
+    id-like param but shows no ownership/role check. A recall signal (the detector/model decide), scoped to
+    real untrusted entries so internal getters aren't all flagged."""
+    out = []
+    funcs = list(finfo.functions)
+    for c in finfo.classes:
+        funcs.extend(c.methods)
+    for f in funcs:
+        if not reachability.is_untrusted_entry(f):                   # only real endpoints, not helper getters
+            continue
+        if not _ID_PARAM.search(f.sig or ""):                        # takes an id-like parameter
+            continue
+        body = "\n".join(src_lines[max(0, f.line - 1):f.end or f.line])
+        if not _STORE_ACCESS.search(body) or _OWNERSHIP.search(body):  # fetches a resource AND no ownership check
+            continue
+        code = src_lines[f.line - 1].strip()[:160] if 0 < f.line <= len(src_lines) else f.name
+        out.append((f.line, "authz", code))
+    return out
+
+
 def scan_pins(finfo):
     """Scan one file's lines for routes, 9-class sinks, and dynamic blind spots. Returns three lists of
     (line, label, code). Sink pins are hints, not verdicts."""
@@ -397,6 +429,8 @@ def scan_pins(finfo):
                 if rx.search(s):
                     dyn.append((i, kind, code))
                     break
+    if not is_client:                                      # server-side only -- no authz surface in the browser
+        sinks.extend(_authz_pins(finfo, src_lines))        # no-sink IDOR leads (deterministic recall)
     return routes, sinks, dyn
 
 

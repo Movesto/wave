@@ -1142,3 +1142,26 @@ def test_authz_pin_skips_route_without_id_param(tmp_path):
         "@router.get('/health')\n"
         "def health():\n    return db.query(Status).first()\n")
     assert pins == []
+
+
+# ============================ 27. mid-loop read-thrash nudge ============================
+
+def test_recon_streak_triggers_midloop_nudge(monkeypatch):
+    monkeypatch.setattr(inv, "execute", lambda *a, **k: execmod.ExecResult(a[0] if a else "", "src", "", 0, 0.1))
+    seen = {"nudged": False}
+    class _M:
+        supports_tools = True
+        def __init__(s): s.i = 0; s.n = 0
+        def chat(s, messages, tools=None, temperature=0):
+            s.n += 1
+            # detect the mid-loop nudge appearing in the last tool message
+            for m in messages:
+                if m.get("role") == "tool" and "STOP reading" in (m.get("content") or ""):
+                    seen["nudged"] = True
+            # emit read-only commands until nudged, then conclude
+            if seen["nudged"]:
+                return _tc("conclude", verdict="refuted", why="ran it and it is safe after inspection done here")
+            return _tc("run_command", command=f"sed -n {s.n},40p /work/x.py")
+        pass
+    v = inv.investigate(_M(), "brief", deps=False, max_steps=8)
+    assert seen["nudged"]              # after 3 read-only commands, the mid-loop nudge fired

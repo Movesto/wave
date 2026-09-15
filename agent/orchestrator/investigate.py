@@ -350,6 +350,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
     seen_cmds = set()                                       # to nudge a model re-running the same command
     believed_nudged = False                                 # one-time: a belief must cite evidence
     repro_attempted = repro_forced = False                  # a 'believed' with NO repro attempt is pushed back once
+    recon_streak, recon_nudged = 0, False                   # consecutive read-only cmds -> one mid-loop nudge
     for step in range(max_steps):
         try:
             msg = model.chat(messages, tools=tools, temperature=0.2)
@@ -423,6 +424,9 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
             ran += 1
             if _is_repro_attempt(cmd):                       # built/ran code, not just read it
                 repro_attempted = True
+                recon_streak = 0
+            else:
+                recon_streak += 1                            # consecutive read-only (cat/sed/grep) commands
             run_log = _combined(res)                         # full output stays here, not in the prompt
             prov = _provision_signal(run_log)
             saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(run_log)
@@ -439,6 +443,11 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 digest += ("\nNOTE: you ALREADY ran this exact command -- do NOT repeat it. Stop reading; "
                            "TEST the vulnerability with a payload or CONCLUDE now.")
             seen_cmds.add(cmd)
+            if recon_streak >= 3 and not repro_attempted and not recon_nudged and step < max_steps - 2:
+                recon_nudged = True                          # read-thrash: burning the budget on reads, not tests
+                digest += (f"\nNOTE: you have run {recon_streak} read-only commands and TESTED nothing. Reading "
+                           "is not proof and the code is already in the task. STOP reading -- build the repro "
+                           "from the recipe and RUN it with a crafted input NOW, then conclude.")
             if max_steps - step <= 2:                        # budget almost gone -> push to finish
                 digest += (f"\nNOTE: only {max_steps - step} step(s) left. Run your ONE decisive test now, "
                            "or call conclude.")

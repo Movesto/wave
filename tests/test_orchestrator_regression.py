@@ -1184,3 +1184,12 @@ def test_auth_detection_covers_more_stacks():
     assert nb._auth_from('@Secured("ROLE_USER")') == "session"
     assert nb._auth_from("before_action :require_login") == "session"
     assert nb._auth_from("def public_health():") == "none"
+
+
+# ============================ 29. detection-recall benchmark (the measuring stick) ============================
+
+def test_detect_recall_benchmark_holds():
+    from agent.bench import detect_recall
+    r = detect_recall.run()
+    assert r["recall"] >= 0.95, f"detection recall regressed: {r['recall']:.0%} ({r['fn']} misses)"
+    assert r["fp"] == 0, f"deterministic precision regressed: {r['fp']} guarded-clean cases leaked a pin"

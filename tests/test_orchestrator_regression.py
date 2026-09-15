@@ -1102,8 +1102,8 @@ def test_taint_js_crossfn_is_unknown(tmp_path):
     assert taint.analyze(c)[0] == "unknown"
 
 def test_taint_unsupported_lang_is_unknown(tmp_path):
-    f = _write_taint_js(tmp_path, "e.go", "func h(id string) { db.Query(id) }\n")
-    c = Candidate(file=f, unit="h", line=1, cwe="CWE-89", family="t", detector="d", sink="db.Query", provable=False, rank=1)
+    f = _write_taint_js(tmp_path, "e.kt", "fun h(id: String) { db.query(id) }\n")  # kotlin: not a taint lang
+    c = Candidate(file=f, unit="h", line=1, cwe="CWE-89", family="t", detector="d", sink="db.query", provable=False, rank=1)
     assert taint.analyze(c)[0] == "unknown"
 
 
@@ -1193,3 +1193,24 @@ def test_detect_recall_benchmark_holds():
     r = detect_recall.run()
     assert r["recall"] >= 0.95, f"detection recall regressed: {r['recall']:.0%} ({r['fn']} misses)"
     assert r["fp"] == 0, f"deterministic precision regressed: {r['fp']} guarded-clean cases leaked a pin"
+
+
+# ============================ 30. value taint across Go/Java/C#/Ruby/PHP/Rust ============================
+
+def _taint_of(tmp_path, name, body, line, sink="sink"):
+    f = _write(tmp_path, name, body)
+    c = Candidate(file=str(f), unit="h", line=line, cwe="CWE-89", family="t", detector="d", sink=sink, provable=False, rank=1)
+    return taint.analyze(c)[0]
+
+def test_taint_flows_go_java_cs_ruby_php_rust(tmp_path):
+    assert _taint_of(tmp_path, "z.go", 'func h(id string){\n q:="x"+id\n db.Query(q)\n}\n', 3) == "flows"
+    assert _taint_of(tmp_path, "Z.java", 'class C{void h(String id){\n String q="x"+id;\n db.query(q);\n}}\n', 3) == "flows"
+    assert _taint_of(tmp_path, "Z.cs", 'class C{void H(string id){\n var q="x"+id;\n Db.Query(q);\n}}\n', 3) == "flows"
+    assert _taint_of(tmp_path, "z.rb", 'def h(id)\n q="x"+id\n db.query(q)\nend\n', 3) == "flows"
+    assert _taint_of(tmp_path, "z.php", '<?php function h($id){\n $q="x".$id;\n db_query($q);\n}\n', 3) == "flows"
+    assert _taint_of(tmp_path, "z.rs", 'fn h(id:&str){\n let q=format!("{}",id);\n db_query(&q);\n}\n', 3) == "flows"
+
+def test_taint_const_and_sanitized_other_langs(tmp_path):
+    # a constant (no param) -> unrelated; a wrapped value -> sanitized -- the precision signals, cross-lang
+    assert _taint_of(tmp_path, "c.go", 'func h(){\n q:="SELECT 1"\n db.Query(q)\n}\n', 3) == "unrelated"
+    assert _taint_of(tmp_path, "S.java", 'class C{void h(String id){\n int q=Integer.parseInt(id);\n db.query(q);\n}}\n', 3) == "sanitized"

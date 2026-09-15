@@ -59,18 +59,63 @@ _LANGS = {
 }
 _LANGS["typescript"] = {**_LANGS["javascript"], "parser": "typescript"}
 _LANGS["tsx"] = {**_LANGS["javascript"], "parser": "tsx"}
+_LANGS["go"] = {
+    "parser": "go", "func": ("function_declaration", "method_declaration"),
+    "params_field": ("parameters",), "param_wrap": ("parameter_declaration", "variadic_parameter_declaration"),
+    "assign": ("assignment_statement",), "aug": (), "decl": ("short_var_declaration",),
+    "call": ("call_expression",), "call_fn": "function", "call_args": "arguments",
+}
+_LANGS["java"] = {
+    "parser": "java", "func": ("method_declaration", "constructor_declaration"),
+    "params_field": ("parameters",), "param_wrap": ("formal_parameter", "spread_parameter"),
+    "assign": ("assignment_expression",), "aug": (), "decl": ("variable_declarator",),
+    "call": ("method_invocation",), "call_fn": "name", "call_args": "arguments",
+}
+_LANGS["csharp"] = {
+    "parser": "csharp", "func": ("method_declaration", "constructor_declaration", "local_function_statement"),
+    "params_field": ("parameters",), "param_wrap": ("parameter",),
+    "assign": ("assignment_expression",), "aug": (), "decl": ("variable_declarator",),
+    "call": ("invocation_expression",), "call_fn": "function", "call_args": "arguments",
+}
+_LANGS["ruby"] = {
+    "parser": "ruby", "func": ("method", "singleton_method"),
+    "params_field": ("parameters", "method_parameters"), "param_wrap": ("optional_parameter", "keyword_parameter",
+                                                                        "splat_parameter"),
+    "assign": ("assignment",), "aug": ("operator_assignment",), "decl": (),
+    "call": ("call", "method_call"), "call_fn": "method", "call_args": "arguments",
+}
+_LANGS["php"] = {
+    "parser": "php", "func": ("function_definition", "method_declaration"),
+    "params_field": ("parameters", "formal_parameters"), "param_wrap": ("simple_parameter",
+                                                                        "property_promotion_parameter"),
+    "assign": ("assignment_expression",), "aug": ("augmented_assignment_expression",), "decl": (),
+    "call": ("function_call_expression", "member_call_expression", "scoped_call_expression"),
+    "call_fn": "function", "call_args": "arguments",
+}
+_LANGS["rust"] = {
+    "parser": "rust", "func": ("function_item",),
+    "params_field": ("parameters",), "param_wrap": ("parameter",),
+    "assign": ("assignment_expression",), "aug": ("compound_assignment_expr",), "decl": ("let_declaration",),
+    "call": ("call_expression", "macro_invocation"), "call_fn": "function", "call_args": "arguments",
+}
+
+# containers whose descendant identifiers are parameter names (over-including a type name is recall-safe)
+_PARAM_CONTAINERS = {"parameters", "formal_parameters", "parameter_list", "method_parameters",
+                     "function_value_parameters"}
+_ID_TYPES = ("identifier", "property_identifier", "shorthand_property_identifier",
+             "shorthand_property_identifier_pattern", "variable_name")
+
+
+_EXT = {".py": "python", ".ts": "typescript", ".tsx": "tsx", ".js": "javascript", ".mjs": "javascript",
+        ".cjs": "javascript", ".jsx": "javascript", ".go": "go", ".java": "java", ".cs": "csharp",
+        ".rb": "ruby", ".php": "php", ".rs": "rust"}
 
 
 def _lang(path):
     p = (path or "").lower()
-    if p.endswith(".py"):
-        return "python"
-    if p.endswith((".ts",)):
-        return "typescript"
-    if p.endswith((".tsx",)):
-        return "tsx"
-    if p.endswith((".js", ".mjs", ".cjs", ".jsx")):
-        return "javascript"
+    for ext, lang in _EXT.items():
+        if p.endswith(ext):
+            return lang
     return ""
 
 
@@ -85,8 +130,7 @@ def _txt(node, src):
 
 
 def _idents(node, src):
-    return {_txt(n, src) for n in _walk(node) if n.type in ("identifier", "property_identifier",
-                                                            "shorthand_property_identifier")}
+    return {_txt(n, src) for n in _walk(node) if n.type in _ID_TYPES}
 
 
 def _under_sanitizer(id_node, root, src, cfg):
@@ -110,7 +154,7 @@ def _taint_in_expr(node, src, tainted, cfg):
     ids only under sanitizers), or 'none'."""
     raw = clean = False
     for n in _walk(node):
-        if n.type == "identifier" and _txt(n, src) in tainted:
+        if n.type in _ID_TYPES and _txt(n, src) in tainted:
             if _under_sanitizer(n, node, src, cfg):
                 clean = True
             else:
@@ -131,29 +175,27 @@ def _enclosing_func(root, line, cfg):
 
 
 def _param_names(fn, src, cfg):
+    """Every identifier in the parameter list is treated as an untrusted source. Over-including a type name
+    (e.g. Java `String id` -> {String, id}) is RECALL-SAFE: it can only add taint, never gate a real flow."""
     out = set()
     p = None
-    for fld in cfg["params_field"]:
+    for fld in cfg["params_field"]:                          # the params as a named field
         p = fn.child_by_field_name(fld)
         if p is not None:
             break
+    if p is None:                                            # else a direct child of a param-container type
+        for c in fn.children:
+            if c.type in _PARAM_CONTAINERS:
+                p = c
+                break
     if p is None:                                            # arrow fn with a single bare param: x => ...
         for c in fn.children:
             if c.type == "identifier":
                 out.add(_txt(c, src))
         return out - {"self", "cls"}
-    for c in p.children:
-        if c.type == "identifier":
-            out.add(_txt(c, src))
-        elif c.type in cfg["param_wrap"]:
-            for cc in _walk(c):
-                if cc.type == "identifier":
-                    out.add(_txt(cc, src))
-                    break
-        elif c.type in ("object_pattern", "array_pattern"):  # JS destructured params: ({id}) / ([a,b])
-            for cc in _walk(c):
-                if cc.type in ("identifier", "shorthand_property_identifier_pattern"):
-                    out.add(_txt(cc, src))
+    for n in _walk(p):
+        if n.type in _ID_TYPES:
+            out.add(_txt(n, src))
     out.discard("self")
     out.discard("cls")
     return out
@@ -178,8 +220,15 @@ def _classify_right(right, src, tainted, clean, cfg):
 def _assign_sides(n, cfg):
     """(left, right) for an assignment/declaration, across python (left/right) and js (left/right or
     name/value for a variable_declarator)."""
-    left = n.child_by_field_name("left") or n.child_by_field_name("name")
+    left = (n.child_by_field_name("left") or n.child_by_field_name("name")
+            or n.child_by_field_name("pattern"))            # rust `let x = ...` uses pattern/value
     right = n.child_by_field_name("right") or n.child_by_field_name("value")
+    if left is not None and right is not None:
+        return left, right
+    kids = list(n.children)                                  # fallback: positional around '=' (c#/php: no fields)
+    for i, c in enumerate(kids):
+        if c.type == "=" and i + 1 < len(kids):
+            return (left or (kids[i - 1] if i > 0 else None)), kids[i + 1]
     return left, right
 
 

@@ -1004,3 +1004,18 @@ def test_believed_accepted_after_a_real_repro(monkeypatch):
                        _tc("conclude", verdict="believed", why="ran the repro but the outbound effect was not observable in this sandbox; plausible from the code path")])
     v = inv.investigate(m, "test brief", deps=False, max_steps=6)
     assert v.verdict == "believed" and m.n == 2        # repro attempted -> not pushed back
+
+
+# ============================ 21. notebook recall determinism ============================
+
+from agent.orchestrator import notebook as nb
+
+def test_notebook_reads_are_deterministic_temp0():
+    import inspect
+    src = inspect.getsource(nb.read_note) + inspect.getsource(nb.select_targets)
+    assert "temperature=0.2" not in src and src.count("temperature=0.0") >= 2   # both reads pinned to temp 0
+
+def test_notebook_prompt_flags_panic_dos():
+    s = nb._NOTE_SYS.lower()
+    assert "unwrap" in s and "panic" in s and "'other'" in s   # crash/DoS class guidance present
+    assert "authz" in s or "access control" in s               # authz guidance still there

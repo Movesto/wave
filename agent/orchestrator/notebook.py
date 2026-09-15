@@ -36,7 +36,10 @@ _NOTE_SYS = (
     "query, an escaped value, or a constant is NOT a finding. ALSO look for BROKEN ACCESS CONTROL / IDOR "
     "(class 'authz'): a handler that reads or writes a resource by an id/owner from the request but never "
     "checks the resource belongs to the CALLER (no ownership/role check) -- these have NO injection sink, so "
-    "the map won't hint them; you must spot them. Output ONE JSON object, nothing else:\n"
+    "the map won't hint them; you must spot them. ALSO flag a CRASH / DoS (class 'other'): an unchecked "
+    "operation on attacker-controlled input that panics or throws -- a Rust `.unwrap()`/`.expect()` or index "
+    "on a request value, a parse with no error handling, an unchecked cast/slice -- these have no injection "
+    "sink either, so you must spot them. Output ONE JSON object, nothing else:\n"
     '{"purpose": "<what this file/module does, one line>", '
     '"untrusted_inputs": "<request params/body/headers/args an external caller controls, or none>", '
     '"findings": [{"line": <int>, "function": "<name>", "class": "<sqli|nosqli|cmd|eval|path|ssrf|xss|'
@@ -148,7 +151,7 @@ def select_targets(model, root, per_file, pinned, budget, index=None):
     user = f"N = {budget}\n\nATTACK-SURFACE INDEX ({len(pinned)} candidate files):\n{_index_text(idx)}"
     picks = []
     try:
-        txt = model.generate(_SELECT_SYS, user, max_new_tokens=2000, temperature=0.2, think=False,
+        txt = model.generate(_SELECT_SYS, user, max_new_tokens=2000, temperature=0.0, think=False,
                              json_mode=True)
         after = (txt or "").split("</think>")[-1]
         i, j = after.find("["), after.rfind("]")
@@ -228,7 +231,7 @@ def read_note(model, root, path, per_file_entry):
         span = f" (lines {start}-{start + _WINDOW - 1})" if len(wins) > 1 else ""
         user = (f"FILE {rel}{span}\nMAP HINTS (confirm or dismiss against the code):\n{hints}\n\n"
                 f"SOURCE:\n{body}")
-        txt = model.generate(_NOTE_SYS, user, max_new_tokens=_TOKENS, temperature=0.2, think=False,
+        txt = model.generate(_NOTE_SYS, user, max_new_tokens=_TOKENS, temperature=0.0, think=False,
                              json_mode=True)
         d = _parse_note(txt)
         if not d:

@@ -1073,3 +1073,35 @@ def test_windows_still_cover_pins_when_present():
     src = "\n".join(f"line {i}" for i in range(1, 400))
     wins = nb._windows_for(src, focus_lines=[307])           # a pin deep in the file
     assert any(w[0] <= 307 <= w[0] + 149 for w in wins)      # a window actually covers the pinned line
+
+
+# ============================ 25. value taint for JS/TS (was Python-only) ============================
+
+def _write_taint_js(tmp_path, name, body):
+    return str(_write(tmp_path, name, body))
+
+def test_taint_js_flows(tmp_path):
+    f = _write_taint_js(tmp_path, "a.js", "function h(req){\n  const q = req.query.id;\n  db.query(q);\n}\n")
+    c = Candidate(file=f, unit="h", line=3, cwe="CWE-89", family="t", detector="d", sink="db.query", provable=False, rank=1)
+    assert taint.analyze(c)[0] == "flows"
+
+def test_taint_js_sanitized(tmp_path):
+    f = _write_taint_js(tmp_path, "b.js", "function h(req){\n  const q = Number(req.query.id);\n  db.query(q);\n}\n")
+    c = Candidate(file=f, unit="h", line=3, cwe="CWE-89", family="t", detector="d", sink="db.query", provable=False, rank=1)
+    assert taint.analyze(c)[0] == "sanitized"
+
+def test_taint_ts_unrelated(tmp_path):
+    f = _write_taint_js(tmp_path, "c.ts", "function h(req: any){\n  const q = 'SELECT 1';\n  db.query(q);\n}\n")
+    c = Candidate(file=f, unit="h", line=3, cwe="CWE-89", family="t", detector="d", sink="db.query", provable=False, rank=1)
+    assert taint.analyze(c)[0] == "unrelated"
+
+def test_taint_js_crossfn_is_unknown(tmp_path):
+    # value from an unresolved call -> unknown (never `unrelated`), so a real cross-fn flow is never gated away
+    f = _write_taint_js(tmp_path, "d.js", "function h(){\n  const q = loadInput();\n  db.query(q);\n}\n")
+    c = Candidate(file=f, unit="h", line=3, cwe="CWE-89", family="t", detector="d", sink="db.query", provable=False, rank=1)
+    assert taint.analyze(c)[0] == "unknown"
+
+def test_taint_unsupported_lang_is_unknown(tmp_path):
+    f = _write_taint_js(tmp_path, "e.go", "func h(id string) { db.Query(id) }\n")
+    c = Candidate(file=f, unit="h", line=1, cwe="CWE-89", family="t", detector="d", sink="db.Query", provable=False, rank=1)
+    assert taint.analyze(c)[0] == "unknown"

@@ -115,7 +115,7 @@ def _subj(c):
 
 def _prove_one(model, target, c, have_docker, max_steps, online=False):
     """Run ONE candidate through the ladder -> a verdict record dict."""
-    tstatus, tnote = taint.analyze(c)                        # intra-function value taint (Python; else unknown)
+    tstatus, tnote = taint.analyze(c)                        # intra-function value taint (Python + JS/TS; else unknown)
     reason = "not a canary-provable Python handler"
     if c.provable:
         mr = rung1.micro_exec(c, rt=None)                    # cheap in-process canary (no boot, no model)

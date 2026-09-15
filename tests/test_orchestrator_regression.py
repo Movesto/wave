@@ -965,3 +965,42 @@ def test_niche_lang_sinks_pin(tmp_path):
 def test_elixir_and_haskell_crash_markers():
     assert inv._real_exec("** (RuntimeError) something bad")     # elixir
     assert inv._real_exec("*** Exception: Prelude.head: empty list")  # haskell
+
+
+# ============================ 20. force a repro attempt before 'believed' ============================
+
+class _ScriptedTool:
+    """A fake tool-calling model: returns the given tool_calls in order."""
+    supports_tools = True
+    def __init__(self, script): self.script = script; self.i = 0; self.n = 0
+    def chat(self, messages, tools=None, temperature=0):
+        self.n += 1
+        msg = self.script[min(self.i, len(self.script) - 1)]; self.i += 1
+        return msg
+
+def _tc(name, **args):
+    return {"tool_calls": [{"id": "1", "function": {"name": name, "arguments": args}}], "content": ""}
+
+def test_is_repro_attempt():
+    assert not inv._is_repro_attempt("sed -n 1,40p /work/a.rs")
+    assert not inv._is_repro_attempt("grep -n host x; cat y")
+    assert inv._is_repro_attempt("cd /tmp && cargo run")
+    assert inv._is_repro_attempt('python3 -c "import app"')
+    assert inv._is_repro_attempt("ls -l /tmp/wave_HIT")
+
+def test_believed_pushed_back_when_no_repro(monkeypatch):
+    monkeypatch.setattr(inv, "execute", lambda *a, **k: execmod.ExecResult(a[0] if a else "", "src lines", "", 0, 0.1))
+    # read (recon) -> conclude believed (should be REJECTED) -> conclude believed (accepted)
+    m = _ScriptedTool([_tc("run_command", command="sed -n 1,40p /work/duo.rs"),
+                       _tc("conclude", verdict="believed", why="the handler interpolates user input into the outbound URL and reaches the request sink without any validation"),
+                       _tc("conclude", verdict="believed", why="the handler interpolates user input into the outbound URL and reaches the request sink without any validation")])
+    v = inv.investigate(m, "test brief", deps=False, max_steps=6)
+    assert v.verdict == "believed" and m.n == 3        # the first 'believed' was pushed back -> 3 model calls
+
+def test_believed_accepted_after_a_real_repro(monkeypatch):
+    monkeypatch.setattr(inv, "execute", lambda *a, **k: execmod.ExecResult(a[0] if a else "", "ran, nothing", "", 0, 0.1))
+    # actually RUN something -> conclude believed (accepted immediately, no push-back)
+    m = _ScriptedTool([_tc("run_command", command="cd /tmp && cargo run"),
+                       _tc("conclude", verdict="believed", why="ran the repro but the outbound effect was not observable in this sandbox; plausible from the code path")])
+    v = inv.investigate(m, "test brief", deps=False, max_steps=6)
+    assert v.verdict == "believed" and m.n == 2        # repro attempted -> not pushed back

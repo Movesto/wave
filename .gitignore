@@ -56,3 +56,6 @@ eval/newsome.txt
 .env
 .env.local
 *.key
+
+# archived pre-pivot legacy (moved out of root; recoverable in git history)
+_legacy/

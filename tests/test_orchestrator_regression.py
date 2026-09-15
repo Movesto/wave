@@ -744,3 +744,130 @@ def test_install_packages_rejects_all_bad_names(monkeypatch):
     monkeypatch.setattr(execmod.subprocess, "run", lambda *a, **k: called.__setitem__("ran", True))
     res = execmod.install_packages(["--evil", "a;b"], deps="/d")
     assert res.exit_code == 1 and not called["ran"]                      # never shells out on bad input
+
+
+# ============================ 14. web_read tiered chain (Jina primary) ============================
+
+def test_web_read_prefers_jina(monkeypatch):
+    monkeypatch.setattr(search, "_read_jina", lambda u, t: "JINA")
+    monkeypatch.setattr(search, "_read_crawl4ai", lambda u, t: "CRAWL")
+    monkeypatch.setattr(search, "_read_fallback", lambda u, t: "STRIP")
+    assert search.web_read("https://x.dev/api") == "JINA"
+
+
+def test_web_read_falls_through_to_crawl_then_strip(monkeypatch):
+    monkeypatch.setattr(search, "_read_jina", lambda u, t: "")
+    monkeypatch.setattr(search, "_read_crawl4ai", lambda u, t: "CRAWL")
+    monkeypatch.setattr(search, "_read_fallback", lambda u, t: "STRIP")
+    assert search.web_read("https://x.dev/api") == "CRAWL"
+    monkeypatch.setattr(search, "_read_crawl4ai", lambda u, t: "")
+    assert search.web_read("https://x.dev/api") == "STRIP"
+
+
+def test_web_read_all_fail_is_empty(monkeypatch):
+    for f in ("_read_jina", "_read_crawl4ai", "_read_fallback"):
+        monkeypatch.setattr(search, f, lambda u, t: "")
+    assert search.web_read("https://x.dev/api") == ""
+
+
+def test_web_read_rejects_non_http():
+    assert search.web_read("file:///etc/passwd") == ""
+    assert search.web_read("") == ""
+
+
+def test_jina_detects_bot_wall(monkeypatch):
+    class _R:
+        text = "Just a moment... cf-browser-verification"
+        def raise_for_status(self): pass
+    import types
+    fake_requests = types.SimpleNamespace(get=lambda *a, **k: _R())
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    assert search._read_jina("https://blocked.example", 5) == ""   # bot-wall -> miss, not garbage
+
+
+# ============================ 15. multi-framework route models (Rust/Java/C#/Go/Rails/Laravel) ======
+
+from agent.orchestrator import routes as routes_mod
+
+def test_routes_rust_rocket(tmp_path):
+    _write(tmp_path, "api.rs", '#[get("/users/<id>")]\npub async fn get_user(id: i32) {}\n'
+           '#[post("/login", data = "<c>")]\nfn login(c: C) {}\n')
+    rs = routes_mod.extract_routes(str(tmp_path))
+    assert ("GET", "get_user") in {(r.method, r.function) for r in rs}
+    assert ("POST", "login") in {(r.method, r.function) for r in rs}
+
+def test_routes_spring_base_plus_method(tmp_path):
+    _write(tmp_path, "C.java", '@RequestMapping("/api/v1")\npublic class C {\n'
+           '  @GetMapping("/users/{id}")\n  public User getUser(Long id) { return null; }\n}\n')
+    rs = routes_mod.extract_routes(str(tmp_path))
+    hit = [r for r in rs if r.function == "getUser"]
+    assert hit and hit[0].path == "/api/v1/users/{id}" and hit[0].method == "GET"
+
+def test_routes_csharp_attr(tmp_path):
+    _write(tmp_path, "C.cs", '[Route("api/[controller]")]\npublic class UsersController {\n'
+           '  [HttpGet("{id}")]\n  public IActionResult Get(int id) { return Ok(); }\n}\n')
+    rs = routes_mod.extract_routes(str(tmp_path))
+    assert ("GET", "Get") in {(r.method, r.function) for r in rs}
+
+def test_routes_go_gin(tmp_path):
+    _write(tmp_path, "m.go", 'func s(r *gin.Engine){\n r.GET("/users/:id", getUser)\n r.POST("/login", login)\n}\n')
+    rs = routes_mod.extract_routes(str(tmp_path))
+    paths = {(r.method, r.path) for r in rs}
+    assert ("GET", "/users/:id") in paths and ("POST", "/login") in paths
+
+def test_routes_rails_and_laravel(tmp_path):
+    _write(tmp_path, "config/routes.rb", "Rails.application.routes.draw do\n  get '/users/:id', to: 'users#show'\nend\n")
+    _write(tmp_path, "web.php", "Route::get('/items/{id}', [ItemController::class, 'show']);\n")
+    rs = routes_mod.extract_routes(str(tmp_path))
+    paths = {r.path for r in rs}
+    assert "/users/:id" in paths and "/items/{id}" in paths
+    assert "show" in {r.function for r in rs}   # laravel [Ctrl::class,'show'] -> action name
+
+def test_codemap_captures_attribute_macros_as_decorators(tmp_path):
+    _write(tmp_path, "a.rs", '#[get("/x")]\npub fn h() {}\n')
+    _write(tmp_path, "B.java", '@RestController\npublic class B {\n @PostMapping("/y")\n public void p() {}\n}\n')
+    cm = codemap.build(str(tmp_path))
+    h = cm.funcs.get("h", [])
+    assert h and any("#[get" in d for d in h[0].decorators)
+    assert reachability.is_untrusted_entry(h[0])              # rust route -> untrusted entry (the reach fix)
+    p = cm.funcs.get("p", [])
+    assert p and reachability.is_untrusted_entry(p[0])        # spring @PostMapping -> untrusted entry
+
+def test_reachability_hints_cover_new_frameworks():
+    class _F:
+        def __init__(self, decs): self.decorators = decs; self.name = "x"
+    for d in ('#[get("/x")]', '@GetMapping("/x")', '[HttpGet("x")]', '#[Route("/x")]'):
+        assert reachability.is_untrusted_entry(_F([d])), d
+
+def test_repomap_route_pins_new_frameworks():
+    for ln in ('#[post("/x")]', '@DeleteMapping("/x")', '[HttpPut("x")]', 'app.MapGet("/x", H)',
+               'r.POST("/x", h)', "  resources :orders", 'Route::any("/x", [C::class,"m"]);'):
+        assert repomap._ROUTE.search(ln), ln
+
+
+# ============================ 16. Rust proof path (cargo repro) ============================
+
+def _rc(cwe="CWE-248", sink="x.unwrap()"):
+    return Candidate(file="src/util.rs", unit="parse_date(d: &str)", line=10, cwe=cwe, family="panic",
+                     detector="d", sink=sink, provable=False, rank=1)
+
+def test_rust_routes_to_rust_mode():
+    assert briefs._proof_mode(_rc()) == "rust"
+    assert briefs._is_rust("src/a.rs") and not briefs._is_rust("a.py")
+
+def test_rust_uses_rust_toolchain_image():
+    assert briefs._image_for("src/util.rs") == "rust:1-slim"
+
+def test_rust_brief_is_a_cargo_repro():
+    b = briefs._brief_for(_rc(), "/repo", "reachable panic", mode="rust")
+    for token in ("cargo", "src/main.rs", "network 'host'", "panicked", "REFUTED", "blocked"):
+        assert token in b, token
+
+def test_rust_not_routed_to_asan_even_with_memory_cwe():
+    # a .rs file must NOT hit the C-only ASan path even if the CWE overlaps (asan is _is_c-gated)
+    assert briefs._proof_mode(_rc(cwe="CWE-190")) == "rust"
+
+def test_rust_panic_is_a_real_exec_marker():
+    assert inv._real_exec("thread 'main' panicked at src/main.rs:5:9")
+    assert inv._real_exec("attempt to add with overflow")
+    assert not inv._real_exec("just some normal output")

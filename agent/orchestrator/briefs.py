@@ -68,14 +68,20 @@ def _is_c(path):
     return (path or "").lower().endswith(_C_EXTS)
 
 
+def _is_rust(path):
+    return (path or "").lower().endswith(".rs")
+
+
 def _proof_mode(candidate):
-    """Pick the investigate proof shape for a candidate: asan (C/C++ compile+sanitizer) > sanitizer
-    (return-value) > per-class brief (ssti/protopoll/deser) > render (DOM XSS) > call (default). Used by
-    prove and patch so the scaffold, image, and brief stay consistent."""
+    """Pick the investigate proof shape for a candidate: asan (C/C++ compile+sanitizer) > rust (cargo repro)
+    > sanitizer (return-value) > per-class brief (ssti/protopoll/deser) > render (DOM XSS) > call (default).
+    Used by prove and patch so the scaffold, image, and brief stay consistent."""
     cwe = getattr(candidate, "cwe", "") or ""
     if _is_c(getattr(candidate, "file", "")) and (
             cwe in _ASAN_CWE or _ASAN_SINKS.search(getattr(candidate, "sink", "") or "")):
         return "asan"
+    if _is_rust(getattr(candidate, "file", "")):           # Rust: compile a minimal cargo repro + run it
+        return "rust"
     if _is_sanitizer(candidate):
         return "sanitizer"
     if cwe in _MODE_BY_CWE:
@@ -131,6 +137,45 @@ def _asan_brief(candidate, target, rel, code, fn):
         f"actual sanitizer report.")
 
 
+def _rust_brief(candidate, target, rel, code, fn):
+    """Rust proof: a Rust function can't be imported+called like Python -- it must be COMPILED. So stand up a
+    minimal cargo project, copy the vulnerable logic in, `cargo add` any crates it uses (network for the build
+    only), and RUN it with a crafted vs. benign input. The WITNESS is an observed runtime effect: a panic
+    (`.unwrap()`/index/slice on bad input = a real DoS), an `overflow` abort, a marker side-effect for a
+    Command/shell sink, or traversal reaching outside the intended dir -- the Rust analogue of the ASan report."""
+    return (
+        f"File: {rel}. Function: {candidate.unit}. Suspected {candidate.cwe} ({candidate.family}); "
+        f"sink: {candidate.sink}.\n\nCode around the sink:\n{code}\n\n"
+        f"This is RUST -- you cannot import+call it like Python; you must COMPILE a minimal repro and RUN it. "
+        f"The repo is mounted at /work (read it for the exact logic/types). Because EACH command runs in a "
+        f"FRESH container, do the WHOLE repro in ONE command, and use network 'host' on that command so cargo "
+        f"can fetch crates (set image rust:1-slim). Recipe:\n"
+        f"1. `export CARGO_HOME=/wave_deps/cargo` (persists the crate cache across your attempts), then "
+        f"`cd /tmp && cargo new --quiet wave_poc && cd wave_poc`.\n"
+        f"2. Put the vulnerable logic of `{fn}` into src/main.rs -- COPY it verbatim (keep the suspect line "
+        f"identical: the `.unwrap()`, the index, the arithmetic, the Command/format string). Stub only what "
+        f"you must to compile. `cargo add <crate>` for any external crate it uses (e.g. chrono, regex).\n"
+        f"3. Write `fn main()` that calls it TWICE and prints a label before each: a CRAFTED malicious input, "
+        f"then a BENIGN control. Choose the payload by class:\n"
+        f"   - panic / .unwrap() / index / slice (DoS): an input that makes it panic (e.g. a non-parsing "
+        f"string for parse+unwrap, an out-of-range index). WITNESS = `thread '...' panicked at ...` on the "
+        f"crafted input but NOT the benign one.\n"
+        f"   - integer overflow (CWE-190): a value that overflows; a debug build aborts with `attempt to "
+        f"... with overflow` = the witness.\n"
+        f"   - command injection (CWE-78): if it builds a shell string for std::process::Command, inject "
+        f"`; touch /tmp/wave_HIT` and, in the SAME command afterwards, `ls -l /tmp/wave_HIT` -- the file "
+        f"existing is the witness.\n"
+        f"   - path traversal (CWE-22): a `../../` input; witness = it opens/reads a file OUTSIDE the intended "
+        f"dir (print the resolved path / the leaked contents).\n"
+        f"4. `cargo run --quiet` (add `--` and args if your main reads them).\n"
+        f"CONFIRMED only if the crafted input produces the observed effect (cite the exact panic/overflow line, "
+        f"the wave_HIT file, or the leaked path) AND the benign input does not. REFUTED if BOTH run clean "
+        f"(a real guard: the code returns a Result/Option and handles the error, validates, bounds-checks, or "
+        f"uses a parameterized/escaped API). If it needs a whole framework/DB you cannot stand up, or won't "
+        f"compile standalone after trying, conclude 'blocked' (a panic-only finding is a DoS, not RCE -- say "
+        f"so). Do NOT conclude confirmed without an observed runtime effect.")
+
+
 def _differential_brief(candidate, target, rel, code, fn):
     """The DIFFERENTIAL / STATE observer: a no-sink access-control class (IDOR / broken authz) is proven
     BEHAVIOURALLY -- run the handler as user A requesting user B's resource and observe whether the ownership
@@ -168,6 +213,8 @@ def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
     fn = str(candidate.unit).split("(")[0].strip()
     if mode == "asan":                                     # C/C++ compile-with-sanitizer proof (self-contained)
         return _asan_brief(candidate, target, rel, code, fn)
+    if mode == "rust":                                     # Rust: minimal cargo repro + run (panic/overflow/marker)
+        return _rust_brief(candidate, target, rel, code, fn)
     if mode == "differential":                             # IDOR / access-control 2-identity harness
         return _differential_brief(candidate, target, rel, code, fn)
     extra = ""

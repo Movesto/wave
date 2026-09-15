@@ -137,7 +137,9 @@ _PROV_SIGNALS = (
 # sanitizer fired) -- distinguishes "refuted because safe" from "refuted because nothing ever ran".
 _REAL_EXEC_MARKERS = ("WAVE_RESULT", "WAVE_RENDER_CANARY", "WAVE_OUTPUT", "WAVE_CALL_ERROR", "WAVE_LOAD_ERROR",
                       "uid=", "wave_HIT", "WAVE-PWNED",
-                      "AddressSanitizer", "runtime error:", "LeakSanitizer", "SUMMARY: ")  # C/C++ ASan/UBSan
+                      "AddressSanitizer", "runtime error:", "LeakSanitizer", "SUMMARY: ",  # C/C++ ASan/UBSan
+                      "panicked at", "with overflow", "index out of bounds",              # rust runtime panics
+                      "called `Result::unwrap()`", "called `Option::unwrap()`")
 
 
 def _provision_signal(text):

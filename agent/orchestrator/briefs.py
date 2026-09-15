@@ -77,7 +77,8 @@ def _is_rust(path):
 _COMPILED_MODE = {".go": "go", ".java": "java", ".cs": "dotnet",
                   ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift", ".scala": "scala", ".sc": "scala",
                   ".ex": "elixir", ".exs": "elixir", ".sh": "bash", ".bash": "bash", ".lua": "lua",
-                  ".hs": "haskell", ".dart": "dart", ".pl": "perl", ".pm": "perl"}
+                  ".hs": "haskell", ".dart": "dart", ".pl": "perl", ".pm": "perl",
+                  ".rb": "ruby", ".php": "php"}
 
 
 def _compiled_mode_for(path):
@@ -295,6 +296,20 @@ _COMPILED = {
              "run": "perl repro.pl <arg>",
              "crash": "a fatal error (`Can't locate`, `died at`, an `undefined subroutine`)",
              "cmd": "system(<tainted>) / `qx//` / backticks / open with a `|` pipe -> `; touch /tmp/wave_HIT`"},
+    "ruby": {"name": "Ruby", "image": "ruby:3-slim",
+             "setup": "write repro.rb: `require`/copy the method (add the file's dir to $LOAD_PATH), then call it",
+             "deps": "gem install <gem> (needs network 'host'); stdlib needs none",
+             "file": "repro.rb",
+             "run": "ruby repro.rb <arg>",
+             "crash": "an exception (`NoMethodError`, `undefined method`, a raised `RuntimeError`)",
+             "cmd": "system(<tainted>) / `%x[...]` / backticks / `Kernel.eval` -> `; touch /tmp/wave_HIT`"},
+    "php": {"name": "PHP", "image": "php:8.2-cli",
+            "setup": "write repro.php that `require`s the file (or copies the function), then calls it",
+            "deps": "composer require <pkg> (needs network 'host'); stdlib needs none",
+            "file": "repro.php",
+            "run": "php repro.php <arg>",
+            "crash": "a `PHP Fatal error` / an `Uncaught` exception",
+            "cmd": "system/exec/shell_exec/passthru/`eval`(<tainted>) -> `; touch /tmp/wave_HIT`"},
 }
 
 

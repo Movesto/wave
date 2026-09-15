@@ -145,7 +145,9 @@ _REAL_EXEC_MARKERS = ("WAVE_RESULT", "WAVE_RENDER_CANARY", "WAVE_OUTPUT", "WAVE_
                       "Unhandled exception",                                              # c#/.net + dart
                       "Fatal error:",                                                     # swift runtime trap
                       "** (",                                                             # elixir exceptions
-                      "*** Exception")                                                    # haskell exceptions
+                      "*** Exception",                                                    # haskell exceptions
+                      "PHP Fatal error", "Uncaught",                                      # php fatals
+                      "NoMethodError", "undefined method")                                # ruby exceptions
 
 
 # A run is a REPRO ATTEMPT (actually building/running code to test the hypothesis) rather than mere

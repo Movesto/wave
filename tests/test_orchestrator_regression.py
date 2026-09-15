@@ -1019,3 +1019,19 @@ def test_notebook_prompt_flags_panic_dos():
     s = nb._NOTE_SYS.lower()
     assert "unwrap" in s and "panic" in s and "'other'" in s   # crash/DoS class guidance present
     assert "authz" in s or "access control" in s               # authz guidance still there
+
+
+# ============================ 22. Ruby / PHP interpreter proof briefs ============================
+
+def test_ruby_php_route_to_interpreter_proof():
+    assert briefs._proof_mode(_cc("app.rb")) == "ruby"
+    assert briefs._proof_mode(_cc("index.php")) == "php"
+
+def test_ruby_php_briefs_run_the_interpreter():
+    rb = briefs._brief_for(_cc("app.rb"), "/r", "reason", mode="ruby")
+    php = briefs._brief_for(_cc("index.php"), "/r", "reason", mode="php")
+    assert "ruby repro.rb" in rb and "wave_HIT" in rb
+    assert "php repro.php" in php and "wave_HIT" in php
+
+def test_ruby_php_images():
+    assert briefs._image_for("app.rb") == "ruby:3-slim" and briefs._image_for("i.php") == "php:8.2-cli"

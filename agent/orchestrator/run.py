@@ -423,9 +423,10 @@ def main():
     e.add_argument("--notes", action="store_true",
                    help="the local model reads each pinned file into a persistent notebook "
                         "(wave_notebook.jsonl/.md) -- resumable; loads the model")
-    e.add_argument("--notes-budget", type=int, default=20, metavar="N",
-                   help="how many files the notebook reads (default 20); when pinned files exceed this, "
-                        "the model SELECTS the N worth deep-reading instead of taking the densest N")
+    e.add_argument("--notes-budget", type=int, default=40, metavar="N",
+                   help="how many files the notebook reads (default 40); at or below this, ALL pinned files "
+                        "are read (full coverage); only when pinned EXCEEDS this does the model SELECT the N "
+                        "worth deep-reading")
     e.add_argument("--interactive", action="store_true",
                    help="when the model selects targets on a large repo, pause to let you steer the list "
                         "(drop/add) before deep-reading; without it, auto-proceeds")
@@ -465,8 +466,9 @@ def main():
 
     al = sub.add_parser("all", help="one-shot pipeline: eyes(notebook) -> detect -> prove [-> patch]")
     al.add_argument("target")
-    al.add_argument("--notes-budget", type=int, default=20, metavar="N",
-                    help="files the notebook deep-reads (model selects when pinned exceeds this)")
+    al.add_argument("--notes-budget", type=int, default=40, metavar="N",
+                    help="files the notebook deep-reads; at/below this ALL pinned are read, above it the "
+                         "model selects N (default 40)")
     al.add_argument("--detect-budget", type=int, default=60, metavar="N", help="findings to falsify")
     al.add_argument("--prove-budget", type=int, default=12, metavar="N", help="survivors to prove")
     al.add_argument("--patch", action="store_true", help="also run Stage 4 (patch + reverify) on confirmations")

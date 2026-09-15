@@ -32,6 +32,8 @@ _ROUTE = re.compile(
     r"|\b\w+\.(GET|POST|PUT|DELETE|PATCH|Handle|HandleFunc)\s*\(\s*[\"`]"              # go: gin/echo/chi/mux
     r"|^\s*(get|post|put|patch|delete|match)\s+['\"]"                                  # ruby: rails routes.rb
     r"|^\s*(resources?|namespace)\s+:"                                                 # ruby: rails resources
+    r"|\b(get|post|put|delete|patch|head|options)\s*\(\s*\"[^\"]*\"\s*\)\s*\{"          # kotlin: ktor DSL get(\"/x\"){
+    r"|\.route\s*\(\s*\"|\bweb::(get|post|put|delete|patch|resource|scope)\s*\("        # rust: actix .route/web::
 )
 
 # --- The 9 injection classes the detector tries FIRST (class label -> sink regex) ---------------------

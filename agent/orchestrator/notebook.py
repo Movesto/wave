@@ -53,12 +53,15 @@ _NOTE_SYS = (
 # ---- deterministic ledger index (no model) -----------------------------------------------------------
 
 _AUTH_ADMIN = re.compile(r"adminuser|get_admin_user|\bis_admin\b|isadmin|require_admin|requireadmin|"
-                         r"adminguard|roles\s*\(\s*['\"]admin", re.I)
+                         r"adminguard|roles\s*\(\s*['\"]admin|admintoken|hasrole\s*\(\s*['\"]?admin|"
+                         r"@?preauthorize[^)]*admin|@secured[^)]*admin|rolesallowed[^)]*admin", re.I)
 # NB: match auth DEPENDENCIES, not the login form -- OAuth2PasswordRequestForm is the /login input, not a
 # guard, so don't match bare "oauth2" (it would tag the unauthenticated /login as protected).
 _AUTH_USER = re.compile(r"currentuser|get_current_user|isloggedin|require_auth|requireauth|"
                         r"login_required|useguards|jwtauthguard|authguard|oauth2passwordbearer|"
-                        r"depends\s*\([^)]*(user|auth|current|token|session)", re.I)
+                        r"depends\s*\([^)]*(user|auth|current|token|session)|"
+                        r"@?preauthorize|@secured|rolesallowed|@authenticated|authenticate\s*\{|"
+                        r"\bbefore_action\b|ensure_authenticated|verifyjwt|verify_token|requireuser", re.I)
 
 
 def _auth_from(text):

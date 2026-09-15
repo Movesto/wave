@@ -1165,3 +1165,22 @@ def test_recon_streak_triggers_midloop_nudge(monkeypatch):
         pass
     v = inv.investigate(_M(), "brief", deps=False, max_steps=8)
     assert seen["nudged"]              # after 3 read-only commands, the mid-loop nudge fired
+
+
+# ============================ 28. Ktor/Actix DSL routes + broader auth detection ============================
+
+def test_ktor_and_actix_routes_pin():
+    for ln in ['get("/users/{id}") {', 'post("/login") {',
+               '.route("/api/x", web::get().to(handler))', 'web::resource("/y").route(web::post().to(h))']:
+        assert repomap._ROUTE.search(ln), ln
+
+def test_route_pin_not_over_eager_on_plain_get():
+    # a bare map/get access without the DSL lambda shape must NOT pin
+    assert not repomap._ROUTE.search('val name = cache.get("key")')
+
+def test_auth_detection_covers_more_stacks():
+    assert nb._auth_from('@PreAuthorize("hasRole(ADMIN)")') == "admin"
+    assert nb._auth_from("fun handler(_token: AdminToken)") == "admin"
+    assert nb._auth_from('@Secured("ROLE_USER")') == "session"
+    assert nb._auth_from("before_action :require_login") == "session"
+    assert nb._auth_from("def public_health():") == "none"

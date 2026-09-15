@@ -19,6 +19,7 @@ _EXT_LANG = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs":
              ".jsx": "javascript", ".ts": "typescript", ".tsx": "tsx", ".mts": "typescript",
              ".rb": "ruby", ".php": "php",
              ".go": "go", ".java": "java", ".cs": "csharp", ".rs": "rust",
+             ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift", ".scala": "scala", ".sc": "scala",
              ".c": "c", ".h": "cpp", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
              ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp"}
 _SKIP = {"node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build", "vendor",
@@ -186,6 +187,12 @@ def _def_name(node):
                 return _txt(ids[0]).split("::")[-1] if ids else ""
             d = nxt
         return ""
+    # Kotlin/Swift/Scala: the name is a `simple_identifier`/`type_identifier` CHILD, with no `name` field.
+    # Scoped to real declarations (NOT arrow_function/function_expression, whose first identifier is a param).
+    if node.type in ("function_declaration", "function_definition", "class_declaration", "class_definition"):
+        for c in node.children:
+            if c.type in ("simple_identifier", "type_identifier", "identifier"):
+                return _txt(c)
     # anonymous function bound to a name: `const f = () =>`, `exports.f =`, `module.exports = fn`, `{f: fn}`
     par = node.parent
     if par is not None and par.type in ("variable_declarator", "assignment", "assignment_expression", "pair"):
@@ -224,12 +231,14 @@ def _is_exported(node, lang):
     if lang == "go":                                       # Go: an uppercase first letter = exported
         nm = _def_name(node)
         return bool(nm) and nm[:1].isupper()
-    if lang in ("java", "csharp", "rust", "c", "cpp"):     # visibility from the signature line
+    if lang in ("java", "csharp", "rust", "c", "cpp", "kotlin", "scala", "swift"):  # visibility from the sig
         head = _txt(node)[:100].lower()
         if lang == "rust":
             return "pub " in head or "pub(" in head
         if lang in ("java", "csharp"):
             return "public" in head or "protected" in head
+        if lang in ("kotlin", "scala", "swift"):           # public by default; only `private` hides it
+            return "private" not in head
         return True                                        # c/cpp: top-level functions are linkable
     p = node.parent
     depth = 0

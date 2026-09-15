@@ -130,9 +130,11 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
         v = invmod.investigate(model, briefs._brief_for(c, target, "reverify the patch", scaffold=scaffold,
                                                         mode=mode),
                                image=img, mount=target, network="none",
-                               max_steps=max_steps, step_timeout=(300 if mode == "rust" else
-                                                                  (120 if mode in ("render", "asan") else
-                                                                  (90 if briefs._is_js(c.file) else 45))))
+                               max_steps=max_steps,
+                               step_timeout=(300 if mode in ("rust", "go", "java", "dotnet",
+                                                             "kotlin", "swift", "scala") else
+                                             (120 if mode in ("render", "asan") else
+                                              (90 if briefs._is_js(c.file) else 45))))
     finally:
         repro.remove(target)
     # confirmed = re-fired (still); refuted = the model RAN it and saw it is now safe (cleared);

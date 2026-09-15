@@ -72,16 +72,33 @@ def _is_rust(path):
     return (path or "").lower().endswith(".rs")
 
 
+# other COMPILED languages that (like Rust) can't be imported+called -- each gets a minimal build-and-run
+# repro recipe. ext -> proof mode.
+_COMPILED_MODE = {".go": "go", ".java": "java", ".cs": "dotnet",
+                  ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift", ".scala": "scala", ".sc": "scala"}
+
+
+def _compiled_mode_for(path):
+    p = (path or "").lower()
+    for ext, mode in _COMPILED_MODE.items():
+        if p.endswith(ext):
+            return mode
+    return None
+
+
 def _proof_mode(candidate):
     """Pick the investigate proof shape for a candidate: asan (C/C++ compile+sanitizer) > rust (cargo repro)
-    > sanitizer (return-value) > per-class brief (ssti/protopoll/deser) > render (DOM XSS) > call (default).
-    Used by prove and patch so the scaffold, image, and brief stay consistent."""
+    > go/java/dotnet (compile+run repro) > sanitizer (return-value) > per-class brief (ssti/protopoll/deser)
+    > render (DOM XSS) > call (default). Used by prove and patch so scaffold, image, and brief stay consistent."""
     cwe = getattr(candidate, "cwe", "") or ""
-    if _is_c(getattr(candidate, "file", "")) and (
-            cwe in _ASAN_CWE or _ASAN_SINKS.search(getattr(candidate, "sink", "") or "")):
+    file = getattr(candidate, "file", "")
+    if _is_c(file) and (cwe in _ASAN_CWE or _ASAN_SINKS.search(getattr(candidate, "sink", "") or "")):
         return "asan"
-    if _is_rust(getattr(candidate, "file", "")):           # Rust: compile a minimal cargo repro + run it
+    if _is_rust(file):                                     # Rust: compile a minimal cargo repro + run it
         return "rust"
+    cm = _compiled_mode_for(file)                          # Go / Java / C#: compile a minimal repro + run it
+    if cm:
+        return cm
     if _is_sanitizer(candidate):
         return "sanitizer"
     if cwe in _MODE_BY_CWE:
@@ -100,6 +117,8 @@ def _image_for(path):
     for ext, img in ((".php", "php:8.2-cli"), (".rb", "ruby:3-slim"), (".go", "golang:1-alpine"),
                      (".java", "eclipse-temurin:21-jdk"), (".cs", "mcr.microsoft.com/dotnet/sdk:8.0"),
                      (".rs", "rust:1-slim"),
+                     (".kt", "zenika/kotlin"), (".kts", "zenika/kotlin"), (".swift", "swift:5.10"),
+                     (".scala", "virtuslab/scala-cli"), (".sc", "virtuslab/scala-cli"),
                      (".cc", "gcc:13"), (".cpp", "gcc:13"), (".cxx", "gcc:13"), (".hpp", "gcc:13"),
                      (".hh", "gcc:13"), (".hxx", "gcc:13"), (".c", "gcc:13"), (".h", "gcc:13")):
         if p.endswith(ext):
@@ -176,6 +195,92 @@ def _rust_brief(candidate, target, rel, code, fn):
         f"so). Do NOT conclude confirmed without an observed runtime effect.")
 
 
+# per-language compile-and-run repro recipes (Go / Java / C#) -- the compiled-language analog of _rust_brief.
+_COMPILED = {
+    "go": {"name": "Go", "image": "golang:1-alpine",
+           "setup": "cd /tmp && rm -rf poc && mkdir poc && cd poc && go mod init poc",
+           "deps": "go get <module>   (needs network 'host')",
+           "file": "main.go (package main)",
+           "run": "go run .",
+           "crash": "a `panic:` or `runtime error: index out of range` / nil-pointer dereference",
+           "cmd": "exec.Command(\"sh\", \"-c\", <tainted>) -> inject `; touch /tmp/wave_HIT`"},
+    "java": {"name": "Java", "image": "eclipse-temurin:21-jdk",
+             "setup": "write Repro.java: `public class Repro { public static void main(String[] a) throws "
+                      "Exception { ... } }` and copy the method in",
+             "deps": "dependency-free code just runs `java Repro.java` (JDK 21 launches a single source file); "
+                     "for external jars, download them to /tmp and use `javac -cp <jars> Repro.java && "
+                     "java -cp .:<jars> Repro`",
+             "file": "Repro.java",
+             "run": "java Repro.java   (or javac Repro.java && java Repro)",
+             "crash": "an `Exception in thread \"main\"` stack trace (NPE, IndexOutOfBounds, a thrown parse error)",
+             "cmd": "Runtime.getRuntime().exec(new String[]{\"sh\",\"-c\",<tainted>}) -> `; touch /tmp/wave_HIT`"},
+    "dotnet": {"name": "C#", "image": "the dotnet SDK image",
+               "setup": "cd /tmp && rm -rf poc && dotnet new console -o poc && cd poc",
+               "deps": "dotnet add package <pkg>   (needs network 'host')",
+               "file": "Program.cs",
+               "run": "dotnet run",
+               "crash": "an `Unhandled exception.` stack trace (NullReference, IndexOutOfRange, a thrown parse error)",
+               "cmd": "Process.Start(new ProcessStartInfo{FileName=\"sh\",Arguments=\"-c ...\"}) -> "
+                      "`; touch /tmp/wave_HIT`"},
+    "kotlin": {"name": "Kotlin", "image": "a Kotlin/JVM image (kotlinc). If kotlinc is missing, install it "
+                       "or fall back to a Gradle/JVM build",
+               "setup": "write Repro.kt with `fun main() { ... }` and copy the function in",
+               "deps": "for external libs, add the jar to the classpath; dependency-free code needs none",
+               "file": "Repro.kt",
+               "run": "kotlinc Repro.kt -include-runtime -d /tmp/r.jar && java -jar /tmp/r.jar",
+               "crash": "an `Exception in thread \"main\"` stack trace (NPE, IndexOutOfBounds, a thrown parse error)",
+               "cmd": "ProcessBuilder(\"sh\", \"-c\", <tainted>).start() -> `; touch /tmp/wave_HIT`"},
+    "swift": {"name": "Swift", "image": "swift:5.10 (has swiftc)",
+              "setup": "write repro.swift: copy the function, then top-level code that calls it (a .swift file "
+                       "runs top-level statements as main)",
+              "deps": "dependency-free code just runs; SwiftPM deps need a Package.swift (heavier)",
+              "file": "repro.swift",
+              "run": "swift repro.swift",
+              "crash": "a `Fatal error:` trap (force-unwrap of nil `!`, out-of-range index, precondition/assert)",
+              "cmd": "Process() with executableURL=/bin/sh and arguments [\"-c\", <tainted>] -> "
+                     "`; touch /tmp/wave_HIT`"},
+    "scala": {"name": "Scala", "image": "a scala-cli / scala-sbt image",
+              "setup": "write repro.scala with `@main def run() = { ... }` and copy the function in",
+              "deps": "scala-cli fetches deps from a `//> using dep <org::name::ver>` line at the top",
+              "file": "repro.scala",
+              "run": "scala-cli run repro.scala   (or scala repro.scala)",
+              "crash": "an `Exception in thread \"main\"` stack trace (NPE, IndexOutOfBounds, a thrown parse error)",
+              "cmd": "sys.process.Process(Seq(\"sh\", \"-c\", <tainted>)).! -> `; touch /tmp/wave_HIT`"},
+}
+
+
+def _compiled_brief(candidate, target, rel, code, fn, lang):
+    """Go / Java / C# proof: like Rust, a compiled function can't be imported+called -- COMPILE a minimal
+    repro and RUN it. The witness is an observed runtime effect: a crash/stack trace on the crafted input, a
+    wave_HIT marker (Command/shell sink), or a leaked traversal path."""
+    c = _COMPILED[lang]
+    return (
+        f"File: {rel}. Function: {candidate.unit}. Suspected {candidate.cwe} ({candidate.family}); "
+        f"sink: {candidate.sink}.\n\nCode around the sink:\n{code}\n\n"
+        f"This is {c['name']} -- a COMPILED language: you cannot import+call it like Python, you must BUILD a "
+        f"minimal repro and RUN it. The repo is mounted at /work (read it for the exact logic/types). Because "
+        f"EACH command runs in a FRESH container, do the WHOLE repro in ONE command, and use network 'host' on "
+        f"it if you must fetch dependencies (image: {c['image']}). Recipe:\n"
+        f"1. {c['setup']}.\n"
+        f"2. Put the vulnerable logic of `{fn}` into {c['file']} -- COPY it verbatim (keep the suspect line "
+        f"identical). Stub only what you must to compile; add external deps with: {c['deps']}.\n"
+        f"3. Write a main that calls it TWICE with a label before each: a CRAFTED malicious input, then a "
+        f"BENIGN control. Pick the payload by class:\n"
+        f"   - crash / DoS (nil deref, index/bounds, bad parse, overflow): an input that triggers {c['crash']} "
+        f"on the crafted input but NOT the benign one.\n"
+        f"   - command injection (CWE-78): {c['cmd']}, then in the SAME command afterwards `ls -l "
+        f"/tmp/wave_HIT` -- the file existing is the witness.\n"
+        f"   - path traversal (CWE-22): a `../../` input; witness = it opens/reads a file OUTSIDE the intended "
+        f"dir (print the resolved path / leaked contents).\n"
+        f"4. {c['run']}.\n"
+        f"CONFIRMED only if the crafted input produces the observed effect (cite the exact crash/stack line, "
+        f"the wave_HIT file, or the leaked path) AND the benign input does not. REFUTED if BOTH run clean "
+        f"(a real guard: validated input, a checked error/exception, a bounds check, a parameterized/escaped "
+        f"API). If it needs a whole framework/DB/build you cannot stand up, or won't compile standalone after "
+        f"trying, conclude 'blocked' (a crash-only finding is a DoS, not RCE -- say so). Do NOT conclude "
+        f"confirmed without an observed runtime effect.")
+
+
 def _differential_brief(candidate, target, rel, code, fn):
     """The DIFFERENTIAL / STATE observer: a no-sink access-control class (IDOR / broken authz) is proven
     BEHAVIOURALLY -- run the handler as user A requesting user B's resource and observe whether the ownership
@@ -215,6 +320,8 @@ def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
         return _asan_brief(candidate, target, rel, code, fn)
     if mode == "rust":                                     # Rust: minimal cargo repro + run (panic/overflow/marker)
         return _rust_brief(candidate, target, rel, code, fn)
+    if mode in ("go", "java", "dotnet", "kotlin", "swift", "scala"):   # compiled langs: build a repro + run
+        return _compiled_brief(candidate, target, rel, code, fn, mode)
     if mode == "differential":                             # IDOR / access-control 2-identity harness
         return _differential_brief(candidate, target, rel, code, fn)
     extra = ""

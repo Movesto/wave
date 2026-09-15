@@ -871,3 +871,65 @@ def test_rust_panic_is_a_real_exec_marker():
     assert inv._real_exec("thread 'main' panicked at src/main.rs:5:9")
     assert inv._real_exec("attempt to add with overflow")
     assert not inv._real_exec("just some normal output")
+
+
+# ============================ 17. Go / Java / C# compile-repro proof paths ============================
+
+def _cc(file, cwe="CWE-78", sink="exec"):
+    return Candidate(file=file, unit="handle(x)", line=10, cwe=cwe, family="cmd", detector="d",
+                     sink=sink, provable=False, rank=1)
+
+def test_compiled_langs_route_to_own_modes():
+    assert briefs._proof_mode(_cc("a.go")) == "go"
+    assert briefs._proof_mode(_cc("A.java")) == "java"
+    assert briefs._proof_mode(_cc("A.cs")) == "dotnet"
+
+def test_compiled_langs_use_their_toolchain_images():
+    assert briefs._image_for("a.go") == "golang:1-alpine"
+    assert briefs._image_for("A.java") == "eclipse-temurin:21-jdk"
+    assert "dotnet" in briefs._image_for("A.cs")
+
+def test_compiled_briefs_are_build_and_run_recipes():
+    for file, mode, needle in (("a.go", "go", "go run"), ("A.java", "java", "Repro.java"),
+                               ("A.cs", "dotnet", "dotnet new console")):
+        b = briefs._brief_for(_cc(file), "/repo", "reason", mode=mode)
+        assert needle in b and "wave_HIT" in b and "REFUTED" in b and "blocked" in b, (mode, needle)
+
+def test_compiled_crash_markers_are_grounding():
+    assert inv._real_exec("panic: runtime error: index out of range")           # go
+    assert inv._real_exec('Exception in thread "main" java.lang.NullPointer')    # java
+    assert inv._real_exec("Unhandled exception. System.NullReferenceException")  # c#
+
+
+# ============================ 18. Kotlin / Swift / Scala (web langs) detection + proof ============================
+
+def test_new_langs_parsed_and_functions_extracted(tmp_path):
+    _write(tmp_path, "App.kt", 'class C {\n  fun getUser(id: Int): String { return exec(id) }\n}\n')
+    _write(tmp_path, "Api.swift", 'func fetch(_ u: String) -> String { return get(u) }\n')
+    _write(tmp_path, "Svc.scala", 'class S {\n  def run(id: String): String = { proc(id) }\n}\n')
+    cm = codemap.build(str(tmp_path))
+    assert cm.funcs.get("getUser") and cm.funcs.get("fetch") and cm.funcs.get("run")  # names resolved
+
+def test_new_langs_route_to_compiled_proof():
+    assert briefs._proof_mode(_cc("App.kt")) == "kotlin"
+    assert briefs._proof_mode(_cc("Api.swift")) == "swift"
+    assert briefs._proof_mode(_cc("Svc.scala")) == "scala"
+
+def test_new_langs_have_toolchain_images():
+    assert briefs._image_for("App.kt") == "zenika/kotlin"
+    assert briefs._image_for("Api.swift") == "swift:5.10"
+    assert "scala" in briefs._image_for("Svc.scala")
+
+def test_new_lang_briefs_build_and_run():
+    for file, mode, needle in (("App.kt", "kotlin", "kotlinc"), ("Api.swift", "swift", "swift repro.swift"),
+                               ("Svc.scala", "scala", "scala-cli")):
+        b = briefs._brief_for(_cc(file), "/r", "reason", mode=mode)
+        assert needle in b and "REFUTED" in b
+
+def test_scala_cmd_sink_pins(tmp_path):
+    _write(tmp_path, "S.scala", 'class S {\n  def r(id: String) = sys.process.Process(Seq("sh","-c",id)).!!\n}\n')
+    mp = repomap.build_map(str(tmp_path))
+    assert len(mp.get("pinned", [])) >= 1                     # scala.sys.process shell sink pins (not JVM-only)
+
+def test_swift_fatal_error_is_grounding_marker():
+    assert inv._real_exec("Fatal error: Unexpectedly found nil while unwrapping an Optional value")

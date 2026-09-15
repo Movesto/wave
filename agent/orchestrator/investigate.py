@@ -139,7 +139,11 @@ _REAL_EXEC_MARKERS = ("WAVE_RESULT", "WAVE_RENDER_CANARY", "WAVE_OUTPUT", "WAVE_
                       "uid=", "wave_HIT", "WAVE-PWNED",
                       "AddressSanitizer", "runtime error:", "LeakSanitizer", "SUMMARY: ",  # C/C++ ASan/UBSan
                       "panicked at", "with overflow", "index out of bounds",              # rust runtime panics
-                      "called `Result::unwrap()`", "called `Option::unwrap()`")
+                      "called `Result::unwrap()`", "called `Option::unwrap()`",
+                      "panic:", "goroutine ",                                             # go runtime panics
+                      "Exception in thread", "\tat ",                                     # java/kotlin/scala (JVM)
+                      "Unhandled exception",                                              # c#/.net stack traces
+                      "Fatal error:")                                                     # swift runtime trap
 
 
 def _provision_signal(text):

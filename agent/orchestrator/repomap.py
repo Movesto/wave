@@ -139,9 +139,28 @@ _SINKS_C = [
 ]
 
 
+# Swift (Vapor / iOS): its own small table. Kotlin/Scala run on the JVM -> reuse the Java sinks.
+_SINKS_SWIFT = [
+    ("cmd",      re.compile(r"Process\s*\(\)|\.launchPath|\.executableURL|/bin/sh|system\s*\(")),
+    ("path",     re.compile(r"FileManager\.|contentsOfFile:|String\(contentsOf|Data\(contentsOf|\.write\(to")),
+    ("ssrf",     re.compile(r"URLSession|URL\(string:|dataTask\(with|\.data\(from")),
+    ("SQLi",     re.compile(r"\.prepare\s*\(|\.run\s*\(\s*\"|sqlite3_exec|rawQuery")),
+    ("redirect", re.compile(r"\.redirect\s*\(")),
+]
+
+
+# Scala runs on the JVM (Java sinks apply) but its own idioms differ -- scala.sys.process for shell, string
+# interpolation for SQL. Kotlin's shell/JDBC APIs are the Java ones, so Kotlin reuses the Java table as-is.
+_SINKS_SCALA = _SINKS_JAVA + [
+    ("cmd",  re.compile(r"sys\.process\.|Process\s*\(\s*Seq|\bProcess\s*\(\s*[\"']|\.!!\B|\bStringBuilder")),
+    ("SQLi", re.compile(r"\bsql\"|\.run\s*\(\s*sql|Statement\s*\.\s*execute|\.executeQuery\s*\(")),
+]
+
+
 def _lang_sinks(lang):
     return {"php": _SINKS_PHP, "ruby": _SINKS_RUBY, "go": _SINKS_GO, "java": _SINKS_JAVA,
-            "csharp": _SINKS_CSHARP, "rust": _SINKS_RUST, "c": _SINKS_C, "cpp": _SINKS_C}.get(
+            "csharp": _SINKS_CSHARP, "rust": _SINKS_RUST, "c": _SINKS_C, "cpp": _SINKS_C,
+            "kotlin": _SINKS_JAVA, "scala": _SINKS_SCALA, "swift": _SINKS_SWIFT}.get(
         lang, (_SINKS_PY if lang == "python" else _SINKS_JS) + _SINKS_COMMON)
 
 

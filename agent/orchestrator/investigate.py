@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 
-from .execute import execute
+from .execute import _DEPS_MOUNT, execute, install_packages
 
 _AGENT_SYS = (
     "You are a security investigator with a real SANDBOX you can run commands in. Investigate the "
@@ -25,6 +27,8 @@ _AGENT_SYS = (
     "nothing else:\n"
     '  run a command: {"action":"run","command":"<shell command>","image":"<optional docker image, '
     'e.g. python:3.12-slim or node:20-slim>","network":"<none|host>","why":"<what you expect to see>"}\n'
+    '  install deps:  {"action":"install","packages":["<pkg>",...],"why":"<why THIS test needs them>"}  '
+    "(use this on a ModuleNotFoundError -- it downloads them; ask only for what this test needs)\n"
     '  finish:        {"action":"conclude","verdict":"confirmed|refuted|believed|blocked|anomalous_state",'
     '"cwe":"CWE-XX","why":"<why, citing what you OBSERVED>","evidence":"<the concrete observed effect>"}\n'
     "RULES: (1) You may only CONFIRM after you have RUN something and OBSERVED the effect that proves it; "
@@ -66,8 +70,9 @@ _NATIVE_SYS = (
     "done, call conclude. To run an exported function, require/import it (e.g. "
     "node -e \"require('/work/app').f('; id')\" or python3 -c \"import app; app.f('; id')\"). "
     "A run that fails with a MISSING dependency (ModuleNotFoundError / Cannot find module) or a refused "
-    "connection is an ENVIRONMENT problem, NOT evidence the code is safe -- fix it (install the package "
-    "with network 'host', e.g. `pip install <pkg>` / `npm i <pkg>`, or start the service) and re-run. "
+    "connection is an ENVIRONMENT problem, NOT evidence the code is safe -- fix it: call the `install` tool "
+    "with the missing package name(s) (it downloads them; your runs stay offline but can then import them), "
+    "asking ONLY for what this test needs -- then re-run. (Or start the service if that's what's missing.) "
     "If you still cannot run it AND web_search is available, do what a pentester does when they can't run the "
     "target: RESEARCH it -- web_search the dependency/API/service, web_read the docs, and reason about "
     "whether the flow is exploitable given how that library ACTUALLY behaves. Then conclude a reasoned "
@@ -93,6 +98,19 @@ _RUN_TOOL = {"type": "function", "function": {
         "image": {"type": "string", "description": "optional docker image, e.g. node:20-slim or python:3.12-slim"},
         "network": {"type": "string", "enum": ["none", "host"], "description": "network access (default none)"},
     }, "required": ["command"]}}}
+
+_INSTALL_TOOL = {"type": "function", "function": {
+    "name": "install",
+    "description": "Download the package(s) the sandbox is missing so you can import/run the target (e.g. "
+                   "after a ModuleNotFoundError / 'Cannot find module'). They are fetched WITH network and "
+                   "become importable in your later run_command calls, which still run OFFLINE. Ask ONLY for "
+                   "what THIS test needs -- not the whole project. pip names by default (python:...), npm "
+                   "names if the image is node:...",
+    "parameters": {"type": "object", "properties": {
+        "packages": {"type": "array", "items": {"type": "string"},
+                     "description": "package names, e.g. [\"fastapi\",\"python-jose[cryptography]\"]"},
+        "why": {"type": "string", "description": "what you need them for"},
+    }, "required": ["packages"]}}}
 
 _CONCLUDE_TOOL = {"type": "function", "function": {
     "name": "conclude",
@@ -171,6 +189,37 @@ def _tail(run_log, n=20):
     if not run_log:
         return "no command has been run yet -- run_command first."
     return "\n".join(run_log.splitlines()[-n:])
+
+
+def _do_install(packages, *, deps, image, kind, state):
+    """The model's `install` action: download the requested packages into the shared deps dir (once), with
+    a user-visible line so they SEE the download happen. Bounded by a budget; already-installed names are a
+    no-op. Returns a short message for the model. Never raises -- a failed install just tells the model."""
+    if isinstance(packages, str):
+        packages = [packages]
+    packages = [str(p).strip() for p in (packages or []) if str(p).strip()]
+    if not packages:
+        return "install: give a non-empty `packages` list."
+    new = [p for p in packages if p.lower() not in state["done"]]
+    if not new:
+        return "already installed this run: " + ", ".join(packages) + " -- just re-run your test."
+    if state["installs"] >= state["budget"]:
+        return (f"install budget ({state['budget']}) reached -- no more downloads. Test with what you have, "
+                "or conclude 'blocked' if a needed dependency is missing.")
+    label = ", ".join(new)
+    print(f"\U0001f4e6 [deps] installing {label} ...", flush=True)
+    res = install_packages(new, deps=deps, image=image, kind=kind)
+    state["installs"] += 1
+    if res.exit_code == 0 and not res.timed_out:
+        state["done"].update(p.lower() for p in new)
+        print(f"\U0001f4e6 [deps] ✓ installed {label}", flush=True)
+        return (f"installed: {label}. They import from {_DEPS_MOUNT} (already on your PYTHONPATH/NODE_PATH) "
+                "-- re-run your test now.")
+    tail = ((res.stderr or res.stdout) or "").strip()[-400:]
+    print(f"\U0001f4e6 [deps] ✗ install failed: {label}", flush=True)
+    return (f"install FAILED for {label} (exit {res.exit_code}"
+            + (" TIMED OUT" if res.timed_out else "") + f"): {tail}\nTry a different package name (pip vs "
+            "npm, or the real distribution name), or conclude 'blocked' if you cannot provision it.")
 
 
 def _finalize(verdict, why, ran, saw_prov, saw_real):
@@ -253,13 +302,16 @@ _WEB_READ_TOOL = {"type": "function", "function": {
 
 
 def _investigate_native(model, brief, *, image, mount, container, network, max_steps, step_timeout,
-                        online=False):
+                        online=False, deps=None, dep_kind="py", install_budget=6):
     """Tool-calling loop over the model's NATIVE tools interface (structured tool_calls)."""
     import json as _json
     messages = [{"role": "system", "content": _NATIVE_SYS}, {"role": "user", "content": brief}]
     tools = [_RUN_TOOL, _GREP_TOOL, _TAIL_TOOL, _CONCLUDE_TOOL]
+    if deps:                                                # let the model fetch what THIS test needs
+        tools.insert(1, _INSTALL_TOOL)
     if online:                                              # opt-in egress: the model's eyes on the world
         tools += [_WEB_SEARCH_TOOL, _WEB_READ_TOOL]
+    inst_state = {"installs": 0, "budget": install_budget, "done": set()}
     trail, ran = [], 0
     run_log = ""                                            # the LAST run's full output (grep/tail read it)
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
@@ -311,6 +363,11 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 content = _tail(run_log, int(args.get("lines") or 20))
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
                 continue
+            if name == "install":                            # model asks for a missing dep -> fetch it (visible)
+                content = _do_install(args.get("packages"), deps=deps, image=image, kind=dep_kind,
+                                      state=inst_state)
+                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
+                continue
             if name in ("web_search", "web_read"):          # opt-in egress; degrades to '' on any failure
                 from . import search
                 if name == "web_search":
@@ -323,7 +380,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 continue
             cmd = str(args.get("command", "")).strip()      # run_command
             res = execute(cmd, image=str(args.get("image") or image), mount=mount, container=container,
-                          network=str(args.get("network") or network), timeout=step_timeout)
+                          network=str(args.get("network") or network), timeout=step_timeout, deps=deps)
             ran += 1
             run_log = _combined(res)                         # full output stays here, not in the prompt
             prov = _provision_signal(run_log)
@@ -332,10 +389,11 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                   + (" TIMEOUT" if res.timed_out else "") + (" [prov-fail]" if prov else ""), flush=True)
             digest = _digest(res)
             if prov:                                         # escalate, never let it read as 'safe'
+                fix = ("call install with the missing package name" if deps
+                       else "install the package (network 'host')")
                 digest += ("\nNOTE: this is a MISSING DEPENDENCY/SERVICE (an environment problem), NOT proof "
-                           "the code is safe. Fix it -- install the package (network 'host') or start the "
-                           "service, then re-run. Do NOT conclude 'refuted' from this; if you still cannot "
-                           "provision, conclude 'blocked'.")
+                           f"the code is safe. Fix it -- {fix} or start the service, then re-run. Do NOT "
+                           "conclude 'refuted' from this; if you still cannot provision, conclude 'blocked'.")
             if cmd in seen_cmds:                             # zombie loop: re-running a command already run
                 digest += ("\nNOTE: you ALREADY ran this exact command -- do NOT repeat it. Stop reading; "
                            "TEST the vulnerability with a payload or CONCLUDE now.")
@@ -390,17 +448,46 @@ def _render(trail, limit=1500):
     return "\n".join(out)
 
 
+def _dep_kind_for(image):
+    img = (image or "").lower()
+    return "js" if ("node" in img or "wave-js" in img or "tsx" in img) else "py"
+
+
 def investigate(model, brief, *, image="python:3.12-slim", mount=None, container=None,
-                network="none", max_steps=6, step_timeout=60, max_new_tokens=2000, online=False) -> Verdict:
+                network="none", max_steps=6, step_timeout=60, max_new_tokens=2000, online=False,
+                deps=None, install_budget=6) -> Verdict:
     """Let the model investigate `brief` (a hypothesis + the relevant code) by running commands in a
     sandbox, until it concludes or the step budget is spent. `mount` binds the target dir into the box;
     `container` runs inside the app's own container instead. `online=True` adds the opt-in web_search /
     web_read tools (the box is otherwise fully local). A tool-calling model (WAVE_API_BASE) drives the
-    NATIVE tools loop; a local text model uses the JSON-action protocol below."""
+    NATIVE tools loop; a local text model uses the JSON-action protocol below.
+
+    On-demand deps: unless `deps=False`, the model gets an `install` tool to fetch the packages THIS test
+    needs (downloaded once into a temp store with network; the exploit runs stay offline but can import
+    them). Pass a dir as `deps` to reuse one; the default creates+cleans a per-investigation temp dir."""
+    own_deps = False
+    if deps is False:                                        # caller explicitly disabled on-demand deps
+        deps = None
+    elif deps is None and container is None and shutil.which("docker") is not None:
+        deps = tempfile.mkdtemp(prefix="wave-deps-")         # per-investigation store; cleaned in finally
+        own_deps = True
+    try:
+        return _investigate(model, brief, image=image, mount=mount, container=container, network=network,
+                            max_steps=max_steps, step_timeout=step_timeout, max_new_tokens=max_new_tokens,
+                            online=online, deps=deps, install_budget=install_budget)
+    finally:
+        if own_deps and deps:
+            shutil.rmtree(deps, ignore_errors=True)
+
+
+def _investigate(model, brief, *, image, mount, container, network, max_steps, step_timeout,
+                 max_new_tokens, online, deps, install_budget):
+    dep_kind = _dep_kind_for(image)
     if getattr(model, "supports_tools", False):
         return _investigate_native(model, brief, image=image, mount=mount, container=container,
                                    network=network, max_steps=max_steps, step_timeout=step_timeout,
-                                   online=online)
+                                   online=online, deps=deps, dep_kind=dep_kind, install_budget=install_budget)
+    inst_state = {"installs": 0, "budget": install_budget, "done": set()}
     trail = []
     ran = 0
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
@@ -413,13 +500,18 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
             trail.append(("(no action parsed)", "the model emitted no valid json action"))
             continue
         kind = str(act.get("action", "")).lower()
+        if kind == "install" and deps:
+            msg = _do_install(act.get("packages") or act.get("package"), deps=deps, image=image,
+                              kind=_dep_kind_for(image), state=inst_state)
+            trail.append(("install " + ", ".join(act.get("packages") or []), msg))
+            continue
         if kind == "run":
             cmd = str(act.get("command", "")).strip()
             if not cmd:
                 trail.append(("(empty command)", "no command supplied"))
                 continue
             res = execute(cmd, image=str(act.get("image") or image), mount=mount, container=container,
-                          network=str(act.get("network") or network), timeout=step_timeout)
+                          network=str(act.get("network") or network), timeout=step_timeout, deps=deps)
             ran += 1
             prov = _provision_signal(_combined(res))
             saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(_combined(res))

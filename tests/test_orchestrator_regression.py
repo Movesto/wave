@@ -661,3 +661,86 @@ def test_web_search_empty():
 def test_ddg_url_unwrap():
     assert search._real_url("/l/?uddg=https%3A%2F%2Fdocs.aws.amazon.com%2Fiam&rut=x") == \
         "https://docs.aws.amazon.com/iam"
+
+
+# ============================ 13. on-demand dependency install (model-driven) ============================
+
+from agent.orchestrator import execute as execmod
+
+
+def test_safe_pkg_accepts_real_names():
+    for name in ("fastapi", "python-jose[cryptography]", "uvicorn[standard]", "sqlalchemy==2.0.36",
+                 "@scope/pkg", "requests>=2.0", "Django~=4.2"):
+        assert execmod._safe_pkg(name), name
+
+
+def test_safe_pkg_rejects_injection_and_flags():
+    for name in ("x; rm -rf /", "--find-links=http://evil", "-e git+https://x", "a b", "pkg`whoami`",
+                 "'; DROP", "../../etc", "", "x" * 200):
+        assert not execmod._safe_pkg(name), name
+
+
+def test_do_install_success_updates_state(monkeypatch):
+    calls = {}
+    def fake_install(pkgs, **kw):
+        calls["pkgs"], calls["kw"] = list(pkgs), kw
+        return execmod.ExecResult("install", "ok", "", 0, 0.1)
+    monkeypatch.setattr(inv, "install_packages", fake_install)
+    st = {"installs": 0, "budget": 6, "done": set()}
+    msg = inv._do_install(["fastapi", "pydantic"], deps="/tmp/d", image="python:3.12-slim", kind="py", state=st)
+    assert "installed" in msg.lower()
+    assert st["installs"] == 1 and st["done"] == {"fastapi", "pydantic"}
+    assert calls["pkgs"] == ["fastapi", "pydantic"] and calls["kw"]["kind"] == "py"
+
+
+def test_do_install_dedups_already_installed(monkeypatch):
+    monkeypatch.setattr(inv, "install_packages", lambda *a, **k: execmod.ExecResult("i", "", "", 0, 0.0))
+    st = {"installs": 0, "budget": 6, "done": {"fastapi"}}
+    msg = inv._do_install(["fastapi"], deps="/tmp/d", image="python:3.12-slim", kind="py", state=st)
+    assert "already installed" in msg.lower() and st["installs"] == 0   # no download for a dup
+
+
+def test_do_install_respects_budget(monkeypatch):
+    monkeypatch.setattr(inv, "install_packages", lambda *a, **k: execmod.ExecResult("i", "", "", 0, 0.0))
+    st = {"installs": 2, "budget": 2, "done": set()}
+    msg = inv._do_install(["numpy"], deps="/tmp/d", image="python:3.12-slim", kind="py", state=st)
+    assert "budget" in msg.lower() and st["installs"] == 2               # over budget -> no install
+
+
+def test_do_install_reports_failure(monkeypatch):
+    monkeypatch.setattr(inv, "install_packages",
+                        lambda *a, **k: execmod.ExecResult("i", "", "No matching distribution", 1, 0.0))
+    st = {"installs": 0, "budget": 6, "done": set()}
+    msg = inv._do_install(["nope-xyz"], deps="/tmp/d", image="python:3.12-slim", kind="py", state=st)
+    assert "failed" in msg.lower() and "nope-xyz" not in st["done"]      # a failed install isn't recorded done
+
+
+def test_dep_kind_detection():
+    assert inv._dep_kind_for("python:3.12-slim") == "py"
+    assert inv._dep_kind_for("node:20-slim") == "js"
+    assert inv._dep_kind_for("wave-js-runner") == "js"     # our runner image has no 'node' substring
+    assert inv._dep_kind_for("gcc:13") == "py"
+
+
+def test_execute_mounts_deps_and_sets_pythonpath(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(execmod.shutil, "which", lambda _x: "/usr/bin/docker")
+    class _R:
+        stdout, stderr, returncode = "", "", 0
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _R()
+    monkeypatch.setattr(execmod.subprocess, "run", fake_run)
+    execmod.execute("echo hi", image="python:3.12-slim", mount="/repo", deps="/host/deps")
+    argv = captured["cmd"]
+    assert f":{execmod._DEPS_MOUNT}" in " ".join(argv)                   # deps bind-mounted
+    assert f"PYTHONPATH={execmod._DEPS_MOUNT}" in argv                   # importable, no egress needed
+    assert "--network" in argv and argv[argv.index("--network") + 1] == "none"  # exploit run stays offline
+
+
+def test_install_packages_rejects_all_bad_names(monkeypatch):
+    monkeypatch.setattr(execmod.shutil, "which", lambda _x: "/usr/bin/docker")
+    called = {"ran": False}
+    monkeypatch.setattr(execmod.subprocess, "run", lambda *a, **k: called.__setitem__("ran", True))
+    res = execmod.install_packages(["--evil", "a;b"], deps="/d")
+    assert res.exit_code == 1 and not called["ran"]                      # never shells out on bad input

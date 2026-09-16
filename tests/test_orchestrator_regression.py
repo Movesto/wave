@@ -1339,3 +1339,21 @@ def test_dast_plan_empty_when_not_bootable():
 def test_dast_summarize():
     assert "live-app run" in dast.summarize([{"mode": "injection"}, {"mode": "injection"}])
     assert "no findings" in dast.summarize([])
+
+
+# ============================ 35. Rust serde deserialization is safe (MemWhale FP) ============================
+
+def test_rust_serde_yaml_not_flagged_deser(tmp_path):
+    # Rust serde deserialization into a typed struct is safe -- must NOT pin CWE-502 (real FP from MemWhale)
+    _write(tmp_path, "p.rs", "fn validate(t: &str) {\n  let m: Metadata = serde_yaml::from_str(t).unwrap();\n}\n")
+    cm = codemap.build(str(tmp_path))
+    finfo = next(iter(cm.files.values()))
+    _r, sinks, _d = repomap.scan_pins(finfo)
+    assert "deser" not in [lbl for _l, lbl, _c in sinks]
+
+def test_rust_real_cmd_sink_still_pins(tmp_path):
+    _write(tmp_path, "r.rs", "fn run(c: &str) {\n  Command::new(\"sh\").arg(\"-c\").arg(c);\n}\n")
+    cm = codemap.build(str(tmp_path))
+    finfo = next(iter(cm.files.values()))
+    _r, sinks, _d = repomap.scan_pins(finfo)
+    assert "cmd" in [lbl for _l, lbl, _c in sinks]          # no over-correction

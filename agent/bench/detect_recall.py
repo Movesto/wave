@@ -49,6 +49,7 @@ CASES = [
     # deterministic-precision cases: the layer that CAN decide statically must stay quiet
     ("idor-owned", "i.py", "from x import *\n@router.get('/o/{oid}')\ndef get_o(oid: int, user=Depends(current_user)):\n    o = db.query(O).get(oid)\n    if o.owner_id != user.id: raise E\n    return o\n", 3, "CWE-639", "clean", ("authz",)),
     ("frontend-fetch", "app/ui.jsx", "export function C(){\n  return fetch('/api/' + userInput);\n}\n", 2, "CWE-918", "clean", ("ssrf", "SQLi", "cmd", "path", "deser")),
+    ("rust-serde-safe", "sd.rs", "fn v(t: &str) {\n  let m: Meta = serde_yaml::from_str(t).unwrap();\n}\n", 2, "CWE-502", "clean", ("deser",)),
 ]
 
 

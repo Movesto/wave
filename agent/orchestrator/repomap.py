@@ -129,7 +129,9 @@ _SINKS_RUST = [
     ("path",     re.compile(r"File::(open|create)\s*\(|fs::(read|write|remove_file|File)")),
     ("ssrf",     re.compile(r"reqwest::|hyper::|ureq::|Client::new")),
     ("SQLi",     re.compile(r"sqlx::query\s*\(|\.execute\s*\(\s*&?format!|diesel::sql_query|rusqlite")),
-    ("deser",    re.compile(r"bincode::deserialize|serde_yaml::from|serde_pickle")),
+    # NB: Rust `serde` deserialization (serde_yaml/serde_json/bincode/serde_pickle) is SAFE -- it parses into
+    # typed values with no code-execution gadgets (no pickle __reduce__ / Java readObject). It is NOT CWE-502,
+    # so there is deliberately no deser sink here (flagging it was a false positive on real repos, e.g. MemWhale).
 ]
 # C / C++: the signature classes are memory-safety (buffer/format) + command/path -- proving memory safety
 # needs a sanitizer we don't run, so those pin for RECALL but land needs-review downstream.

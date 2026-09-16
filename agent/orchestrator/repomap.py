@@ -379,6 +379,30 @@ _OWNERSHIP = re.compile(r"current_user|request\.user|req\.user|\.user_id|\bowner
                         r"@roles|hasrole|require_role|AdminToken|AdminUser|CurrentUser", re.I)
 
 
+# --- custom-named sinks (framework/app wrappers the per-language tables can't enumerate) --------------
+# High-signal danger tokens that rarely appear in a benign function name -> catch run_shell()/exec_sql()/
+# unsafe_render()-style wrappers the exact-name sink tables miss. Recall net; the class is inferred.
+_CUSTOM_SINK = re.compile(
+    r"\b\w*(shell|popen|spawn|subprocess|unpickle|deserial|unmarshal|unserialize|rawquery|raw_query|"
+    r"exec_sql|sql_exec|unsafe|render_template_string)\w*\s*\(\s*[^)\s]"
+    r"|\b(run|exec|eval|invoke)_(cmd|command|shell|sql|query|code|script|template)\s*\(", re.I)
+
+
+def _custom_sink_class(name):
+    n = name.lower()
+    if any(k in n for k in ("shell", "popen", "spawn", "subprocess", "cmd", "command")):
+        return "cmd"
+    if any(k in n for k in ("unpickle", "deserial", "unmarshal", "unserialize")):
+        return "deser"
+    if any(k in n for k in ("sql", "query")):
+        return "SQLi"
+    if any(k in n for k in ("render", "template", "unsafe")):
+        return "xss"
+    if any(k in n for k in ("eval", "code", "script")):
+        return "eval"
+    return "other"
+
+
 def _authz_pins(finfo, src_lines):
     """No-sink IDOR / broken-object-authorization LEADS: a route HANDLER that fetches a resource by an
     id-like param but shows no ownership/role check. A recall signal (the detector/model decide), scoped to
@@ -424,6 +448,13 @@ def scan_pins(finfo):
                     sinks.append((i, label, code))
                 matched = True
                 break
+        if not matched:                                    # custom-named danger wrapper (run_shell/exec_sql/...)
+            cm = _CUSTOM_SINK.search(s)
+            if cm:
+                label = _custom_sink_class(cm.group(0))
+                if not (is_client and label in reachability.SERVER_ONLY_CLASSES):
+                    sinks.append((i, label, code))
+                matched = True
         if not matched:                                    # dynamic dispatch / reflection the call graph misses
             for rx, kind in eyes._DYNAMIC:
                 if kind == "route registration":

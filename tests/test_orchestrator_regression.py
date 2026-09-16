@@ -1214,3 +1214,22 @@ def test_taint_const_and_sanitized_other_langs(tmp_path):
     # a constant (no param) -> unrelated; a wrapped value -> sanitized -- the precision signals, cross-lang
     assert _taint_of(tmp_path, "c.go", 'func h(){\n q:="SELECT 1"\n db.Query(q)\n}\n', 3) == "unrelated"
     assert _taint_of(tmp_path, "S.java", 'class C{void h(String id){\n int q=Integer.parseInt(id);\n db.query(q);\n}}\n', 3) == "sanitized"
+
+
+# ============================ 31. custom-named sink recall ============================
+
+def _custom_pins(tmp_path, body):
+    _write(tmp_path, "h.py", body)
+    cm = codemap.build(str(tmp_path))
+    finfo = next(iter(cm.files.values()))
+    _r, sinks, _d = repomap.scan_pins(finfo)
+    return [lbl for _ln, lbl, _c in sinks]
+
+def test_custom_sinks_detected_with_inferred_class(tmp_path):
+    assert "cmd" in _custom_pins(tmp_path, "def h(req):\n    run_shell_command(req.args['c'])\n")
+    assert "SQLi" in _custom_pins(tmp_path, "def h(req):\n    exec_sql('SELECT ' + req.args['q'])\n")
+    assert "deser" in _custom_pins(tmp_path, "def h(req):\n    unpickle_data(req.data)\n")
+    assert "xss" in _custom_pins(tmp_path, "def h(req):\n    unsafe_render(req.args['t'])\n")
+
+def test_custom_sink_quiet_on_benign_names(tmp_path):
+    assert _custom_pins(tmp_path, "def h():\n    a = run_report()\n    b = query_count()\n    return execute_plan()\n") == []

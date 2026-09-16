@@ -37,6 +37,8 @@ CASES = [
     ("php-cmd", "n.php", "<?php\nfunction h(){\n  system($_GET['c']);\n}\n", 3, "CWE-78", "vuln", None),
     ("rust-cmd", "o.rs", "fn h(c: &str) {\n    Command::new(\"sh\").arg(\"-c\").arg(c);\n}\n", 2, "CWE-78", "vuln", None),
     ("ruby-cmd", "p.rb", "def h(id)\n  system(\"echo #{id}\")\nend\n", 2, "CWE-78", "vuln", None),
+    ("custom-cmd", "cx.py", "def h(req):\n    run_shell_command(req.args['c'])\n", 2, "CWE-78", "vuln", None),
+    ("custom-sql", "cy.py", "def h(req):\n    exec_sql('SELECT ' + req.args['q'])\n", 2, "CWE-89", "vuln", None),
     # deterministic-precision cases: the layer that CAN decide statically must stay quiet
     ("idor-owned", "i.py", "from x import *\n@router.get('/o/{oid}')\ndef get_o(oid: int, user=Depends(current_user)):\n    o = db.query(O).get(oid)\n    if o.owner_id != user.id: raise E\n    return o\n", 3, "CWE-639", "clean", ("authz",)),
     ("frontend-fetch", "app/ui.jsx", "export function C(){\n  return fetch('/api/' + userInput);\n}\n", 2, "CWE-918", "clean", ("ssrf", "SQLi", "cmd", "path", "deser")),

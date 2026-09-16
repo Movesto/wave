@@ -155,10 +155,20 @@ wave config set key   "<your OpenRouter key>"
 wave all /path/to/target-repo --patch
 ```
 
-Useful flags: `--online` (give the model opt-in `web_search`/`web_read` for unfamiliar APIs), `--patch`
-(run Stage 4 — dry-run by default; add `--write` to keep a patch that passed both gates), `--notes-budget N`
-/ `--detect-budget N` / `--prove-budget N` (bound each stage; the model *selects* which files to deep-read on
-large repos).
+Useful flags:
+- `--all-files` — deep-read **every** parsed source file, not just the ones with a recognized sink pin.
+  Pinning becomes a priority *order* rather than a filter, so a vuln in a file with no matched sink pattern is
+  still read. Best for small/medium repos; cost scales with repo size (this is the "scan everything" mode).
+- `--interactive` — before deep-reading, wave proposes the file set and lets you **prune or extend** it
+  (`drop N,M` / `add <substr>` / `list` / `quit`); tree-sitter effectively proposes the file list and you
+  curate it. Without it, wave auto-proceeds.
+- `--notes-budget N` / `--detect-budget N` / `--prove-budget N` — bound each stage. For the notebook: **at or
+  below N, ALL pinned files are read** (full coverage, default 40); only when pinned files *exceed* N does the
+  model select the N worth deep-reading. Lower it on a monorepo, raise it for full small-repo coverage.
+- `--online` — give the model opt-in `web_search`/`web_read` (network egress) for unfamiliar APIs; off by
+  default (the box stays local).
+- `--patch` — run Stage 4 (dry-run by default; add `--write` to keep a patch that passed both gates).
+- `--no-reach-gate` — disable the reachability gate (use on libraries with public-API entry points, no routes).
 
 Read **`<repo>/wave_results/wave_report.md`** — the human-readable findings (regenerate anytime with
 `wave report <repo>`). The machine artifacts also land in the repo: `wave_findings.jsonl` (verdicts) and
@@ -168,12 +178,16 @@ verdict is skipped, a `believed`/`blocked` lead is retried.
 ### 4. Or run a single stage
 
 ```bash
-wave eyes   <repo> [--notes]   # map + deterministic index; --notes runs the notebook
-wave detect <repo>             # clean-room falsify the notebook's findings
-wave prove  <repo> [--online]  # the confirmation ladder
-wave patch  <repo> [--write]   # patch + reverify the confirmed findings
-wave report <repo>             # (re)generate the readable report
+wave eyes   <repo> [--notes] [--all-files] [--interactive]  # map + index; --notes runs the notebook
+wave detect <repo>                                          # clean-room falsify the notebook's findings
+wave prove  <repo> [--online]                               # the confirmation ladder
+wave patch  <repo> [--write]                                # patch + reverify the confirmed findings
+wave report <repo>                                          # (re)generate the readable report
 ```
+
+`wave eyes <repo>` with no flags is instant (deterministic map + attack-surface index, no model). Add
+`--notes` to run the model's per-file notebook; combine with `--all-files` to read the whole repo or
+`--interactive` to curate the file set first. Model/endpoint settings live under `wave config set`/`wave config show`.
 
 ---
 

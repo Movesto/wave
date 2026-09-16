@@ -122,3 +122,35 @@ def gate(cmap, sink_func_name):
         note += (f"  [LOW confidence: {sorted(set(ambig))} is defined in multiple places -- this name-based "
                  f"call edge may be false (open Q 10.1)]")
     return True, conf, note
+
+
+# --- Desktop-app context: a Tauri/Electron app is single-user + local, so there is NO multi-tenant
+# authorization boundary -- an IDOR/authz "finding" there is usually moot (the user owns their own data).
+# Injection classes still matter (untrusted files, a synced/remote backend), so only authz is downgraded.
+import functools
+from pathlib import Path as _Path
+
+_DESKTOP_SKIP = {"node_modules", ".git", "target", "dist", "build", "vendor", ".venv", "venv"}
+
+
+@functools.lru_cache(maxsize=64)
+def is_desktop_app(target):
+    """True for a Tauri or Electron desktop app (single-user, local). Deterministic; cached per path."""
+    root = _Path(target)
+    try:
+        if (root / "src-tauri").is_dir():                    # Tauri's conventional backend dir
+            return True
+        for ct in list(root.rglob("Cargo.toml"))[:30]:       # `tauri` as a dependency
+            if any(s in ct.parts for s in _DESKTOP_SKIP):
+                continue
+            if re.search(r'(?im)^\s*tauri\s*=', ct.read_text(encoding="utf-8", errors="replace")):
+                return True
+        for pj in list(root.rglob("package.json"))[:30]:     # electron / @tauri-apps in package.json
+            if any(s in pj.parts for s in _DESKTOP_SKIP):
+                continue
+            t = pj.read_text(encoding="utf-8", errors="replace").lower()
+            if '"electron"' in t or "@tauri-apps" in t:
+                return True
+    except Exception:
+        pass
+    return False

@@ -1385,3 +1385,29 @@ def test_cwe502_remediation_is_language_neutral():
 def test_notebook_prompt_marks_safe_patterns():
     s = nb._NOTE_SYS
     assert "serde" in s and "Value` indexing" in s and "argv-list" in s   # the MemWhale over-flags, pre-empted
+
+
+# ============================ 38. desktop-app authz downgrade (Tauri/Electron single-user) ============
+
+def test_is_desktop_app_detects_tauri_and_electron(tmp_path):
+    (tmp_path / "src-tauri").mkdir()
+    (tmp_path / "src-tauri" / "Cargo.toml").write_text("[dependencies]\ntauri = \"1\"\n", encoding="utf-8")
+    assert reachability.is_desktop_app(str(tmp_path)) is True
+    e = tmp_path / "electronapp"
+    e.mkdir()
+    (e / "package.json").write_text('{"dependencies": {"electron": "^30"}}', encoding="utf-8")
+    assert reachability.is_desktop_app(str(e)) is True
+
+def test_is_desktop_app_false_for_plain_repo(tmp_path):
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    assert reachability.is_desktop_app(str(tmp_path)) is False
+
+def test_desktop_authz_downgrades_only_authz():
+    c_authz = _cand(cwe="CWE-639"); c_authz.__dict__["family"] = "IDOR"
+    c_sqli = _cand(cwe="CWE-89"); c_sqli.__dict__["family"] = "sqli"
+    r1 = prove._desktop_authz({"verdict": "anomalous_state", "why": "no check"}, c_authz, True)
+    assert r1["verdict"] == "believed" and r1["confidence"] == "low" and r1["desktop_context"]
+    r2 = prove._desktop_authz({"verdict": "confirmed", "why": "marker"}, c_sqli, True)
+    assert r2["verdict"] == "confirmed" and "desktop_context" not in r2      # injection untouched
+    r3 = prove._desktop_authz({"verdict": "anomalous_state", "why": "x"}, c_authz, False)
+    assert r3["verdict"] == "anomalous_state"                                # not a desktop app -> untouched

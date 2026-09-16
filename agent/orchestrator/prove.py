@@ -233,6 +233,29 @@ def _apply_gate(rec, c, cmap):
     return rec
 
 
+_AUTHZ_CWE = {"CWE-639", "CWE-284", "CWE-862", "CWE-863", "CWE-566"}
+
+
+def _desktop_authz(rec, c, desktop):
+    """On a single-user Tauri/Electron DESKTOP app there is no multi-tenant boundary, so an authz/IDOR finding
+    is usually moot (the user owns their own data). Downgrade + note -- never touches injection classes, which
+    stay real (a desktop app can still process untrusted files / hit a shared backend)."""
+    if not desktop:
+        return rec
+    fam = (getattr(c, "family", "") or "").lower()
+    if not (getattr(c, "cwe", "") in _AUTHZ_CWE or any(k in fam for k in
+                                                       ("authz", "idor", "authoriz", "access control", "bola"))):
+        return rec
+    rec["desktop_context"] = True
+    rec["confidence"] = "low"
+    if rec.get("verdict") == "anomalous_state":              # not a real boundary crossing on a single-user app
+        rec["verdict"] = "believed"
+    rec["why"] = ("[desktop app] single-user Tauri/Electron app -- no multi-tenant authorization boundary, so "
+                  "this authz/IDOR is likely moot; only real if a multi-user / remote / shared-backend threat "
+                  "model applies. " + rec.get("why", ""))
+    return rec
+
+
 def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=True, max_steps=8, gate=True,
         online=False):
     """Prove the detector's survivors (severity order, up to `budget`). Writes per-candidate verdicts to
@@ -247,6 +270,7 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
 
     cmap = codemap.build(target)
     rel_index = {_rel(target, p): fi for p, fi in cmap.files.items()}
+    desktop = reachability.is_desktop_app(target)           # single-user Tauri/Electron -> downgrade authz/IDOR
 
     case = recorder.CaseFile(target)
     findings_log = out_dir / "wave_findings.jsonl"
@@ -283,6 +307,7 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
             rec = _prove_one(model, target, c, have_docker, max_steps, online=online)
             if gate:                                        # untrusted-reachability gate on confirmations
                 rec = _apply_gate(rec, c, cmap)
+            rec = _desktop_authz(rec, c, desktop)           # single-user desktop app: authz/IDOR is moot
             if rec.get("verdict") == "confirmed":           # final EVIDENCE AUDIT (only high-stakes confirms):
                 from . import audit                          # re-run the proof + a fresh clean-room skeptic
                 av, anote = audit.audit(model, c, rec)

@@ -1357,3 +1357,20 @@ def test_rust_real_cmd_sink_still_pins(tmp_path):
     finfo = next(iter(cm.files.values()))
     _r, sinks, _d = repomap.scan_pins(finfo)
     assert "cmd" in [lbl for _l, lbl, _c in sinks]          # no over-correction
+
+
+# ============================ 36. authz is server-side (frontend authz suppressed; MemWhale App.tsx FP) ====
+
+def test_frontend_authz_suppressed_backend_kept(tmp_path):
+    _write(tmp_path, "src/App.tsx", "export function App(){\n  const approve = (id) => callBackend('approve_lesson', { id });\n  return null;\n}\n")
+    _write(tmp_path, "api.py", "from x import *\n@router.get('/o/{oid}')\ndef get_o(oid: int):\n    return db.query(O).get(oid)\n")
+    cm = codemap.build(str(tmp_path))
+    pins = {}
+    for p, f in cm.files.items():
+        _r, s, _d = repomap.scan_pins(f)
+        pins[__import__("pathlib").Path(p).name] = [lbl for _l, lbl, _c in s]
+    assert "authz" not in pins.get("App.tsx", [])            # authz lives server-side, not in a React handler
+    assert "authz" in pins.get("api.py", [])                 # backend authz still flagged (no over-correction)
+
+def test_authz_in_server_only_sets():
+    assert "authz" in reachability.SERVER_ONLY_CLASSES and "CWE-639" in reachability.SERVER_ONLY_CWE

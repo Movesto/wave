@@ -20,8 +20,12 @@ from collections import deque
 # proven in frontend code is a mislabel, not a vuln (the client/server analogue of the reachability gate). ---
 
 # server-side classes that make no sense in the browser (xss + redirect DO occur client-side, so not here)
-SERVER_ONLY_CLASSES = {"ssrf", "sqli", "nosqli", "cmd", "path", "deser"}
-SERVER_ONLY_CWE = {"CWE-918", "CWE-89", "CWE-943", "CWE-78", "CWE-22", "CWE-502", "CWE-95"}
+# authorization is enforced SERVER-side: a browser/React click-handler that forwards an id is not where the
+# authz check lives (the backend command is), so authz/IDOR in a frontend file is misplaced -- treat it like
+# the other server-only classes (MemWhale flagged approveLesson/deleteLesson in App.tsx this way).
+SERVER_ONLY_CLASSES = {"ssrf", "sqli", "nosqli", "cmd", "path", "deser", "authz", "idor", "access", "bola"}
+SERVER_ONLY_CWE = {"CWE-918", "CWE-89", "CWE-943", "CWE-78", "CWE-22", "CWE-502", "CWE-95",
+                   "CWE-639", "CWE-284", "CWE-862", "CWE-863", "CWE-566"}
 
 # browser-only globals -- their presence in the source is a reliable "this runs in a browser" signal (Node
 # has no window/document/localStorage), and catches a plain .js util that no path/suffix rule would.

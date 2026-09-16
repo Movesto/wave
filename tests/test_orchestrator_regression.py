@@ -1233,3 +1233,40 @@ def test_custom_sinks_detected_with_inferred_class(tmp_path):
 
 def test_custom_sink_quiet_on_benign_names(tmp_path):
     assert _custom_pins(tmp_path, "def h():\n    a = run_report()\n    b = query_count()\n    return execute_plan()\n") == []
+
+
+# ============================ 32. CWE metadata + report enrichment ============================
+
+from agent.orchestrator import cwe_info
+
+def test_cwe_describe_known_and_fallback():
+    name, sev, rem = cwe_info.describe("CWE-89")
+    assert "SQL Injection" in name and sev == "high" and "parameteriz" in rem.lower()
+    # class fallback when the CWE id is missing/fuzzy
+    name2, sev2, _ = cwe_info.describe("", "authz")
+    assert "Authorization" in name2 or "IDOR" in name2
+    # unknown -> generic, never a bare id
+    name3, sev3, rem3 = cwe_info.describe("CWE-99999", "mystery")
+    assert name3 and sev3 == "unknown" and rem3
+
+def test_cwe_severity_ordering():
+    assert cwe_info.sev_rank("CWE-78") < cwe_info.sev_rank("CWE-89")      # cmd(critical) more severe than sqli(high)
+    assert cwe_info.sev_rank("CWE-89") < cwe_info.sev_rank("CWE-601")     # sqli(high) more severe than redirect(medium)
+
+def test_report_shows_cwe_name_and_remediation(tmp_path):
+    from agent.orchestrator import report
+    (tmp_path / "wave_findings.jsonl").write_text(
+        json.dumps({"file": "db.py", "line": 1, "class": "sqli", "cwe": "CWE-89", "verdict": "confirmed",
+                    "evidence": "marker in SQL", "confidence": "high"}) + "\n", encoding="utf-8")
+    report.generate(str(tmp_path), model="m")
+    md = (tmp_path / "WAVE_REPORT.md").read_text(encoding="utf-8")
+    assert "SQL Injection" in md and "· high" in md and "how to fix" in md and "parameteriz" in md.lower()
+
+def test_report_orders_by_severity(tmp_path):
+    from agent.orchestrator import report
+    rows = [{"file": "a.py", "line": 1, "class": "redirect", "cwe": "CWE-601", "verdict": "believed", "why": "x"},
+            {"file": "b.py", "line": 2, "class": "cmd", "cwe": "CWE-78", "verdict": "believed", "why": "y"}]
+    (tmp_path / "wave_findings.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    report.generate(str(tmp_path), model="m")
+    md = (tmp_path / "WAVE_REPORT.md").read_text(encoding="utf-8")
+    assert md.index("Command Injection") < md.index("Open Redirect")     # critical before medium

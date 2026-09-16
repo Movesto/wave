@@ -47,8 +47,10 @@ def _last(findings):
 
 
 def _sev_key(r):
+    """Order findings by severity (critical first), then high-confidence first."""
+    from . import cwe_info
     conf = 1 if str(r.get("confidence", "")).lower() == "high" else 0
-    return (conf, str(r.get("cwe", "")))
+    return (-cwe_info.sev_rank(r.get("cwe", ""), r.get("class", "")), conf)
 
 
 def generate(target, out_dir=None, model="", patches_path=None):
@@ -101,10 +103,13 @@ def generate(target, out_dir=None, model="", patches_path=None):
         lines.append(_HEAD[v] + f"  [{len(items)}]")
         lines.append("")
         for r in sorted(items, key=_sev_key, reverse=True):
-            cwe = r.get("cwe") or r.get("class", "")
+            from . import cwe_info
+            cwe = r.get("cwe") or ""
+            name, sev, remediation = cwe_info.describe(cwe, r.get("class", ""))
             loc = f"{r.get('file')}:{r.get('line')}"
             unit = f"  `{r.get('unit')}`" if r.get("unit") else ""
-            lines.append(f"### [{cwe}] {r.get('class', '')} — {loc}{unit}")
+            tag = (cwe + " " if cwe else "") + name + f" · {sev}"
+            lines.append(f"### {tag} — {loc}{unit}")
             if r.get("sink"):
                 lines.append(f"- **sink:** `{r['sink']}`")
             ev = r.get("evidence") or ""
@@ -129,6 +134,9 @@ def generate(target, out_dir=None, model="", patches_path=None):
                 if st == "fixed" and pat.get("patch"):
                     snippet = "\n".join(pat["patch"].splitlines()[:12])
                     lines.append("\n```\n" + snippet + "\n```")
+            # remediation guidance for actionable findings that don't already carry a certified fix
+            if v in ("confirmed", "anomalous_state", "believed") and not (pat and pat.get("status") == "fixed"):
+                lines.append(f"- **how to fix:** {remediation}")
             lines.append("")
 
     if not findings:

@@ -65,3 +65,40 @@ def test_prepare_drops_unusable(tmp_path):
     src.write_text("\n".join(json.dumps(r) for r in recs), encoding="utf-8")
     rep = pt.prepare(str(src), str(tmp_path / "sft"), eval_frac=0.0, seed=0)
     assert rep["usable"] == 1 and rep["dropped_unusable"] == 1
+
+
+from agent.train import validate_dataset as vd
+
+
+def _ex(messages, rid="t:a:1"):
+    return {"messages": messages, "meta": {"id": rid}}
+
+
+def test_validate_clean_example():
+    e = _ex([{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+             {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "function": {"name": "run_command", "arguments": {}}}]},
+             {"role": "tool", "tool_call_id": "1", "name": "run_command", "content": "uid=0"},
+             {"role": "assistant", "content": "confirmed"}])
+    assert vd.check_example(e) == []
+
+
+def test_validate_catches_empty_assistant_and_orphan_tool():
+    e = _ex([{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+             {"role": "assistant", "content": ""},                                  # empty turn
+             {"role": "tool", "tool_call_id": "99", "content": "x"}])                # orphan tool (no name, no call)
+    probs = vd.check_example(e)
+    assert any("empty assistant" in p for p in probs) and any("not linked" in p for p in probs)
+
+
+def test_validate_flags_overlong():
+    big = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+           {"role": "assistant", "content": "x" * 80000}]
+    assert any("truncate" in p for p in vd.check_example(_ex(big), max_tokens=8000))
+
+
+def test_validate_run_on_prepared(tmp_path):
+    p = tmp_path / "train.jsonl"
+    p.write_text(json.dumps(_ex([{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+                                 {"role": "assistant", "content": "done"}])) + "\n", encoding="utf-8")
+    r = vd.validate(str(p))
+    assert r["total"] == 1 and r["bad"] == 0 and r["pass_rate"] == 1.0

@@ -39,7 +39,11 @@ _NOTE_SYS = (
     "the map won't hint them; you must spot them. ALSO flag a CRASH / DoS (class 'other'): an unchecked "
     "operation on attacker-controlled input that panics or throws -- a Rust `.unwrap()`/`.expect()` or index "
     "on a request value, a parse with no error handling, an unchecked cast/slice -- these have no injection "
-    "sink either, so you must spot them. Output ONE JSON object, nothing else:\n"
+    "sink either, so you must spot them. KNOWN-SAFE patterns -- do NOT flag these: Rust `serde` "
+    "deserialization (serde_yaml/serde_json/bincode into a typed value) executes no code and is NOT CWE-502; "
+    "serde_json `Value` indexing (`v[\"k\"]`, `v[i]`) is TOTAL -- it returns Null, it does not panic; an "
+    "argv-list exec (Command/execFile/subprocess without a shell) is not command injection. Output ONE JSON "
+    "object, nothing else:\n"
     '{"purpose": "<what this file/module does, one line>", '
     '"untrusted_inputs": "<request params/body/headers/args an external caller controls, or none>", '
     '"findings": [{"line": <int>, "function": "<name>", "class": "<sqli|nosqli|cmd|eval|path|ssrf|xss|'

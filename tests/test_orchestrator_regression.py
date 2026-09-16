@@ -1374,3 +1374,14 @@ def test_frontend_authz_suppressed_backend_kept(tmp_path):
 
 def test_authz_in_server_only_sets():
     assert "authz" in reachability.SERVER_ONLY_CLASSES and "CWE-639" in reachability.SERVER_ONLY_CWE
+
+
+# ============================ 37. remediation + notebook safe-pattern guidance (MemWhale follow-ups) ====
+
+def test_cwe502_remediation_is_language_neutral():
+    _n, _s, rem = cwe_info.describe("CWE-502")
+    assert "Rust serde" in rem and "readObject" in rem     # not pickle-only; notes Rust serde is safe
+
+def test_notebook_prompt_marks_safe_patterns():
+    s = nb._NOTE_SYS
+    assert "serde" in s and "Value` indexing" in s and "argv-list" in s   # the MemWhale over-flags, pre-empted

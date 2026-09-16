@@ -16,7 +16,7 @@ _CWE = {
     "CWE-80":   ("Cross-Site Scripting (XSS)", "high", "Escape HTML special characters on output; prefer a templating engine that auto-escapes."),
     "CWE-22":   ("Path Traversal", "high", "Resolve the real path and confirm it stays under an allowed base dir; reject '..'; use a safe path-join."),
     "CWE-918":  ("Server-Side Request Forgery (SSRF)", "high", "Allow-list destination hosts; block internal/link-local ranges; disable redirects to internal targets."),
-    "CWE-502":  ("Insecure Deserialization", "critical", "Never deserialize untrusted data with pickle/native serializers; use a safe format (JSON) with a schema."),
+    "CWE-502":  ("Insecure Deserialization", "critical", "Don't feed untrusted data to a deserializer that can execute code or instantiate arbitrary types (pickle, Java readObject, PHP unserialize, YAML full-load); use a safe, typed, data-only format. (Note: Rust serde / typed-struct deserialization does NOT execute code and is not this.)"),
     "CWE-601":  ("Open Redirect", "medium", "Only allow relative paths or an allow-list of hosts; reject absolute and protocol-relative URLs."),
     "CWE-95":   ("Code Injection (eval)", "critical", "Never eval/exec untrusted input; use a safe parser or a capability-free sandbox."),
     "CWE-1336": ("Server-Side Template Injection", "high", "Never render user input as a template; pass it as data into a fixed template."),

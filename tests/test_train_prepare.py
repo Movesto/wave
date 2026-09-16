@@ -102,3 +102,41 @@ def test_validate_run_on_prepared(tmp_path):
                                  {"role": "assistant", "content": "done"}])) + "\n", encoding="utf-8")
     r = vd.validate(str(p))
     assert r["total"] == 1 and r["bad"] == 0 and r["pass_rate"] == 1.0
+
+
+from agent.train import eval_drives as ed
+
+
+def _conc(verdict):
+    return {"role": "assistant", "content": "", "tool_calls": [{"id": "9", "function": {"name": "conclude", "arguments": {"verdict": verdict}}}]}
+
+
+def test_forced_case_holds_out_the_conclusion():
+    ex = {"meta": {"verdict": "confirmed"}, "messages": [
+        {"role": "system", "content": "s"}, {"role": "user", "content": "brief"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "function": {"name": "run_command", "arguments": {}}}]},
+        {"role": "tool", "tool_call_id": "1", "content": "uid=0"}, _conc("confirmed")]}
+    fc = ed.forced_case(ex)
+    assert fc is not None
+    prefix, expected = fc
+    assert expected == "confirmed"
+    assert all(ed._conclude_verdict(m) is None for m in prefix)   # the conclusion is held out of the prompt
+
+def test_score_overall_and_per_label():
+    r = ed.score([("confirmed", "confirmed"), ("refuted", "refuted"), ("refuted", "confirmed"),
+                  ("anomalous_state", "believed")])
+    assert r["accuracy"] == 0.5 and r["per_label"]["refuted"] == "1/2"
+    assert r["confusion"]["refuted->confirmed"] == 1
+
+def test_run_with_fake_model(tmp_path):
+    ex = {"meta": {"verdict": "refuted"}, "messages": [
+        {"role": "system", "content": "s"}, {"role": "user", "content": "b"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "function": {"name": "run_command", "arguments": {}}}]},
+        {"role": "tool", "tool_call_id": "1", "content": "clean"}, _conc("refuted")]}
+    p = tmp_path / "eval.jsonl"
+    p.write_text(json.dumps(ex) + "\n", encoding="utf-8")
+    class _M:  # a model that always concludes 'refuted'
+        def chat(self, messages, tools=None, temperature=0):
+            return {"tool_calls": [{"id": "z", "function": {"name": "conclude", "arguments": {"verdict": "refuted"}}}]}
+    r = ed.run(_M(), str(p))
+    assert r["total"] == 1 and r["accuracy"] == 1.0

@@ -495,6 +495,19 @@ def test_provision_signal():
     assert not inv._provision_signal("WAVE_RESULT: ok")
 
 
+def test_expected_lang_from_image():
+    # the reverify container pins the language; the loop uses this to correct a wrong-language guess
+    assert inv._expected_lang("rust:1-slim")[0] == "Rust"
+    assert inv._expected_lang("rust:1-slim")[1] == "cargo"
+    assert inv._expected_lang("golang:1.22")[0] == "Go"
+    assert inv._expected_lang("python:3.12-slim")[0] == "Python"
+    assert inv._expected_lang("node:20-slim")[0] == "JavaScript/TypeScript"
+    assert inv._expected_lang("mcr.microsoft.com/dotnet/sdk:8.0")[0] == "C#/.NET"
+    assert inv._expected_lang("weird-unknown-image")[0] is None
+    note = inv._lang_note("Rust", "cargo")
+    assert "Rust" in note and "cargo" in note and "other language" in note
+
+
 class _Res:
     def __init__(self, out): self.command, self.stdout, self.stderr, self.exit_code, self.duration, self.timed_out = "cmd", out, "", 0, 0.1, False
 

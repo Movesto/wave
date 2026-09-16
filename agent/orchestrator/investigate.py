@@ -172,6 +172,47 @@ def _is_repro_attempt(cmd):
     return any(tok in (cmd or "") for tok in _REPRO_TOKENS)
 
 
+# The image PINS the language/toolchain. A reasoning model sometimes MISREADS the language (it called a Rust
+# file "V" because both use `fn`/`pub`, then hunted a nonexistent `v` compiler and never ran cargo) and burns
+# the whole budget without ever compiling. When the container is a known-language image, insist ONCE on that
+# language's real build/run tool so the reverify actually EXECUTES instead of chasing a phantom toolchain.
+_IMAGE_LANG = (
+    ("rust", ("Rust", "cargo", "cargo (cargo new + cargo run)")),
+    ("golang", ("Go", "go ", "go run")),
+    ("dotnet", ("C#/.NET", "dotnet", "dotnet run")),
+    ("openjdk", ("Java", "java", "javac + java")),
+    ("temurin", ("Java", "java", "javac + java")),
+    ("gradle", ("Java", "java", "javac + java")),
+    ("maven", ("Java", "java", "javac + java")),
+    ("kotlin", ("Kotlin", "kotlinc", "kotlinc + java -jar")),
+    ("swift", ("Swift", "swift", "swift <file>")),
+    ("scala", ("Scala", "scala", "scala-cli")),
+    ("elixir", ("Elixir", "elixir", "elixir <file> or mix")),
+    ("haskell", ("Haskell", "ghc", "runghc <file>")),
+    ("dart", ("Dart", "dart", "dart run")),
+    ("perl", ("Perl", "perl", "perl <file>")),
+    ("ruby", ("Ruby", "ruby", "ruby <file>")),
+    ("php", ("PHP", "php", "php <file>")),
+    ("node", ("JavaScript/TypeScript", "node", "node/tsx")),
+    ("python", ("Python", "python", "python3")),
+)
+
+
+def _expected_lang(image):
+    """(name, tool_token, hint) for a known-language toolchain image, else (None, None, None). Lets the loop
+    correct a model that misidentifies the language and never invokes the right compiler/interpreter."""
+    im = (image or "").lower()
+    for key, spec in _IMAGE_LANG:
+        if key in im:
+            return spec
+    return (None, None, None)
+
+
+def _lang_note(name, hint):
+    return (f"\nNOTE: this file is {name} and the container is a {name} toolchain -- do NOT treat it as any "
+            f"other language or hunt for another compiler. Build the repro with {hint} and RUN it, then conclude.")
+
+
 def _provision_signal(text):
     t = (text or "").lower()
     return any(s in t for s in _PROV_SIGNALS)
@@ -351,6 +392,8 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
     believed_nudged = False                                 # one-time: a belief must cite evidence
     repro_attempted = repro_forced = False                  # a 'believed' with NO repro attempt is pushed back once
     recon_streak, recon_nudged = 0, False                   # consecutive read-only cmds -> one mid-loop nudge
+    exp_name, exp_tok, exp_hint = _expected_lang(image)     # correct a wrong-language guess (e.g. Rust read as "V")
+    used_expected, lang_nudged = False, False
     for step in range(max_steps):
         try:
             msg = model.chat(messages, tools=tools, temperature=0.2)
@@ -443,6 +486,12 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 digest += ("\nNOTE: you ALREADY ran this exact command -- do NOT repeat it. Stop reading; "
                            "TEST the vulnerability with a payload or CONCLUDE now.")
             seen_cmds.add(cmd)
+            if exp_tok and exp_tok in cmd:                   # model invoked the right toolchain -> stop correcting
+                used_expected = True
+            if (exp_name and repro_expected and not used_expected and not lang_nudged
+                    and ran >= 2 and step < max_steps - 1):  # 2 recon steps but never the right compiler -> correct once
+                lang_nudged = True
+                digest += _lang_note(exp_name, exp_hint)
             if recon_streak >= 3 and not repro_attempted and not recon_nudged and step < max_steps - 2:
                 recon_nudged = True                          # read-thrash: burning the budget on reads, not tests
                 digest += (f"\nNOTE: you have run {recon_streak} read-only commands and TESTED nothing. Reading "
@@ -544,6 +593,8 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
     ran = 0
     repro_attempted = repro_forced = False                  # force a repro before 'believed' on a provable finding
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
+    exp_name, exp_tok, exp_hint = _expected_lang(image)     # correct a wrong-language guess (e.g. Rust read as "V")
+    used_expected, lang_nudged = False, False
     for step in range(max_steps):
         user = (f"HYPOTHESIS / TASK:\n{brief}\n\nWORK SO FAR:\n{_render(trail)}\n\n"
                 f"Steps left: {max_steps - step}. Your next action (one json object):")
@@ -583,6 +634,12 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
                 summ += ("\nNOTE: you already ran this EXACT command. Do NOT repeat it -- READ the output "
                          "above and either CONCLUDE now (if it proves or refutes the issue) or try a "
                          "DIFFERENT command.")
+            if exp_tok and exp_tok in cmd:                  # model invoked the right toolchain -> stop correcting
+                used_expected = True
+            if (exp_name and repro_expected and not used_expected and not lang_nudged
+                    and ran >= 2 and step < max_steps - 1):  # 2 recon steps but never the right compiler -> correct once
+                lang_nudged = True
+                summ += _lang_note(exp_name, exp_hint)
             trail.append((cmd, summ))
         elif kind == "conclude":
             verdict = str(act.get("verdict", "believed")).lower()

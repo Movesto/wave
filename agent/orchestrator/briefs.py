@@ -171,7 +171,9 @@ def _rust_brief(candidate, target, rel, code, fn):
     return (
         f"File: {rel}. Function: {candidate.unit}. Suspected {candidate.cwe} ({candidate.family}); "
         f"sink: {candidate.sink}.\n\nCode around the sink:\n{code}\n\n"
-        f"This is RUST -- you cannot import+call it like Python; you must COMPILE a minimal repro and RUN it. "
+        f"This file is `{rel}` -- it is RUST (a `.rs` file), NOT any other language; do not second-guess this or "
+        f"go looking for another compiler. You cannot import+call it like Python; you must COMPILE a minimal repro "
+        f"and RUN it with cargo. "
         f"The repo is mounted at /work (read it for the exact logic/types). Because EACH command runs in a "
         f"FRESH container, do the WHOLE repro in ONE command, and use network 'host' on that command so cargo "
         f"can fetch crates (set image rust:1-slim). Recipe:\n"
@@ -325,7 +327,8 @@ def _compiled_brief(candidate, target, rel, code, fn, lang):
     return (
         f"File: {rel}. Function: {candidate.unit}. Suspected {candidate.cwe} ({candidate.family}); "
         f"sink: {candidate.sink}.\n\nCode around the sink:\n{code}\n\n"
-        f"This is {c['name']}: you cannot reliably import+call one function of it in isolation like Python -- "
+        f"The file `{rel}` is {c['name']}, NOT any other language -- do not second-guess this or hunt for a "
+        f"different compiler. You cannot reliably import+call one function of it in isolation like Python -- "
         f"stand up a minimal standalone repro and RUN it. The repo is mounted at /work (read it for the exact "
         f"logic/types). Because "
         f"EACH command runs in a FRESH container, do the WHOLE repro in ONE command, and use network 'host' on "

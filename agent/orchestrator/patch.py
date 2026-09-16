@@ -68,11 +68,20 @@ def _apply(file, slice_src, new_src):
     return code
 
 
-def gen_patch(model, c):
-    """Model rewrites the vulnerable function. Returns the fixed source (a fenced code block) or None."""
+def gen_patch(model, c, attempts=3):
+    """Model rewrites the vulnerable function. Returns the fixed source (a fenced code block) or None.
+    Retries a few times: a reasoning model occasionally spends its whole budget inside <think> and emits no
+    fenced block (the NO-PATCH flake) -- the same non-determinism craft() guards against with a retry. On a
+    retry we insist on code-only output so <think> can't crowd out the block."""
     user = (f"Vulnerability: {c.cwe} ({c.family}). Sink: {c.sink}. A probe reached the sink unsafely.\n\n"
             f"Fix this function (keep its signature):\n```\n{c.slice}\n```")
-    return code_block(model.generate(_SYSTEM, user, max_new_tokens=2800))
+    for i in range(attempts):
+        u = user if i == 0 else (user + "\n\nOutput ONLY the fixed function as ONE fenced ``` code block -- "
+                                 "no explanation, no reasoning text before or after the block.")
+        patch = code_block(model.generate(_SYSTEM, u, max_new_tokens=2800))
+        if patch:
+            return patch
+    return None
 
 
 def _gate_b(file):
@@ -142,9 +151,10 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
     return status, f"investigate -> {v.verdict}: {(v.why or '')[:100]}"
 
 
-def run(model, target, findings_path=None, budget=10, out_dir=None, write=False, max_steps=6):
+def run(model, target, findings_path=None, budget=10, out_dir=None, write=False, max_steps=8):
     """Patch each confirmed finding, reverify with the SAME oracle, restore (unless --write on a pass).
-    Returns (results, paths)."""
+    Returns (results, paths). max_steps matches prove's budget (8): the reverify is at least as hard as the
+    original proof -- the model must read the patch AND rebuild the repro -- so it must not be starved of steps."""
     import shutil
 
     target = str(target)

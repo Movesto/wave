@@ -1270,3 +1270,38 @@ def test_report_orders_by_severity(tmp_path):
     report.generate(str(tmp_path), model="m")
     md = (tmp_path / "WAVE_REPORT.md").read_text(encoding="utf-8")
     assert md.index("Command Injection") < md.index("Open Redirect")     # critical before medium
+
+
+# ============================ 33. SARIF 2.1.0 export ============================
+
+from agent.orchestrator import sarif as sarifmod
+
+def test_sarif_structure_and_filtering():
+    findings = [
+        {"file": "db.py", "line": 42, "class": "sqli", "cwe": "CWE-89", "verdict": "confirmed", "evidence": "x"},
+        {"file": "o.py", "line": 9, "class": "authz", "cwe": "CWE-639", "verdict": "anomalous_state", "why": "y"},
+        {"file": "s.py", "line": 1, "class": "sqli", "cwe": "CWE-89", "verdict": "refuted", "why": "safe"},
+        {"file": "b.py", "line": 2, "class": "cmd", "cwe": "CWE-78", "verdict": "blocked"},
+    ]
+    doc = sarifmod.to_sarif(findings, root=".")
+    assert doc["version"] == "2.1.0" and doc["runs"][0]["tool"]["driver"]["name"] == "wave"
+    results = doc["runs"][0]["results"]
+    assert len(results) == 2                                        # refuted + blocked excluded
+    assert {r["ruleId"] for r in results} == {"CWE-89", "CWE-639"}
+    assert all(r["locations"][0]["physicalLocation"]["region"]["startLine"] >= 1 for r in results)
+
+def test_sarif_level_and_helpuri():
+    doc = sarifmod.to_sarif([{"file": "c.py", "line": 1, "class": "cmd", "cwe": "CWE-78", "verdict": "confirmed"},
+                             {"file": "r.py", "line": 1, "class": "redirect", "cwe": "CWE-601", "verdict": "believed"}])
+    rules = {x["id"]: x for x in doc["runs"][0]["runs"][0]["tool"]["driver"]["rules"]} if False else {
+        x["id"]: x for x in doc["runs"][0]["tool"]["driver"]["rules"]}
+    assert rules["CWE-78"]["defaultConfiguration"]["level"] == "error"      # critical -> error
+    assert rules["CWE-601"]["defaultConfiguration"]["level"] == "warning"   # medium -> warning
+    assert rules["CWE-78"]["helpUri"].endswith("/78.html")
+
+def test_sarif_write(tmp_path):
+    n = sarifmod.write([{"file": "db.py", "line": 5, "class": "sqli", "cwe": "CWE-89", "verdict": "confirmed"}],
+                       tmp_path / "wave.sarif", root=str(tmp_path))
+    assert n == 1
+    doc = json.loads((tmp_path / "wave.sarif").read_text(encoding="utf-8"))
+    assert doc["runs"][0]["results"][0]["ruleId"] == "CWE-89"

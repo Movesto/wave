@@ -185,4 +185,9 @@ def generate(target, out_dir=None, model="", patches_path=None):
                 (dest / name).write_text(s.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
             except OSError:
                 pass
+    try:                                                    # SARIF 2.1.0 for CI / GitHub code scanning / IDEs
+        from . import sarif
+        sarif.write(findings, dest / "wave.sarif", root=str(target))
+    except Exception:
+        pass
     return report

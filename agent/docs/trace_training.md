@@ -139,3 +139,30 @@ lacked when it thrashed to a timeout while deepseek drove straight to a proof.
 Use the strong model to get results now; let the harness quietly certify its drives; fine-tune the local model
 to imitate only the certified drives. It is a parent teaching the kid to drive — but with an instructor who
 only lets the successful drives count as lessons.
+
+## 9. The pipeline, concretely (what's built)
+
+The data path from certified drives to a trainable dataset is built and deterministic (no model/GPU):
+
+1. **Collect** — run wave with tracing on; every harness-verified drive is banked:
+   `WAVE_TRACE=1 wave all <repo> --online` → `traces/wave_traces.jsonl`
+   (only `confirmed`/`refuted`/`anomalous_state` drives with a real observed effect; see traces.py.)
+
+2. **Prepare** — turn the banked drives into chat-format SFT data + a stratified held-out eval split:
+   `python -m agent.train.prepare_traces` → `data/trace_sft/{train,eval}.jsonl` + `report.json`
+   (dedups by id, keeps positives/negatives/review balanced across the split, prints label/lang/CWE stats
+   and warns on too-little-data / label-imbalance.)
+
+3. **Validate** — the quality gate BEFORE any GPU time (data quality is what failed before):
+   `python -m agent.train.validate_dataset --in data/trace_sft/train.jsonl`
+   (valid chat structure, tool-call↔observation linkage, no empty assistant turns, length sanity; exits
+   non-zero if anything is broken, so a training script can gate on it.)
+
+4. **Train** (external, needs GPU + go-ahead) — SFT/QLoRA the local model on `train.jsonl`. Not automated
+   here; one GPU job at a time, and only on a validated dataset.
+
+5. **Eval** (honest gap) — measure the base local model vs. the fine-tuned one on the held-out `eval.jsonl`:
+   does it reach the same certified verdict, per label? The number to beat is the base-vs-parent gap.
+
+**State (2026-09-15):** steps 1–3 built + tested; only ~5 drives banked so far — keep collecting (a few
+hundred is a sensible floor) before step 4. Steps 4–5 await accumulated data + a GPU go-ahead.

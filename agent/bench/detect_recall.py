@@ -39,6 +39,13 @@ CASES = [
     ("ruby-cmd", "p.rb", "def h(id)\n  system(\"echo #{id}\")\nend\n", 2, "CWE-78", "vuln", None),
     ("custom-cmd", "cx.py", "def h(req):\n    run_shell_command(req.args['c'])\n", 2, "CWE-78", "vuln", None),
     ("custom-sql", "cy.py", "def h(req):\n    exec_sql('SELECT ' + req.args['q'])\n", 2, "CWE-89", "vuln", None),
+    ("kotlin-cmd", "K.kt", "class C {\n  fun h(c: String) {\n    ProcessBuilder(\"sh\", \"-c\", c).start()\n  }\n}\n", 3, "CWE-78", "vuln", None),
+    ("swift-cmd", "S.swift", "func h(c: String) {\n  let p = Process()\n  p.launchPath = \"/bin/sh\"\n}\n", 2, "CWE-78", "vuln", None),
+    ("go-sqli", "s.go", "func h(id string) {\n  db.Query(\"SELECT * FROM u WHERE id=\" + id)\n}\n", 2, "CWE-89", "vuln", None),
+    ("java-cmd", "J.java", "class C { void h(String c){\n  Runtime.getRuntime().exec(c);\n}}\n", 2, "CWE-78", "vuln", None),
+    ("csharp-cmd", "D.cs", "class C { void H(string c){\n  Process.Start(\"sh\", c);\n}}\n", 2, "CWE-78", "vuln", None),
+    ("php-xss", "x.php", "<?php function h(){\n  echo $_GET['name'];\n}\n", 3, "CWE-79", "vuln", None),
+    ("rust-path", "r.rs", "fn h(p: &str) {\n  File::open(p);\n}\n", 2, "CWE-22", "vuln", None),
     # deterministic-precision cases: the layer that CAN decide statically must stay quiet
     ("idor-owned", "i.py", "from x import *\n@router.get('/o/{oid}')\ndef get_o(oid: int, user=Depends(current_user)):\n    o = db.query(O).get(oid)\n    if o.owner_id != user.id: raise E\n    return o\n", 3, "CWE-639", "clean", ("authz",)),
     ("frontend-fetch", "app/ui.jsx", "export function C(){\n  return fetch('/api/' + userInput);\n}\n", 2, "CWE-918", "clean", ("ssrf", "SQLi", "cmd", "path", "deser")),

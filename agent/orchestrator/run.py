@@ -333,6 +333,16 @@ def cmd_all(args):
               f"-- {(d.get('evidence') or '')[:70]}")
     for d in by["anomalous_state"]:
         print(f"  [ANOMALOUS {d.get('cwe')}] {d['file']}:{d['line']}  -- {d.get('why', '')[:70]}")
+    # DAST escalation: which unproven findings a live-app run could still witness (execution TBD -- --dynamic)
+    from . import dast
+    unproven = by.get("believed", []) + by.get("blocked", [])
+    esc = dast.plan(unproven, target=t)
+    if esc:
+        print(f"\n\U0001f310 DAST would help: {dast.summarize(esc)}  "
+              f"({len(esc)} of {len(unproven)} unproven findings)")
+        for e in esc[:6]:
+            print(f"   [{e['mode']}] {e['cwe'] or e['class']} {e['file']}:{e['line']}")
+        print("   -> run a live-app DAST pass on these when docker is free")
     print(f"\n\U0001f4c4 readable report -> {rp}")
 
 

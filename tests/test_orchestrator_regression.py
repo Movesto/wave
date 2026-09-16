@@ -1305,3 +1305,37 @@ def test_sarif_write(tmp_path):
     assert n == 1
     doc = json.loads((tmp_path / "wave.sarif").read_text(encoding="utf-8"))
     assert doc["runs"][0]["results"][0]["ruleId"] == "CWE-89"
+
+
+# ============================ 34. DAST escalation decision layer ============================
+
+from agent.orchestrator import dast
+
+def test_dast_mode_mapping():
+    assert dast.dast_mode({"cwe": "CWE-639", "class": "authz"}) == "differential"
+    assert dast.dast_mode({"class": "sqli"}) == "injection"
+    assert dast.dast_mode({"class": "ssrf"}) == "injection"
+    assert dast.dast_mode({"class": "other"}) is None
+
+def test_dast_bootable(tmp_path):
+    assert dast.bootable(str(tmp_path)) is False
+    (tmp_path / "docker-compose.yml").write_text("services:\n  web:\n    build: .\n", encoding="utf-8")
+    assert dast.bootable(str(tmp_path)) is True
+
+def test_dast_plan_escalates_only_unproven_on_bootable():
+    findings = [{"file": "a.py", "line": 1, "class": "sqli", "cwe": "CWE-89", "verdict": "believed"},
+                {"file": "b.py", "line": 2, "class": "authz", "cwe": "CWE-639", "verdict": "blocked"},
+                {"file": "c.py", "line": 3, "class": "sqli", "cwe": "CWE-89", "verdict": "confirmed"},   # settled
+                {"file": "d.py", "line": 4, "class": "other", "verdict": "believed"}]                    # no oracle
+    esc = dast.plan(findings, can_boot=True)
+    assert len(esc) == 2
+    modes = {e["mode"] for e in esc}
+    assert modes == {"injection", "differential"}
+
+def test_dast_plan_empty_when_not_bootable():
+    findings = [{"file": "a.py", "line": 1, "class": "sqli", "cwe": "CWE-89", "verdict": "believed"}]
+    assert dast.plan(findings, can_boot=False) == []
+
+def test_dast_summarize():
+    assert "live-app run" in dast.summarize([{"mode": "injection"}, {"mode": "injection"}])
+    assert "no findings" in dast.summarize([])

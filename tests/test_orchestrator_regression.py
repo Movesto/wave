@@ -523,6 +523,35 @@ def test_repro_scaffold_deep_resolver_and_actionable_error():
     assert "isclass" in py and "__dict__" in py                     # PY class-method deep find present
 
 
+def test_write_file_tool_authors_repro_safely_and_cleans_up(tmp_path):
+    # the model gets room to write its OWN repro when the scaffold doesn't fit -- but safely: inside the
+    # mount only, never overwriting target source, and cleaned up by repro.remove afterward.
+    from agent.orchestrator import repro
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "real.js").write_text("// source", encoding="utf-8")
+    # new file OK, recorded in the manifest
+    assert "wrote" in inv._do_write("app/.wave_repro.mjs", "console.log(1)", str(tmp_path))
+    assert (tmp_path / "app" / ".wave_repro.mjs").exists()
+    assert (tmp_path / ".wave_written.txt").exists()
+    # never overwrites existing/target source
+    assert "NOT overwrite" in inv._do_write("app/real.js", "HACKED", str(tmp_path))
+    assert (tmp_path / "app" / "real.js").read_text(encoding="utf-8") == "// source"
+    # never escapes the mount (traversal / absolute / drive)
+    assert "refused" in inv._do_write("../escape.js", "x", str(tmp_path))
+    assert not (tmp_path.parent / "escape.js").exists()
+    assert "refused" in inv._do_write("/etc/pwn", "x", str(tmp_path))
+    assert "refused" in inv._do_write("C:/win", "x", str(tmp_path))
+    # repro.remove cleans the authored file + manifest, leaves real source untouched
+    repro.remove(str(tmp_path))
+    assert not (tmp_path / "app" / ".wave_repro.mjs").exists()
+    assert not (tmp_path / ".wave_written.txt").exists()
+    assert (tmp_path / "app" / "real.js").exists()
+    # the tool is offered + the scaffold reframed as optional in both prompts
+    assert inv._WRITE_TOOL["function"]["name"] == "write_file"
+    assert "write_file" in inv._NATIVE_SYS and "SCAFFOLD IS OPTIONAL" in inv._NATIVE_SYS
+    assert "SCAFFOLD IS OPTIONAL" in inv._AGENT_SYS
+
+
 class _Res:
     def __init__(self, out): self.command, self.stdout, self.stderr, self.exit_code, self.duration, self.timed_out = "cmd", out, "", 0, 0.1, False
 

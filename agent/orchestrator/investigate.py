@@ -29,6 +29,8 @@ _AGENT_SYS = (
     'e.g. python:3.12-slim or node:20-slim>","network":"<none|host>","why":"<what you expect to see>"}\n'
     '  install deps:  {"action":"install","packages":["<pkg>",...],"why":"<why THIS test needs them>"}  '
     "(use this on a ModuleNotFoundError -- it downloads them; ask only for what this test needs)\n"
+    '  write a file:  {"action":"write","path":"<relative path, e.g. app/.wave_repro.mjs>","content":"<full '
+    'file>"}  (author your OWN repro when the provided scaffold does not fit -- then run it)\n'
     '  finish:        {"action":"conclude","verdict":"confirmed|refuted|believed|blocked|anomalous_state",'
     '"cwe":"CWE-XX","why":"<why, citing what you OBSERVED>","evidence":"<the concrete observed effect>"}\n'
     "RULES: (1) You may only CONFIRM after you have RUN something and OBSERVED the effect that proves it; "
@@ -45,6 +47,12 @@ _AGENT_SYS = (
     "file first in one command with a heredoc, e.g. \"cat > t.py <<'EOF'\\n...\\nEOF\\npython3 t.py\". "
     "If a command fails, READ the error and try a DIFFERENT approach -- never repeat the same failing "
     "command.\n"
+    "THE SCAFFOLD IS OPTIONAL: a fast-path repro may be provided in the task, but it is only a convenience. "
+    "If it does not fit the target -- a framework component that needs a real renderer (e.g. React "
+    "renderToStaticMarkup), a method that must be constructed first, a multi-file setup -- do NOT give up and "
+    "do NOT conclude 'unproven'/'refuted' just because the scaffold couldn't load it. WRITE YOUR OWN repro "
+    "(the `write` action), place it where its imports resolve, run it, and observe. A scaffold that fails to "
+    "load is a tooling limit, NEVER evidence the code is safe.\n"
     "READING THE PROOF: when you inject a command (e.g. `; id`, `; echo WAVE-PWNED`), the OUTPUT of that "
     "injected command IS the proof -- a `uid=...` line, your marker, a file listing means it executed. "
     "The moment you see it, CONCLUDE 'confirmed' and cite that exact output as the evidence; do not keep "
@@ -82,6 +90,12 @@ _NATIVE_SYS = (
     "big output, use grep_output(pattern) / tail_output(lines) to inspect the last run. Use verdict "
     "'anomalous_state' (not 'confirmed') when you OBSERVED a business-logic / IDOR state change that is a "
     "judgment call rather than a tool-witnessed injection. "
+    "THE SCAFFOLD IS OPTIONAL: a fast-path repro may be provided, but it is only a convenience. If it does "
+    "not fit the target -- a framework component that needs a real renderer (e.g. React renderToStaticMarkup), "
+    "a method that must be constructed first, a multi-file setup -- call write_file to author YOUR OWN repro "
+    "(place it where its imports/node_modules resolve), then run_command it. A scaffold that fails to load is a "
+    "tooling limit, NEVER evidence the code is safe -- do NOT conclude 'refuted'/'unproven' from it; build your "
+    "own and observe. "
     "ACT, DON'T ORIENT: the relevant code is ALREADY in the task -- do NOT waste steps re-reading files "
     "with cat/sed/ls/head. Your budget is small. Your FIRST action should TEST the vulnerability (run the "
     "scaffold with a payload, or call the function with an injection) and OBSERVE the effect; then CONCLUDE. "
@@ -295,6 +309,43 @@ def _do_install(packages, *, deps, image, kind, state):
             "npm, or the real distribution name), or conclude 'blocked' if you cannot provision it.")
 
 
+def _do_write(path, content, mount):
+    """The model's write_file action: create a NEW file in the sandbox mount so it can author its OWN repro
+    (a React render, a custom driver, a fixture) when the pre-built scaffold doesn't fit. Safety: the path
+    stays INSIDE the mount (never absolute, never via '..') and NEVER overwrites an existing file -- the
+    target's own source must stay pristine or the proof is meaningless. Written paths are recorded in a
+    manifest (.wave_written.txt) that repro.remove() deletes afterward. Returns a short message; never raises."""
+    from pathlib import Path as _P
+    if not mount:
+        return "write_file unavailable here (no sandbox mount)."
+    raw = (path or "").strip().replace("\\", "/")
+    if not raw or content is None:
+        return "write_file: give a relative `path` and `content`."
+    if raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):   # absolute or drive-letter -> reject
+        return f"write_file: refused '{path}' -- give a path RELATIVE to /work, not an absolute one."
+    rel = raw
+    base = _P(mount).resolve()
+    try:
+        dest = (base / rel).resolve()
+        dest.relative_to(base)                              # reject '..' escaping the mount
+    except Exception:
+        return f"write_file: refused '{path}' -- the path must stay inside the sandbox (no '..' or absolute)."
+    if dest.name in (".wave_written.txt",) or dest.exists():
+        return (f"write_file: '{rel}' already exists -- I will NOT overwrite existing/target source. Pick a "
+                f"NEW filename for your repro (e.g. {rel}.wave.mjs).")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+        with (base / ".wave_written.txt").open("a", encoding="utf-8") as _fh:
+            _fh.write(rel + "\n")
+    except Exception as e:
+        return f"write_file FAILED for '{rel}': {type(e).__name__}: {e}"
+    print(f"[write] {rel} ({len(content)} bytes)", flush=True)
+    return (f"wrote {len(content)} bytes to /work/{rel}. Now run it with run_command. If it must resolve the "
+            f"repo's node_modules/site-packages, place/anchor it accordingly (e.g. createRequire('/work/"
+            f"<pkgdir>/package.json') in Node, or run from that directory).")
+
+
 def _finalize(verdict, why, ran, saw_prov, saw_real):
     """The grounding rule + structured error escalation on a raw conclusion:
     - confirmed / anomalous_state need an OBSERVATION (ran>0), else -> believed.
@@ -354,6 +405,20 @@ _TAIL_TOOL = {"type": "function", "function": {
         "lines": {"type": "integer", "description": "how many trailing lines (default 20)"},
     }, "required": []}}}
 
+_WRITE_TOOL = {"type": "function", "function": {
+    "name": "write_file",
+    "description": "Create a NEW file in the sandbox so you can author your OWN reproduction when the "
+                   "pre-built scaffold does not fit the target -- e.g. a React component that needs "
+                   "renderToStaticMarkup, a method that must be constructed first, a multi-file fixture, a "
+                   "differential harness. Write it, then run_command it. Paths are relative to /work (the "
+                   "mounted repo); you may create it next to the code you import so its node_modules/packages "
+                   "resolve (e.g. app/.wave_repro.mjs). You may NOT overwrite an existing file -- pick a new "
+                   "name. wave cleans these up afterward.",
+    "parameters": {"type": "object", "properties": {
+        "path": {"type": "string", "description": "relative path for the NEW file, e.g. app/.wave_repro.mjs"},
+        "content": {"type": "string", "description": "the full file contents to write"},
+    }, "required": ["path", "content"]}}}
+
 # --- opt-in web tools (only added when online=True): the model's eyes on the world for an unfamiliar API,
 # library, or third-party service (AWS, etc.) it must understand to judge a flow. Context only, never proof.
 _WEB_SEARCH_TOOL = {"type": "function", "function": {
@@ -379,7 +444,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
     """Tool-calling loop over the model's NATIVE tools interface (structured tool_calls)."""
     import json as _json
     messages = [{"role": "system", "content": _NATIVE_SYS}, {"role": "user", "content": brief}]
-    tools = [_RUN_TOOL, _GREP_TOOL, _TAIL_TOOL, _CONCLUDE_TOOL]
+    tools = [_RUN_TOOL, _WRITE_TOOL, _GREP_TOOL, _TAIL_TOOL, _CONCLUDE_TOOL]
     if deps:                                                # let the model fetch what THIS test needs
         tools.insert(1, _INSTALL_TOOL)
     if online:                                              # opt-in egress: the model's eyes on the world
@@ -444,6 +509,10 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 continue
             if name == "tail_output":
                 content = _tail(run_log, int(args.get("lines") or 20))
+                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
+                continue
+            if name == "write_file":                         # model authors its OWN repro when the scaffold doesn't fit
+                content = _do_write(args.get("path"), args.get("content"), mount)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
                 continue
             if name == "install":                            # model asks for a missing dep -> fetch it (visible)
@@ -608,6 +677,10 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
             msg = _do_install(act.get("packages") or act.get("package"), deps=deps, image=image,
                               kind=_dep_kind_for(image), state=inst_state)
             trail.append(("install " + ", ".join(act.get("packages") or []), msg))
+            continue
+        if kind in ("write", "write_file"):                 # author your OWN repro when the scaffold doesn't fit
+            msg = _do_write(act.get("path"), act.get("content"), mount)
+            trail.append((f"write_file {act.get('path')}", msg))
             continue
         if kind == "run":
             cmd = str(act.get("command", "")).strip()

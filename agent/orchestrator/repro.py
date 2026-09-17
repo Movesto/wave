@@ -164,9 +164,30 @@ def build(candidate, target, mode="call", workdir="/work"):
 
 
 def remove(target):
-    """Delete any scaffold we wrote."""
+    """Delete any scaffold we wrote, plus any files the MODEL authored via write_file (recorded in the
+    .wave_written.txt manifest) so the target repo is left pristine."""
+    root = Path(target)
     for name in (".wave_repro.mjs", ".wave_repro.py"):
         try:
-            (Path(target) / name).unlink()
+            (root / name).unlink()
         except OSError:
             pass
+    manifest = root / ".wave_written.txt"
+    try:
+        rels = manifest.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        rels = []
+    for rel in rels:
+        rel = rel.strip()
+        if not rel:
+            continue
+        try:                                                # stay inside the target; never delete outside it
+            p = (root / rel).resolve()
+            p.relative_to(root.resolve())
+            p.unlink()
+        except (OSError, ValueError):
+            pass
+    try:
+        manifest.unlink()
+    except OSError:
+        pass

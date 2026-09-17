@@ -14,12 +14,14 @@ import json
 import time
 from pathlib import Path
 
-_ORDER = ["confirmed", "anomalous_state", "believed", "blocked", "refuted"]
+_ORDER = ["confirmed", "anomalous_state", "believed", "blocked", "not_exploitable", "refuted"]
 _HEAD = {
     "confirmed": "## ✅ Confirmed vulnerabilities  — tool-witnessed, exploitable",
     "anomalous_state": "## ⚠️  Needs human review  — an observed effect, but a judgment call",
     "believed": "## \U0001f50d Unproven leads  — reasoned, not witnessed (review)",
     "blocked": "## ⛔ Blocked  — could not be run/provisioned",
+    "not_exploitable": "## \U0001f6e1️  Reasoned non-issues  — input not attacker-controlled (model's "
+                       "judgment, not witnessed; review if in doubt)",
     "refuted": "## ✓ Cleared as safe  — the model ran it and it held",
 }
 
@@ -77,7 +79,7 @@ def generate(target, out_dir=None, model="", patches_path=None):
              f"- **{n.get('confirmed', 0)} confirmed** (proven exploitable)",
              f"- **{n.get('anomalous_state', 0)} need review** (observed effect, human judgment)",
              f"- {n.get('believed', 0)} unproven leads · {n.get('blocked', 0)} blocked · "
-             f"{n.get('refuted', 0)} cleared as safe",
+             f"{n.get('not_exploitable', 0)} reasoned non-issues · {n.get('refuted', 0)} cleared as safe",
              f"- {n_fixed} fixed (Stage 4 patch, exploit demonstrably no longer fires)",
              ""]
     # one plain-language line on what the run amounts to, so the top of the file always says what happened

@@ -33,6 +33,12 @@ _AGENT_SYS = (
     'file>"}  (author your OWN repro when the provided scaffold does not fit -- then run it)\n'
     '  finish:        {"action":"conclude","verdict":"confirmed|refuted|believed|blocked|anomalous_state",'
     '"cwe":"CWE-XX","why":"<why, citing what you OBSERVED>","evidence":"<the concrete observed effect>"}\n'
+    "  not a vuln:    a variant of conclude with verdict 'not_exploitable' -- use ONLY when you determined by "
+    "READING the code that the flagged input CANNOT be attacker-controlled in the real threat model (it comes "
+    "from a build-time env var / hardcoded constant / an internal trusted caller / an already-authenticated "
+    "ownership-scoped value / a framework that sanitizes it), and NAME that source in why. This is a reasoned "
+    "SAFE-leaning judgment, NOT a proof. If you are UNSURE it is attacker-reachable, use 'believed', not this; "
+    "and never use it merely because you could not run the code.\n"
     "RULES: (1) You may only CONFIRM after you have RUN something and OBSERVED the effect that proves it; "
     "reasoning alone is 'believed', never 'confirmed'. (2) 'refuted' means you ran it and saw it is safe. "
     "(3) 'blocked' means you could not run what you needed. (4) Keep commands self-contained; the target's "
@@ -65,7 +71,17 @@ _AGENT_SYS = (
     "\"why\":\"the injected id ran\",\"evidence\":\"uid=0(root) gid=0(root)\"}"
 )
 
-_VERDICTS = {"confirmed", "refuted", "believed", "blocked", "anomalous_state"}
+_VERDICTS = {"confirmed", "refuted", "believed", "blocked", "anomalous_state", "not_exploitable"}
+
+# cues a REASONED not_exploitable must name -- the concrete reason the flagged input is not attacker-
+# controllable / the sink is not a runtime attack surface. A verdict that cites none of these is not a
+# judgment, it's a hand-wave -> downgraded to a visible 'believed' lead (safe direction).
+_NONEXPLOIT_CUES = (
+    "environment", "env var", "process.env", "$env", "build-time", "build time", "buildtime", "build script",
+    "packaging", "ci ", "hardcoded", "hard-coded", "constant", "literal", "compile-time", "compile time",
+    "authenticated", "ownership", "owner-scoped", "scoped to", "internal caller", "internal-only", "trusted",
+    "not attacker", "not user-control", "not remotely", "not user controlled", "not reachable", "unreachable",
+    "sanitiz", "framework", "signing identity", "developer", "keychain", "config value", "not exploitable")
 
 # --- Native tool-calling path (for a tool-tuned model behind an OpenAI-compatible API: ollama etc.) ---
 # The model returns structured tool_calls instead of our text JSON; the enum on `verdict` makes parroting
@@ -90,6 +106,11 @@ _NATIVE_SYS = (
     "big output, use grep_output(pattern) / tail_output(lines) to inspect the last run. Use verdict "
     "'anomalous_state' (not 'confirmed') when you OBSERVED a business-logic / IDOR state change that is a "
     "judgment call rather than a tool-witnessed injection. "
+    "Use verdict 'not_exploitable' when you determined by READING the code that the flagged input CANNOT be "
+    "attacker-controlled in the real threat model (build-time env var / hardcoded constant / internal trusted "
+    "caller / already-authenticated ownership-scoped value / framework-sanitized) -- NAME that source in why. "
+    "It is a reasoned SAFE-leaning judgment, not a proof; if UNSURE it is attacker-reachable use 'believed', "
+    "and never use it just because you could not run the code. "
     "THE SCAFFOLD IS OPTIONAL: a fast-path repro may be provided, but it is only a convenience. If it does "
     "not fit the target -- a framework component that needs a real renderer (e.g. React renderToStaticMarkup), "
     "a method that must be constructed first, a multi-file setup -- call write_file to author YOUR OWN repro "
@@ -131,9 +152,11 @@ _CONCLUDE_TOOL = {"type": "function", "function": {
     "description": "Give the final verdict once you have run enough to decide.",
     "parameters": {"type": "object", "properties": {
         "verdict": {"type": "string",
-                    "enum": ["confirmed", "refuted", "believed", "blocked", "anomalous_state"]},
+                    "enum": ["confirmed", "refuted", "believed", "blocked", "anomalous_state",
+                             "not_exploitable"]},
         "cwe": {"type": "string"},
-        "why": {"type": "string", "description": "why, citing what you observed"},
+        "why": {"type": "string", "description": "why, citing what you observed (or, for not_exploitable, the "
+                                                 "concrete reason the input is not attacker-controlled)"},
         "evidence": {"type": "string", "description": "the concrete observed effect"},
     }, "required": ["verdict", "why"]}}}
 
@@ -358,6 +381,13 @@ def _finalize(verdict, why, ran, saw_prov, saw_real):
     if verdict == "refuted" and saw_prov and not saw_real:
         return "blocked", ("(under-provisioned: 'refuted' overturned -- the target never executed cleanly; "
                            "every run hit a missing dependency/service, so safety is NOT proven) " + why)
+    if verdict == "not_exploitable":
+        # a SAFE-leaning REASONED judgment (input not attacker-controllable / not a runtime surface). It must
+        # NAME a concrete reason; a bare assertion is not a judgment -> downgrade to a visible 'believed' lead.
+        low = (why or "").lower()
+        if len(low.strip()) < 40 or not any(cue in low for cue in _NONEXPLOIT_CUES):
+            return "believed", ("(not_exploitable needs a NAMED reason the input is not attacker-controlled; "
+                                "none was cited, so this stays an unproven lead) " + why)
     return verdict, why
 
 

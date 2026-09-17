@@ -552,6 +552,44 @@ def test_write_file_tool_authors_repro_safely_and_cleans_up(tmp_path):
     assert "SCAFFOLD IS OPTIONAL" in inv._AGENT_SYS
 
 
+def test_not_exploitable_verdict_guard_and_safe_direction():
+    # a REASONED not_exploitable must NAME why the input isn't attacker-controlled; a bare assertion
+    # downgrades to a visible 'believed' lead (never silently clears a finding).
+    assert "not_exploitable" in inv._VERDICTS
+    v, _ = inv._finalize("not_exploitable",
+                         "id comes from a build-time env var (process.env.CSC_NAME), never attacker input",
+                         3, False, True)
+    assert v == "not_exploitable"
+    v2, _ = inv._finalize("not_exploitable", "looks safe", 3, False, True)
+    assert v2 == "believed"                                  # no named source -> stays a lead (safe direction)
+    v3, _ = inv._finalize("not_exploitable",
+                          "the value is authenticated and ownership-scoped to the caller", 0, False, False)
+    assert v3 == "not_exploitable"                           # a reasoning verdict needs no run
+    # confirm direction is untouched: a bare confirmed with no run still downgrades to believed
+    assert inv._finalize("confirmed", "x", 0, False, False)[0] == "believed"
+
+
+def test_not_exploitable_is_shown_in_report_not_hidden(tmp_path):
+    # a reasoned non-issue must still APPEAR in the report (re-prioritized, never deleted) so a mislabel
+    # can't bury a real vuln, and it must be counted in the summary.
+    import json as _json
+    from pathlib import Path
+    from agent.orchestrator import report
+    recs = [{"verdict": "not_exploitable", "cwe": "CWE-78", "class": "cmd",
+             "file": "apps/desktop/scripts/after-pack.js", "line": 126, "unit": "doBuild(context)",
+             "why": "id from a build-time env var (process.env.CSC_NAME), never attacker input",
+             "sink": "execSync"}]
+    (tmp_path / "wave_findings.jsonl").write_text("\n".join(_json.dumps(r) for r in recs), encoding="utf-8")
+    md = Path(report.generate(str(tmp_path))).read_text(encoding="utf-8")
+    assert "Reasoned non-issues" in md                       # its own section header
+    assert "reasoned non-issues" in md.lower()               # counted in the summary line
+    assert "after-pack.js" in md                             # the finding itself is still shown
+    # terminal + ordering wired in prove
+    from agent.orchestrator import prove
+    assert "not_exploitable" in prove._TERMINAL
+    assert "not_exploitable" in prove._VERDICT_ORDER
+
+
 class _Res:
     def __init__(self, out): self.command, self.stdout, self.stderr, self.exit_code, self.duration, self.timed_out = "cmd", out, "", 0, 0.1, False
 

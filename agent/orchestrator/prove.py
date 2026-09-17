@@ -44,9 +44,9 @@ _SEV = {"cmd": 9, "eval": 9, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nos
 # not attacker-control -> a `confirmed` here needs HIGH-confidence reachability (else -> anomalous_state).
 _INTRINSIC_CWE = {"CWE-502", "CWE-95", "CWE-1336"}          # deserialization / eval-exec / SSTI
 
-_VERDICT_ORDER = ["confirmed", "anomalous_state", "refuted", "blocked", "believed"]
+_VERDICT_ORDER = ["confirmed", "anomalous_state", "believed", "blocked", "not_exploitable", "refuted"]
 # only these are DONE on resume; blocked (under-provisioned / transient 500) + believed are re-tried
-_TERMINAL = {"confirmed", "refuted", "anomalous_state"}
+_TERMINAL = {"confirmed", "refuted", "anomalous_state", "not_exploitable"}
 
 
 def _rel(root, path):
@@ -179,6 +179,8 @@ def _record_outcome(case, hyp_id, c, rec):
                     evidence=rec.get("evidence", ""), oracle=rec.get("oracle", ""))
     elif v == "refuted":
         case.supersede(hyp_id, status="refuted", note=rec.get("why", ""))
+    elif v == "not_exploitable":                             # reasoned SAFE-leaning judgment (still shown, not hidden)
+        case.supersede(hyp_id, status="not_exploitable", note=rec.get("why", ""))
     elif v == "blocked":
         case.supersede(hyp_id, status="blocked", note=rec.get("why", ""))
     else:                                                    # believed -- a lead, never a finding

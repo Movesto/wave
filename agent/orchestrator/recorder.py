@@ -28,7 +28,7 @@ SOURCES = ("seed", "tool", "model", "oracle")
 # anomalous_state: an OBSERVED state change (business-logic / IDOR) the model argues is a violation --
 # kept DISTINCT from a tool-witnessed injection `confirmed`, because "is this state bad or intended?" is a
 # judgment no tool can make automatically (wave_architecture_plan.md, Stage 3 review-adopted).
-STATUSES = ("believed", "confirmed", "refuted", "blocked", "anomalous_state")
+STATUSES = ("believed", "confirmed", "refuted", "blocked", "anomalous_state", "not_exploitable")
 
 
 @dataclass
@@ -146,6 +146,8 @@ class CaseFile:
              ("confirmation", "hypothesis")),
             ("blocked", "BLOCKED (needs an artifact / under-provisioned)", ("blocked", "hypothesis", "confirmation")),
             ("believed", "OPEN HYPOTHESES (not yet confirmed)", ("hypothesis",)),
+            ("not_exploitable", "NOT EXPLOITABLE (reasoned non-issue -- input not attacker-controlled; not witnessed)",
+             ("hypothesis", "confirmation")),
             ("refuted", "REFUTED (cleared as safe)", ("hypothesis", "confirmation")),
         ):
             es = [e for e in self.by_status(status) if e.kind in kinds]

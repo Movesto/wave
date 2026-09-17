@@ -21,14 +21,51 @@ const payload = process.argv[2] ?? "";
 
 async function loadFn() {{
   const mod = await import(TARGET);    // dynamic import: works for ESM, CJS interop, and .ts under tsx
-  return mod[FUNC] ?? (mod.default && mod.default[FUNC]) ?? mod.default;
+  // fast path: a named export, a property of the default export, or the default export itself.
+  const direct = mod[FUNC] ?? (mod.default && mod.default[FUNC]) ?? mod.default;
+  if (typeof direct === "function") return direct;
+  // deep path: FUNC is often a METHOD nested inside an exported object or a factory-built instance
+  // (e.g. `export const X = Node.create({{ method(){{}} }})`, a class prototype, a registry object).
+  // Walk the export graph (bounded depth + a visited set for cycles) for a function property named
+  // FUNC and bind it so its `this` stays the owning object. Runs only when the fast path missed, so it
+  // never changes behaviour for a normally-exported function.
+  const seen = new Set();
+  const stack = Object.keys(mod).map(k => [mod[k], 0]);
+  if (mod.default && typeof mod.default === "object") stack.push([mod.default, 0]);
+  while (stack.length) {{
+    const [val, depth] = stack.pop();
+    if (val == null || depth > 5) continue;
+    const t = typeof val;
+    if (t !== "object" && t !== "function") continue;
+    if (seen.has(val)) continue;
+    seen.add(val);
+    let f;
+    try {{ f = val[FUNC]; }} catch (e) {{ f = undefined; }}   // a getter may throw
+    if (typeof f === "function") return f.bind(val);
+    let keys = [];
+    try {{ keys = Object.keys(val); }} catch (e) {{ keys = []; }}
+    for (const k of keys) {{
+      let child;
+      try {{ child = val[k]; }} catch (e) {{ continue; }}
+      const ct = typeof child;
+      if (child != null && (ct === "object" || ct === "function")) stack.push([child, depth + 1]);
+    }}
+  }}
+  return undefined;
 }}
 
 (async () => {{
   let fn;
   try {{ fn = await loadFn(); }}
   catch (e) {{ console.log("WAVE_LOAD_ERROR:", e && e.message); process.exit(2); }}
-  if (typeof fn !== "function") {{ console.log("WAVE_LOAD_ERROR: not a function:", FUNC); process.exit(2); }}
+  if (typeof fn !== "function") {{
+    console.log("WAVE_LOAD_ERROR:", FUNC, "could not be loaded as a callable (it is likely a method nested",
+      "in a factory/class config the scaffold cannot reach, or needs constructor args). This is a SCAFFOLD",
+      "limitation, NOT evidence the code is safe. WRITE YOUR OWN short repro: import", TARGET + ",",
+      "construct/obtain the object, invoke the sink directly with a crafted payload, and observe the effect.",
+      "Do NOT conclude 'unproven'/'refuted' just because this fast-path scaffold could not load it.");
+    process.exit(2);
+  }}
   if (MODE === "render") {{
     let html;
     try {{ html = String(await fn(payload)); }}
@@ -65,13 +102,28 @@ _spec = importlib.util.spec_from_file_location("_wave_t", {target!r})
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 _fn = getattr(_mod, {func!r}, None)
+if not callable(_fn):
+    # deep path: FUNC may be a METHOD defined on a class in this module, not a top-level function.
+    # Restrict to methods actually declared on a module-level class (via __dict__) so we never grab an
+    # unrelated builtin attribute that happens to share the name. Runs only when the top-level lookup missed.
+    import inspect as _inspect
+    for _name, _obj in list(vars(_mod).items()):
+        if _inspect.isclass(_obj):
+            _cand = _obj.__dict__.get({func!r})
+            if callable(_cand):
+                _fn = _cand
+                break
 _payload = sys.argv[1] if len(sys.argv) > 1 else ""
 try:            # JSON arg lets the taint flow through a property (e.g. {{"cmd":"; id"}}); else raw string
     _arg = json.loads(_payload)
 except Exception:
     _arg = _payload
-if _fn is None:
-    print("WAVE_LOAD_ERROR: no function", {func!r}); sys.exit(2)
+if not callable(_fn):
+    print("WAVE_LOAD_ERROR:", {func!r}, "could not be loaded as a callable -- it may be a method needing an "
+          "instance/args, or built dynamically. This is a SCAFFOLD limitation, NOT evidence the code is safe. "
+          "WRITE YOUR OWN short repro: import the module, construct the object, call the sink with a crafted "
+          "payload, and observe. Do NOT conclude 'unproven'/'refuted' just because this scaffold could not load it.")
+    sys.exit(2)
 try:
     print("WAVE_RESULT:", str(_fn(_arg))[:800])
 except Exception as _e:

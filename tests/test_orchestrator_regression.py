@@ -508,6 +508,21 @@ def test_expected_lang_from_image():
     assert "Rust" in note and "cargo" in note and "other language" in note
 
 
+def test_repro_scaffold_deep_resolver_and_actionable_error():
+    # the render/call scaffold must (a) format cleanly, (b) carry the deep-search loader so a target that
+    # is a METHOD nested in a factory/class config is reachable (not just a top-level export), and (c) tell
+    # the model to hand-roll on a load failure instead of concluding safe. Regression for the PdfEmbed
+    # (Node.create({ addNodeView(){} })) class of miss.
+    from agent.orchestrator import repro
+    js = repro._JS.format(target="./m.mjs", func="addNodeView", mode="render")
+    py = repro._PY.format(root="/work", target="/work/t.py", func="read")
+    for blob in (js, py):
+        assert "WAVE_LOAD_ERROR" in blob
+        assert "WRITE YOUR OWN" in blob and "NOT evidence the code is safe" in blob
+    assert "depth" in js and "seen" in js and ".bind(val)" in js   # JS deep walk present
+    assert "isclass" in py and "__dict__" in py                     # PY class-method deep find present
+
+
 class _Res:
     def __init__(self, out): self.command, self.stdout, self.stderr, self.exit_code, self.duration, self.timed_out = "cmd", out, "", 0, 0.1, False
 

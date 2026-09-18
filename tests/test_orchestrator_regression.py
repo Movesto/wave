@@ -727,6 +727,38 @@ def test_apply_gate_downgrades_confirmed_in_test_module(tmp_path):
     assert out["verdict"] == "anomalous_state" and "test-module" in out["why"]
 
 
+def test_trust_enrich_is_safe_direction_only():
+    # Shift 2: the model may only make a 'web' module MORE trusted; a promote-to-web / non-web touch is rejected
+    import json as _json
+    from agent.orchestrator import trust
+    tm = trust.TrustModel(target="/t", modules={"app/api": "web", "app/admin": "web", "scripts": "cli"})
+
+    class FakeModel:
+        def generate(self, sysmsg, user, **k):
+            return _json.dumps({"changes": [
+                {"module": "app/admin", "context": "internal", "reason": "admin-only internal service"},
+                {"module": "scripts", "context": "web", "reason": "promote (must be rejected)"},
+                {"module": "app/api", "context": "web", "reason": "no-op promote"},
+            ]})
+        def unload(self):
+            pass
+
+    trust.enrich(FakeModel(), tm)
+    assert tm.modules["app/admin"] == "internal"            # safe downgrade applied
+    assert tm.modules["scripts"] == "cli"                   # promote-to-web rejected
+    assert tm.modules["app/api"] == "web"                   # promote-to-web rejected
+    assert "app/admin" in tm.refined
+
+
+def test_apply_gate_downgrades_confirmed_in_internal_module():
+    from agent.orchestrator import trust
+    tm = trust.TrustModel(target="/t", modules={})
+    tm.module_context = lambda f: "internal"                # model marked this module internal (Shift 2)
+    c = mock.Mock(cwe="CWE-89", family="sqli", unit="q()", file="/t/app/admin/x.py")
+    out = prove._apply_gate({"verdict": "confirmed", "why": "marker"}, c, None, tm)
+    assert out["verdict"] == "anomalous_state" and "internal-module" in out["why"]
+
+
 def test_reconcile_reinvestigation_only_a_tool_run_changes_a_verdict(tmp_path):
     # Phase 2/3 recall: the model flags a dismissed look-alike twin, and ONLY a tool re-prove may upgrade it.
     import json as _json

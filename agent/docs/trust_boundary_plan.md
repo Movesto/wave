@@ -1,4 +1,4 @@
-# Trust-Boundary & Fail-Safe Reachability  *(Shifts 1 + 3 BUILT + per-module desktop; Shift 2 next)*
+# Trust-Boundary & Fail-Safe Reachability  *(BUILT — all three shifts + per-module desktop)*
 
 *Author: session 2026-09-18. Motivated by the Stirling-PDF run: a CLI script's command-injection was reported
 `confirmed`, and a SaaS IDOR got a repo-global "[desktop app]" tag. Both are blind spots in the Stage-3
@@ -104,8 +104,16 @@ tiers + local→review) is what generalizes; the exact name→tier mapping is tu
    signals winning over the aggregate. `prove` builds+saves it and consults it: a `confirmed` in a TEST-HARNESS
    module → review. Consumers (`_apply_gate`, `_desktop_authz`) take the model; fall back to live checks when
    absent. Verified on Stirling (scripts→cli, cucumber→test, saas→web).
-4. **Shift 2 — model-classified entry/module trust** (NEXT): let the model enrich `wave_trust.json`
-   (safe-direction only — may only mark MORE trusted), retiring the remaining `is_X` heuristics into it.
+4. **Shift 2 — model-classified trust. ✅ BUILT** (`trust.enrich`): the model reviews the `web` modules and may
+   DOWNGRADE any that are not really remote-facing (internal/admin-only, test, cli, library), with a cited
+   reason. Safe direction is ENFORCED in `_apply_cluster_actions`-style code, not just prompted: only an
+   existing `web` module, only TO a trusted context, only with a reason — a promote-to-`web` is rejected. The
+   reason is recorded in `wave_trust.json.refined`. New `internal` context: a `confirmed` there → review.
+   Opt-in: `wave trust <t> --deep`, and folded into `wave all --deep-reconcile`. A wrong call downgrades a real
+   finding to review (still shown), never mints a false confirm.
+
+**Net:** the three gate blind spots are closed at the root, the fail-safe default caps future ones, and the
+`is_X` heuristics are consolidating into one inspectable, model-enrichable artifact (`wave_trust.json`).
 
 ## 7. Open questions
 

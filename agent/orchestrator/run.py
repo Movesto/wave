@@ -265,8 +265,15 @@ def cmd_trust(args):
     from . import codemap, trust as trustmod
     cmap = codemap.build(args.target)
     tm = trustmod.build(cmap, args.target)
+    if getattr(args, "deep", False):                        # Shift 2: model refines web modules (safe-direction)
+        from .model import Model
+        tm = trustmod.enrich(Model(), tm, cmap)
     trustmod.save(tm, args.target)
     print(trustmod.summary(tm))
+    if tm.refined:
+        print("\nModel-refined (web -> more trusted):")
+        for mod, why in tm.refined.items():
+            print(f"  {mod}: {why}")
     print("\nModules (deployment context):")
     for mod, ctx in sorted(tm.modules.items(), key=lambda kv: kv[0]):
         print(f"  [{ctx:8}] {mod}")
@@ -343,7 +350,8 @@ def cmd_all(args):
     _banner(3, "PROOF LOOP: prove the survivors",
             f"canary + model investigation per survivor (up to {args.prove_budget}) -- watch [prove]/"
             f"[investigate] below; first XSS builds the browser image once ...")
-    by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online)
+    by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online,
+                        enrich_trust=getattr(args, "deep_reconcile", False))
     print(f"[all] prove DONE: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
           f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
 
@@ -585,6 +593,8 @@ def main():
 
     tr = sub.add_parser("trust", help="build + show the trust boundary (untrusted entries + module contexts)")
     tr.add_argument("target")
+    tr.add_argument("--deep", action="store_true",
+                    help="Shift 2: let the model refine 'web' modules that are not remote-facing (safe-direction)")
     tr.set_defaults(func=cmd_trust)
 
     cf = sub.add_parser("config", help="set the model/endpoint once (~/.wave/config), so runs need no env")

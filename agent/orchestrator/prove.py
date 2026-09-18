@@ -197,12 +197,20 @@ def _apply_gate(rec, c, cmap, tm=None):
       (2) REACHABILITY: no path from an untrusted-facing entry reaches the sink -> may be internal/intended."""
     if rec.get("verdict") != "confirmed":
         return rec
-    if tm is not None and tm.module_context(getattr(c, "file", "")) == "test":  # (0) trust-model module context
-        rec["verdict"] = "anomalous_state"
-        rec["why"] = ("[test-module] this sink is in TEST-HARNESS code (cucumber/behave/unit/e2e), not a "
-                      "production runtime surface -- exploitable only if the tests run on untrusted input; "
-                      "human review. " + rec.get("why", ""))
-        return rec
+    if tm is not None:                                       # (0) trust-model module context
+        mctx = tm.module_context(getattr(c, "file", ""))
+        if mctx == "test":
+            rec["verdict"] = "anomalous_state"
+            rec["why"] = ("[test-module] this sink is in TEST-HARNESS code (cucumber/behave/unit/e2e), not a "
+                          "production runtime surface -- exploitable only if the tests run on untrusted input; "
+                          "human review. " + rec.get("why", ""))
+            return rec
+        if mctx == "internal":                               # Shift 2: model marked this module non-remote-facing
+            rec["verdict"] = "anomalous_state"
+            rec["why"] = ("[internal-module] this module was assessed as INTERNAL / not remote/internet-facing "
+                          "(not a public attack surface) -- remote exploitability not established; human "
+                          "review. " + rec.get("why", ""))
+            return rec
     if c.cwe in reachability.SERVER_ONLY_CWE:                # (1) execution-context gate
         try:
             src = Path(c.file).read_text(encoding="utf-8", errors="replace")
@@ -326,7 +334,7 @@ def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=
 
 
 def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=True, max_steps=8, gate=True,
-        online=False):
+        online=False, enrich_trust=False):
     """Prove the detector's survivors (severity order, up to `budget`). Writes per-candidate verdicts to
     wave_findings.jsonl (resumable) + casefile.json. Returns (by_verdict, paths)."""
     target = str(target)
@@ -341,6 +349,8 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
     rel_index = {_rel(target, p): fi for p, fi in cmap.files.items()}
     from . import trust as trustmod                          # Shift 1: build+persist the trust boundary once
     tm = trustmod.build(cmap, target)
+    if enrich_trust and model is not None:                   # Shift 2 (opt-in): model refines it, safe-direction
+        tm = trustmod.enrich(model, tm, cmap)
     trustmod.save(tm, out_dir)
     print(f"[prove] {trustmod.summary(tm)}", flush=True)
 

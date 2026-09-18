@@ -69,7 +69,8 @@ def _module_roots(target, cap=200):
 class TrustModel:
     target: str
     entries: dict = field(default_factory=dict)             # func_name -> {trust, kind, files}
-    modules: dict = field(default_factory=dict)             # module_rel -> "web"|"desktop"|"cli"|"library"
+    modules: dict = field(default_factory=dict)             # module_rel -> "web"|"desktop"|"cli"|"library"|"internal"
+    refined: dict = field(default_factory=dict)             # module_rel -> reason (Shift 2: model-downgraded)
 
     def module_context(self, file):
         """web | desktop | cli | library | test -- the deployment context of the finding's file/module. Path
@@ -84,7 +85,8 @@ class TrustModel:
         return self.modules.get(_rel(root, self.target), "library")
 
     def to_dict(self):
-        return {"target": self.target, "entries": self.entries, "modules": self.modules}
+        return {"target": self.target, "entries": self.entries, "modules": self.modules,
+                "refined": self.refined}
 
 
 def _detect_desktop_shallow(root):
@@ -164,9 +166,76 @@ def load(out_dir):
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
         return TrustModel(target=d.get("target", str(out_dir)), entries=d.get("entries", {}),
-                          modules=d.get("modules", {}))
+                          modules=d.get("modules", {}), refined=d.get("refined", {}))
     except Exception:
         return None
+
+
+# Shift 2: the model may refine the trust boundary, but ONLY in the SAFE direction -- it may mark a 'web'
+# module MORE TRUSTED (internal/admin-only, test, CLI/build, dead library), never more exposed and never label
+# anything 'web'. A wrong call downgrades a real finding to review (still shown), never mints a false confirm.
+_TRUSTED_CTX = {"internal", "cli", "test", "library"}
+
+_ENRICH_SYS = (
+    "You are refining a security TRUST BOUNDARY. You are given modules currently labeled 'web' (assumed "
+    "remote/internet-facing). Flag any that are NOT actually a remote attack surface: an INTERNAL/admin-only "
+    "service, a TEST harness, CLI/BUILD tooling, or dead/library code. SAFE-DIRECTION RULE (hard): you may "
+    "ONLY make a module MORE trusted -- change 'web' to internal|cli|test|library. You may NEVER label "
+    "anything 'web' or make it more exposed. Cite a concrete reason (the module path/purpose). If unsure, "
+    "leave it out. Return ONE json object: "
+    '{"changes":[{"module":"<path>","context":"internal|cli|test|library","reason":"..."}]}'
+)
+
+
+def _module_entry_names(tm, module_rel):
+    key = "/" + module_rel.strip("/") + "/"
+    names = []
+    for n, e in tm.entries.items():
+        if any(key in ("/" + f.strip("/") + "/") for f in e.get("files", [])):
+            names.append(n)
+    return names
+
+
+def enrich(model, tm, cmap=None):
+    """Shift 2: let the model DOWNGRADE 'web' modules that are not really remote-facing (internal/test/cli/
+    library), safe-direction ONLY (enforced here, not just prompted). Records the reason in tm.refined.
+    Returns tm (mutated). Bounded to the 'web' module list, so cost is small."""
+    web = [m for m, c in tm.modules.items() if c == "web"]
+    if not web or model is None:
+        return tm
+    lines = []
+    for m in web:
+        ents = _module_entry_names(tm, m)
+        lines.append(f"- {m}  ({len(ents)} entr{'y' if len(ents) == 1 else 'ies'}"
+                     + (f"; e.g. {', '.join(ents[:6])}" if ents else "") + ")")
+    user = ("Modules currently labeled 'web':\n" + "\n".join(lines)
+            + "\n\nWhich of these are NOT actually remote/internet-facing? (safe-direction only)")
+    try:
+        raw = model.generate(_ENRICH_SYS, user, max_new_tokens=900)
+    except Exception:
+        return tm
+    changes = None
+    for scope in ((raw or "").split("</think>")[-1], raw or ""):
+        import re as _re
+        mobj = _re.search(r'\{.*\}', scope, _re.S)
+        if mobj:
+            try:
+                changes = json.loads(mobj.group(0)).get("changes")
+                break
+            except Exception:
+                continue
+    for ch in (changes or []):
+        if not isinstance(ch, dict):
+            continue
+        mod = str(ch.get("module", "")).strip().strip("/")
+        newc = str(ch.get("context", "")).lower().strip()
+        reason = str(ch.get("reason", ""))[:240]
+        # ENFORCE the safe direction: only an existing 'web' module, only TO a trusted context, only with a reason
+        if mod in tm.modules and tm.modules[mod] == "web" and newc in _TRUSTED_CTX and reason:
+            tm.modules[mod] = newc
+            tm.refined[mod] = f"web -> {newc}: {reason}"
+            print(f"[trust] model refined {mod}: web -> {newc}", flush=True)
+    return tm
 
 
 def summary(tm):

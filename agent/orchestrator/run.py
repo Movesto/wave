@@ -239,6 +239,19 @@ def cmd_patch(args):
             print(f"      Gate B (still loads):      {r['gate_b']}  -- {r.get('gate_b_note', '')[:60]}")
 
 
+def cmd_reconcile(args):
+    from . import reconcile as reconcilemod
+    reconciled, log = reconcilemod.run(args.target, findings_path=args.findings)
+    contradictions = [e for e in log if e["action"] == "contradiction"]
+    print(f"\nREVIEW & RECONCILE: {len(reconciled)} findings after dedup; "
+          f"{len(log)} merge(s), {len(contradictions)} contradiction(s) resolved")
+    for e in contradictions:
+        print(f"  [contradiction] {e['file']}:{e['where']}  {e['verdicts']} -> kept '{e['kept']}'")
+    # regenerate the readable report off the reconciled set
+    from . import report as _report
+    _report.generate(args.target)
+
+
 def _banner(n, title, detail=""):
     import time as _t
     _banner.t0 = getattr(_banner, "t0", _t.time())
@@ -309,6 +322,18 @@ def cmd_all(args):
     by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online)
     print(f"[all] prove DONE: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
           f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
+
+    # Stage 5 -- Review & Reconcile: dedup by location + resolve contradictions (before patch/report so patch
+    # acts on the reconciled set). Deterministic; never overturns a witnessed verdict. Runs after prove.
+    if not getattr(args, "no_reconcile", False):
+        print("\n" + "=" * 66 + "\n== REVIEW & RECONCILE  — dedup findings + resolve contradictions\n" + "=" * 66,
+              flush=True)
+        from . import reconcile as _reconcile
+        reconciled, _rlog = _reconcile.run(t)
+        by = {v: [] for v in ("confirmed", "anomalous_state", "refuted", "blocked", "believed",
+                              "not_exploitable")}
+        for f in reconciled:                                 # re-derive verdict groups so patch + summary reflect it
+            by.setdefault(f.get("verdict", "believed"), []).append(f)
 
     # Stage 4 -- patch + reverify (optional)
     fixed = []
@@ -499,6 +524,12 @@ def main():
                     help="KEEP a patch that passed both gates (default: dry-run, restore the source)")
     pt.set_defaults(func=cmd_patch)
 
+    rc = sub.add_parser("reconcile", help="Stage 5: dedup findings by location + resolve contradictions")
+    rc.add_argument("target")
+    rc.add_argument("--findings", default=None,
+                    help="path to wave_findings.jsonl (default <target>/wave_findings.jsonl)")
+    rc.set_defaults(func=cmd_reconcile)
+
     al = sub.add_parser("all", help="one-shot pipeline: eyes(notebook) -> detect -> prove [-> patch]")
     al.add_argument("target")
     al.add_argument("--notes-budget", type=int, default=40, metavar="N",
@@ -514,6 +545,8 @@ def main():
     al.add_argument("--all-files", action="store_true",
                     help="deep-read EVERY parsed source file, not just pinned (full coverage)")
     al.add_argument("--interactive", action="store_true", help="propose the read set; prune/extend it before reading")
+    al.add_argument("--no-reconcile", action="store_true",
+                    help="skip Stage 5 (dedup + contradiction resolution) before patch/report")
     al.set_defaults(func=cmd_all)
 
     rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")

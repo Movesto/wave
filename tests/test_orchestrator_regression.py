@@ -590,6 +590,53 @@ def test_not_exploitable_is_shown_in_report_not_hidden(tmp_path):
     assert "not_exploitable" in prove._VERDICT_ORDER
 
 
+# ============================ 9. Stage 5 -- review & reconcile (deterministic dedup) ============================
+
+def test_reconcile_merges_same_line_contradiction_keeps_witnessed():
+    # the netdata 1508 shape: same file+line, near-identical sinks (one with a `|| fatal` tail), contradictory
+    # verdicts -> ONE merged finding, the witnessed verdict kept over the reasoned one, dropped read preserved.
+    from agent.orchestrator import reconcile as rc
+    f1 = {"file": "u.sh", "line": "1508", "unit": "", "class": "cmd", "cwe": "CWE-78",
+          "sink": '. "$(dirname "${ENV}")/.install-type"', "verdict": "anomalous_state",
+          "evidence": "touch ran", "why": "reachability downgrade"}
+    f2 = {"file": "u.sh", "line": "1508", "unit": "", "class": "other", "cwe": "",
+          "sink": '. "$(dirname "${ENV}")/.install-type" || fatal ', "verdict": "not_exploitable",
+          "evidence": "", "why": "ENV is not attacker-controlled"}
+    out, log = rc.reconcile([f1, f2])
+    assert len(out) == 1
+    assert out[0]["verdict"] == "anomalous_state"            # witnessed never dropped for a reasoned verdict
+    assert out[0]["class"] == "cmd"                          # specific class beats 'other'
+    assert "not attacker-controlled" in out[0]["why"]        # the dropped read is preserved, not hidden
+    assert log and log[0]["action"] == "contradiction"
+
+
+def test_reconcile_keeps_confirmed_over_reasoned_and_never_over_merges():
+    from agent.orchestrator import reconcile as rc
+    # witnessed confirmed + reasoned on the same sink -> confirmed kept (guardrail)
+    same = [{"file": "a.py", "line": "5", "unit": "f()", "class": "sqli", "sink": "execute(q)",
+             "verdict": "confirmed", "why": "uid=0"},
+            {"file": "a.py", "line": "5", "unit": "f()", "class": "sqli", "sink": "execute(q)",
+             "verdict": "believed", "why": "maybe"}]
+    o1, _ = rc.reconcile(same)
+    assert len(o1) == 1 and o1[0]["verdict"] == "confirmed"
+    # DIFFERENT sinks on the same line are distinct bugs -> never merged
+    diff = [{"file": "b.py", "line": "9", "unit": "g()", "class": "sqli", "sink": "execute(q)", "verdict": "believed"},
+            {"file": "b.py", "line": "9", "unit": "g()", "class": "xss", "sink": "render(t)", "verdict": "believed"}]
+    o2, _ = rc.reconcile(diff)
+    assert len(o2) == 2
+
+
+def test_reconcile_is_idempotent_and_deletes_nothing():
+    from agent.orchestrator import reconcile as rc
+    recs = [{"file": "u.sh", "line": "1508", "unit": "", "class": "cmd", "sink": "s", "verdict": "anomalous_state"},
+            {"file": "u.sh", "line": "1508", "unit": "", "class": "other", "sink": "s", "verdict": "not_exploitable"},
+            {"file": "z.py", "line": "1", "unit": "h()", "class": "ssrf", "sink": "get(u)", "verdict": "believed"}]
+    out, _ = rc.reconcile(recs)
+    assert len(out) == 2                                     # the two 1508s merge; z.py stays
+    out2, log2 = rc.reconcile(out)                           # re-running changes nothing
+    assert len(out2) == 2 and not log2
+
+
 class _Res:
     def __init__(self, out): self.command, self.stdout, self.stderr, self.exit_code, self.duration, self.timed_out = "cmd", out, "", 0, 0.1, False
 

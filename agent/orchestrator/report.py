@@ -61,6 +61,7 @@ def generate(target, out_dir=None, model="", patches_path=None):
     src = Path(out_dir) if out_dir else target
     findings = _last(_load(src / "wave_findings.jsonl"))
     patches = {(p.get("file"), p.get("line")): p for p in _load(patches_path or (src / "wave_patches.jsonl"))}
+    reconcile_log = _load(src / "wave_reconcile.jsonl")       # Stage 5 audit trail (may be empty/absent)
 
     by = {v: [] for v in _ORDER}
     for r in findings:
@@ -82,6 +83,15 @@ def generate(target, out_dir=None, model="", patches_path=None):
              f"{n.get('not_exploitable', 0)} reasoned non-issues · {n.get('refuted', 0)} cleared as safe",
              f"- {n_fixed} fixed (Stage 4 patch, exploit demonstrably no longer fires)",
              ""]
+    if reconcile_log:                                        # Stage 5 ran and merged something
+        _contra = [e for e in reconcile_log if e.get("action") == "contradiction"]
+        lines.append(f"- {len(reconcile_log)} finding(s) merged in review"
+                     + (f", {len(_contra)} contradiction(s) resolved" if _contra else "")
+                     + " (see `wave_reconcile.jsonl`)")
+        for e in _contra:
+            lines.append(f"  - reconciled `{e.get('file')}:{e.get('where')}` — "
+                         f"{e.get('verdicts')} → kept **{e.get('kept')}**")
+        lines.append("")
     # one plain-language line on what the run amounts to, so the top of the file always says what happened
     if n.get("confirmed"):
         lines.append(f"**Bottom line:** {n['confirmed']} confirmed vulnerabilit"

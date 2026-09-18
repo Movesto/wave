@@ -1629,12 +1629,35 @@ def test_is_desktop_app_false_for_plain_repo(tmp_path):
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
     assert reachability.is_desktop_app(str(tmp_path)) is False
 
-def test_desktop_authz_downgrades_only_authz():
-    c_authz = _cand(cwe="CWE-639"); c_authz.__dict__["family"] = "IDOR"
-    c_sqli = _cand(cwe="CWE-89"); c_sqli.__dict__["family"] = "sqli"
-    r1 = prove._desktop_authz({"verdict": "anomalous_state", "why": "no check"}, c_authz, True)
+def test_desktop_authz_downgrades_only_authz(tmp_path):
+    from agent.orchestrator import reachability
+    reachability._detect_desktop.cache_clear()
+    # a desktop repo (electron marker) with a plain authz file and a server-endpoint file
+    (tmp_path / "package.json").write_text('{"devDependencies":{"electron":"1"}}', encoding="utf-8")
+    (tmp_path / "store.py").write_text("def get(id):\n    return db[id]\n", encoding="utf-8")
+    (tmp_path / "ctrl.java").write_text("@RestController\nclass C { @GetMapping String f(@PathVariable String id){} }",
+                                        encoding="utf-8")
+    c_authz = _cand(file=str(tmp_path / "store.py"), cwe="CWE-639"); c_authz.__dict__["family"] = "IDOR"
+    c_sqli = _cand(file=str(tmp_path / "store.py"), cwe="CWE-89"); c_sqli.__dict__["family"] = "sqli"
+    c_route = _cand(file=str(tmp_path / "ctrl.java"), cwe="CWE-639"); c_route.__dict__["family"] = "IDOR"
+    # authz in a plain (non-endpoint) file of a desktop app -> downgraded
+    r1 = prove._desktop_authz({"verdict": "anomalous_state", "why": "no check"}, c_authz, str(tmp_path))
     assert r1["verdict"] == "believed" and r1["confidence"] == "low" and r1["desktop_context"]
-    r2 = prove._desktop_authz({"verdict": "confirmed", "why": "marker"}, c_sqli, True)
-    assert r2["verdict"] == "confirmed" and "desktop_context" not in r2      # injection untouched
-    r3 = prove._desktop_authz({"verdict": "anomalous_state", "why": "x"}, c_authz, False)
-    assert r3["verdict"] == "anomalous_state"                                # not a desktop app -> untouched
+    # injection untouched even in a desktop app
+    r2 = prove._desktop_authz({"verdict": "confirmed", "why": "marker"}, c_sqli, str(tmp_path))
+    assert r2["verdict"] == "confirmed" and "desktop_context" not in r2
+    # SERVER ENDPOINT (web route) authz is a real multi-tenant boundary -> NOT downgraded (the Stirling saas bug)
+    r3 = prove._desktop_authz({"verdict": "anomalous_state", "why": "no ownership check"}, c_route, str(tmp_path))
+    assert r3["verdict"] == "anomalous_state" and "desktop_context" not in r3
+
+
+def test_desktop_is_scoped_per_module_not_repo_global(tmp_path):
+    # a repo that ships a desktop build in one module must NOT tag a sibling web module as desktop (Stirling)
+    from agent.orchestrator import reachability
+    reachability._detect_desktop.cache_clear()
+    (tmp_path / "desktop").mkdir(); (tmp_path / "desktop" / "package.json").write_text(
+        '{"devDependencies":{"electron":"1"}}', encoding="utf-8")
+    (tmp_path / "saas").mkdir(); (tmp_path / "saas" / "build.gradle").write_text("plugins {}", encoding="utf-8")
+    (tmp_path / "saas" / "Ctrl.java").write_text("class C {}", encoding="utf-8")
+    assert reachability.is_desktop_app(str(tmp_path), str(tmp_path / "desktop" / "app.js"))   # desktop module
+    assert not reachability.is_desktop_app(str(tmp_path), str(tmp_path / "saas" / "Ctrl.java"))  # web module

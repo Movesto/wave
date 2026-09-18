@@ -157,12 +157,49 @@ import functools
 from pathlib import Path as _Path
 
 _DESKTOP_SKIP = {"node_modules", ".git", "target", "dist", "build", "vendor", ".venv", "venv"}
+_MODULE_MANIFESTS = ("build.gradle", "build.gradle.kts", "pom.xml", "package.json", "Cargo.toml",
+                     "pyproject.toml", "go.mod", "composer.json", "Gemfile")
+
+# a file that IS a server/web endpoint -- a real multi-tenant boundary where authz matters, even in a repo
+# that ALSO ships a desktop build (the Stirling app/saas case). Overrides the desktop-authz downgrade.
+_SERVER_ENDPOINT = re.compile(
+    r"@RestController|@Controller\b|@(Get|Post|Put|Delete|Patch|Request)Mapping|@PathVariable|"
+    r"HttpServletRequest|@app\.(route|get|post|put|delete|patch)|@router\.|@blueprint|APIRouter\(|"
+    r"FastAPI\(|Flask\(|express\(\)|\brouter\.(get|post|put|delete)\(|app\.(get|post|put|delete)\(", re.I)
 
 
-@functools.lru_cache(maxsize=64)
-def is_desktop_app(target):
-    """True for a Tauri or Electron desktop app (single-user, local). Deterministic; cached per path."""
-    root = _Path(target)
+def is_server_endpoint(path, source=""):
+    """True when the file exposes an HTTP/server endpoint (route decorator / servlet / framework router). Such
+    a file is a real multi-tenant boundary -- authz applies there regardless of any sibling desktop build."""
+    if not source:
+        try:
+            source = _Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+    return bool(_SERVER_ENDPOINT.search(source))
+
+
+def _module_root(file, repo_root):
+    """The nearest ancestor dir (within repo_root) that has a build manifest -- the finding's MODULE root; else
+    repo_root. Lets desktop-ness be judged per-module so a web module isn't tagged desktop by a sibling build."""
+    root = _Path(repo_root).resolve()
+    try:
+        cur = _Path(file).resolve()
+        cur = cur.parent if cur.suffix else cur
+    except Exception:
+        return root
+    while True:
+        if any((cur / m).exists() for m in _MODULE_MANIFESTS):
+            return cur
+        if cur == root or root not in cur.parents:
+            return root
+        cur = cur.parent
+
+
+@functools.lru_cache(maxsize=128)
+def _detect_desktop(root):
+    """Tauri/Electron markers anywhere under `root` (a repo or a single module). Cached per path."""
+    root = _Path(root)
     try:
         if (root / "src-tauri").is_dir():                    # Tauri's conventional backend dir
             return True
@@ -180,3 +217,11 @@ def is_desktop_app(target):
     except Exception:
         pass
     return False
+
+
+def is_desktop_app(target, file=None):
+    """Desktop (single-user Tauri/Electron) context. With `file`, judged for the MODULE containing that file
+    (so a web module in a repo that ALSO ships a desktop build is NOT mislabeled desktop). Without `file`,
+    whole-repo (legacy). Deterministic; cached."""
+    root = _module_root(file, target) if file else _Path(target)
+    return _detect_desktop(str(root))

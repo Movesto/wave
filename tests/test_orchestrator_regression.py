@@ -157,15 +157,47 @@ def internal_only(name):
 def test_reachability_route_reaches_sink(tmp_path):
     _write(tmp_path, "r.py", _REACH_SRC)
     cmap = codemap.build(str(tmp_path))
-    reachable, conf, _ = reachability.gate(cmap, "do_it")
-    assert reachable and conf == "high"          # unique name -> high confidence
+    reachable, conf, _, trust = reachability.gate(cmap, "do_it")
+    assert reachable and conf == "high" and trust == "remote"   # a route is a REMOTE entry
 
 
 def test_reachability_internal_only_not_reached(tmp_path):
     _write(tmp_path, "r.py", _REACH_SRC)
     cmap = codemap.build(str(tmp_path))
-    reachable, _conf, _ = reachability.gate(cmap, "internal_only")
-    assert not reachable
+    reachable, _conf, _, trust = reachability.gate(cmap, "internal_only")
+    assert not reachable and trust is None
+
+
+_CLI_SRC = '''import argparse
+def run_command(cmd):
+    __import__("os").system(cmd)          # the sink -- injectable, but reachable only via a CLI main()
+def main():
+    p = argparse.ArgumentParser(); a = p.parse_args()
+    run_command("echo " + a.x)
+if __name__ == "__main__":
+    main()
+'''
+
+
+def test_reachability_cli_main_is_local_not_remote(tmp_path):
+    # a script's main() is a LOCAL/process entry, NOT a remote attack surface (Shift 3 fail-safe)
+    _write(tmp_path, "scripts/tool.py", _CLI_SRC)
+    cmap = codemap.build(str(tmp_path))
+    reachable, _conf, note, trust = reachability.gate(cmap, "run_command")
+    assert reachable and trust == "local"        # reached, but only via a CLI main()
+    assert "local entry" in note
+
+
+def test_apply_gate_downgrades_local_only_confirm_to_review(tmp_path):
+    # a confirmed cmd-injection reachable only via a CLI main() -> anomalous_state (needs review), not confirmed
+    _write(tmp_path, "scripts/tool.py", _CLI_SRC)
+    cmap = codemap.build(str(tmp_path))
+    c = mock.Mock(cwe="CWE-78", family="cmd", unit="run_command(cmd)",
+                  file=str(tmp_path / "scripts" / "tool.py"))
+    rec = {"verdict": "confirmed", "taint": "flows", "oracle": "rung1", "why": "marker reached shell"}
+    out = prove._apply_gate(rec, c, cmap)
+    assert out["verdict"] == "anomalous_state"
+    assert "local-entry" in out["why"] or "local/CLI" in out["why"]
 
 
 _AMBIG_SRC = '''class _App:
@@ -190,8 +222,8 @@ def test_reachability_ambiguous_edge_is_low_confidence(tmp_path):
     # `decode` is defined twice -> the route->...->decode chain leans on a name-based guess -> low confidence
     _write(tmp_path, "a.py", _AMBIG_SRC)
     cmap = codemap.build(str(tmp_path))
-    reachable, conf, _ = reachability.gate(cmap, "decode")
-    assert reachable and conf == "low"
+    reachable, conf, _, trust = reachability.gate(cmap, "decode")
+    assert reachable and conf == "low" and trust == "remote"
 
 
 def test_is_frontend_browser_global():

@@ -61,27 +61,49 @@ _ROUTE_HINTS = ("route", ".get(", ".post(", ".put(", ".delete(", ".patch(", "app
                 "@getmapping", "@postmapping", "@putmapping", "@deletemapping", "@patchmapping",       # spring
                 "@requestmapping",
                 "[httpget", "[httppost", "[httpput", "[httpdelete", "[httppatch", "[route(", "#[route")  # c#/symfony
-_ENTRY_NAMES = {"main", "handler", "handle", "lambda_handler", "handle_request", "on_message", "on_request"}
+# Entry TRUST TIERS (Shift 3, docs/trust_boundary_plan.md). 'remote' = a network/route/event handler that
+# carries ATTACKER input. 'local' = a process/CLI entry -- a script's main() run from a shell, whose input is
+# argv/local and whose operator is a developer/CI, NOT a remote attacker. A `confirmed` needs a REMOTE path;
+# a merely-LOCAL reach means remote exploitability is NOT established -> human review (fail-safe default).
+_REMOTE_ENTRY_NAMES = {"handler", "handle", "lambda_handler", "handle_request", "on_message", "on_request"}
+_LOCAL_ENTRY_NAMES = {"main"}                               # a CLI/process main() is NOT a remote attack surface
+
+
+def entry_trust(func):
+    """The trust level of an entry point: 'remote' (route decorator or a network/event handler name),
+    'local' (a bare CLI/process main()), or None (not an entry). Route decorators always win."""
+    decs = " ".join(getattr(func, "decorators", None) or []).lower()
+    if any(h in decs for h in _ROUTE_HINTS):
+        return "remote"
+    name = (getattr(func, "name", "") or "").lower()
+    if name in _REMOTE_ENTRY_NAMES:
+        return "remote"
+    if name in _LOCAL_ENTRY_NAMES:
+        return "local"
+    return None
 
 
 def is_untrusted_entry(func):
     """True if `func` takes external/attacker input directly: a decorated HTTP route, or a
     main/handler/consumer entry. (Merely being `exported` is NOT enough -- a library's public API is called
-    by trusted code; that is exactly the eval-runner false positive.)"""
-    decs = " ".join(getattr(func, "decorators", None) or []).lower()
-    if any(h in decs for h in _ROUTE_HINTS):
-        return True
-    return (getattr(func, "name", "") or "").lower() in _ENTRY_NAMES
+    by trusted code; that is exactly the eval-runner false positive.) See entry_trust for the tier."""
+    return entry_trust(func) is not None
 
 
 def reaches_untrusted_entry(cmap, sink_name, max_hops=12):
-    """BFS BACKWARD over the call graph from `sink_name` to an untrusted-facing entry.
-    Returns (entry_func, path) where path is [entry, ..., sink] names; or (None, None) if none is reached."""
+    """BFS BACKWARD over the call graph from `sink_name` to an untrusted-facing entry. PREFERS a REMOTE entry:
+    a LOCAL/CLI entry is remembered as a fallback but the search continues, so a sink reachable from BOTH a
+    route and a main() is reported REMOTE. Returns (entry_func, path, trust) with trust in {'remote','local'},
+    or (None, None, None) if no entry is reached."""
     if not sink_name:
-        return None, None
+        return None, None, None
+    fallback = None                                         # a local entry found -> keep looking for a remote one
     for f in cmap.funcs.get(sink_name, []):                 # the sink function is itself an entry?
-        if is_untrusted_entry(f):
-            return f, [sink_name]
+        t = entry_trust(f)
+        if t == "remote":
+            return f, [sink_name], "remote"
+        if t == "local" and fallback is None:
+            fallback = (f, [sink_name], "local")
     seen = {sink_name}
     q = deque([[sink_name]])
     while q:
@@ -93,10 +115,13 @@ def reaches_untrusted_entry(cmap, sink_name, max_hops=12):
                 continue
             seen.add(caller)
             for f in cmap.funcs.get(caller, []):
-                if is_untrusted_entry(f):
-                    return f, [caller] + path
+                t = entry_trust(f)
+                if t == "remote":
+                    return f, [caller] + path, "remote"
+                if t == "local" and fallback is None:
+                    fallback = (f, [caller] + path, "local")
             q.append([caller] + path)
-    return None, None
+    return fallback if fallback else (None, None, None)
 
 
 def _ambiguous_names(cmap, path):
@@ -107,21 +132,22 @@ def _ambiguous_names(cmap, path):
 
 
 def gate(cmap, sink_func_name):
-    """Classify a proven sink by reachability. Returns (reachable: bool, confidence: str, note: str).
-    confidence 'high' = a clean chain with no ambiguous (common-name) edges; 'low' = the ONLY path relies on
-    an ambiguous name-based edge (likely a false chain -- caller of the intrinsic-sink bar in prove)."""
-    entry, path = reaches_untrusted_entry(cmap, (sink_func_name or "").split("(")[0].strip())
+    """Classify a proven sink by reachability. Returns (reachable: bool, confidence: str, note: str,
+    trust: str|None). confidence 'high' = a clean chain with no ambiguous (common-name) edges; 'low' = the
+    ONLY path relies on an ambiguous name-based edge. trust = the reached entry's tier ('remote'|'local'):
+    a 'local' (CLI/process) reach means remote exploitability is NOT established -> prove downgrades to review."""
+    entry, path, trust = reaches_untrusted_entry(cmap, (sink_func_name or "").split("(")[0].strip())
     if entry is None:
         return False, "high", (
-            "sink PROVEN to fire, but no path from an untrusted-facing entry (route / CLI / handler) reaches "
-            "it -- may be internal/intended; needs human review (function-level, name-based)")
+            "sink PROVEN to fire, but no path from an untrusted-facing entry (route / handler) reaches it -- "
+            "may be internal/intended; needs human review (function-level, name-based)"), None
     ambig = _ambiguous_names(cmap, path)
     conf = "low" if ambig else "high"
-    note = f"reachable from untrusted entry {entry.name} via {'->'.join(path)}"
+    note = f"reachable from {trust} entry {entry.name} via {'->'.join(path)}"
     if conf == "low":
         note += (f"  [LOW confidence: {sorted(set(ambig))} is defined in multiple places -- this name-based "
                  f"call edge may be false (open Q 10.1)]")
-    return True, conf, note
+    return True, conf, note, trust
 
 
 # --- Desktop-app context: a Tauri/Electron app is single-user + local, so there is NO multi-tenant

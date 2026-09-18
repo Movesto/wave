@@ -217,11 +217,22 @@ def _apply_gate(rec, c, cmap):
         rec["why"] = ("[value-taint] the sink arguments do not derive from untrusted input in this function "
                       "-- likely a mislabel; human review. " + rec.get("why", ""))
         return rec
-    reachable, conf, note = reachability.gate(cmap, c.unit)  # (3) reachability gate (+ confidence)
+    reachable, conf, note, trust = reachability.gate(cmap, c.unit)  # (3) reachability gate (+ confidence + tier)
     rec["reachability"] = note
     if not reachable:
         rec["verdict"] = "anomalous_state"
         rec["why"] = f"[reachability] {note}. " + rec.get("why", "")
+        return rec
+    # (3b) FAIL-SAFE tier gate (Shift 3): the sink is reachable only via a LOCAL/CLI entry (a script's main()
+    # run from a shell), NOT a remote/network route -- so remote attacker-control is NOT established. The
+    # mechanism is proven, but exploitability in a remote threat model is a judgment -> human review. This
+    # catches CLI/build/cron tooling generally, by the ENTRY's trust nature, without a path-based heuristic.
+    if trust == "local":
+        rec["verdict"] = "anomalous_state"
+        rec["why"] = ("[local-entry] reachable only via a LOCAL/CLI entry (e.g. a script's main() run from a "
+                      "shell), not a remote route -- remote attacker-control NOT established. Real only if this "
+                      "program is run on untrusted input (e.g. CI on an untrusted PR). Human review. "
+                      + rec.get("why", ""))
         return rec
     # (4) intrinsic-sink bar: deser/eval/ssti sinks are dangerous BY NATURE -- running them with a handed-in
     # payload proves the MECHANISM (trivially true), not that an ATTACKER controls the input. So a `confirmed`

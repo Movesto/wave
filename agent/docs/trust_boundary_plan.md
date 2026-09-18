@@ -1,0 +1,110 @@
+# Trust-Boundary & Fail-Safe Reachability  *(PLAN — Shift 3 building now; Shifts 1–2 later)*
+
+*Author: session 2026-09-18. Motivated by the Stirling-PDF run: a CLI script's command-injection was reported
+`confirmed`, and a SaaS IDOR got a repo-global "[desktop app]" tag. Both are blind spots in the Stage-3
+context/reachability gates. This doc is about NOT solving them with yet another `is_X` heuristic.*
+
+## 1. The pattern we want to stop
+
+wave keeps discovering threat-model distinctions **reactively** and hardcoding each as a narrow gate:
+`is_frontend`, `is_desktop_app`, the build-script note, and now a proposed `is_cli_script`. Each covers ONE
+context, is name/path-based (brittle), and is found only after a repo trips it. It is whack-a-mole.
+
+Two root causes:
+
+1. **A semantic question answered with syntactic heuristics.** "Who controls this input? / what is the trust
+   context of this code?" is a threat-model judgment. We answer it per-sink with name- and path-matching
+   (`main`, `scripts/`, Tauri markers), and names are a shadow of the real thing, so they misfire.
+2. **The default on an *unrecognized* context is the DANGEROUS one.** A gate must *affirmatively recognize*
+   "CLI / frontend / desktop" to downgrade; if it does not recognize the context, the finding stays
+   **`confirmed`**. So every context we have not yet hardcoded produces a *false confirm*. The failure mode is
+   open-ended **by construction** — that is why it never ends.
+
+## 2. The general fix — three shifts (not one more gate)
+
+### Shift 1 — Establish the trust boundary ONCE, as an artifact
+Instead of every gate re-deriving "is this untrusted?" per finding, Stage 1 produces one **trust model of the
+target**: the set of *untrusted entry points* (HTTP routes, queues, file uploads, external deserialization) and
+the *deployment context of each module* (multi-tenant web service / single-user desktop / CLI-and-build
+tooling). Reachability then asks ONE consistent question — *does this sink trace back to an entry in the
+untrusted set?* — with no per-sink heuristic soup. A CLI `main()` and a build script are simply **not in the
+untrusted set**, so nothing downstream has to recognize them. (This promotes the existing Attack-Surface Ledger
+/ entry_points concept into the single authority for reachability.)
+
+### Shift 2 — The MODEL classifies entry/module trust context, grounded in evidence
+The model is already good at this (its own notes correctly called `auto_translate.py` a CLI script and
+`AiProxyController` a route). Today that judgment is unused; a brittle heuristic decides instead. If the model
+classifies each entry point once during eyes ("web route / CLI tool / build script / test harness / cron /
+internal / message consumer") and records it, the trust set **generalizes to contexts no heuristic
+anticipated** — without new code. Guardrail: this classification may only mark things *trusted* (→ needs
+review), never fabricate a confirm — safe direction, so a wrong call is conservative, not dangerous.
+
+### Shift 3 — Make the default FAIL SAFE  *(building first)*
+The word "confirmed" conflates two things: *mechanism proven* (the sink is injectable — what rung1/investigate
+actually witness, and do well) vs *exploitable* (mechanism **and** a real untrusted source reaches it). Require
+**positive evidence of a remote-untrusted path** to call something exploitable; absent that, degrade to
+*"mechanism proven, remote reachability not established → review."* Then an **unrecognized context fails safe**:
+you never get a false confirm from a context we did not foresee — only from one where remote reachability is
+*affirmatively* shown. Gates then only ever *elevate* confidence; a blind spot's blast radius drops from "wrong
+`confirmed`" to "conservatively flagged for a human."
+
+This is why Shift 3 goes first: **it caps the damage of every future blind spot**, including ones Shifts 1–2
+have not covered yet.
+
+## 3. How this dissolves the current bugs (and the next ten)
+
+- **CLI (the false confirm):** the CLI `main()` is a *local/process* entry, not a *remote* one. Under Shift 3 a
+  `confirmed` needs a REMOTE-untrusted path; a sink reachable ONLY via a local `main()` degrades to review.
+  `auto_translate.py`'s injection becomes "mechanism proven, needs review (real only if run on untrusted input,
+  e.g. CI on an untrusted PR)". No `is_cli_script` path-heuristic — it keys on the *entry's trust nature*, so a
+  CLI tool outside `scripts/`, a cron job, an internal admin tool are all caught the same way; a script that
+  *is* a web handler (has a route) stays a remote confirm.
+- **Desktop (the mislabel):** deployment context is a property of the *module* (Shift 1), decided once, so the
+  `app/saas` web IDOR consults *its* module's context (multi-tenant web) rather than a repo-global boolean set
+  by a sibling `app/desktop` build.
+- **The next one:** if reachability cannot positively tie the sink to a remote-untrusted entry, it is *review*,
+  not a false confirm — regardless of what the unforeseen context is.
+
+## 4. Shift 3 — concrete design (build now)
+
+Entry points gain a **trust tier**, and a `confirmed` requires a REMOTE tier:
+
+- `reachability.entry_trust(func)` → `"remote"` (a route decorator, or a network/event handler name like
+  `handler`/`lambda_handler`/`on_message`), `"local"` (a process/CLI entry — a bare `main()`), or `None`.
+- `reaches_untrusted_entry` prefers a REMOTE entry: it keeps searching past a local entry and only falls back to
+  `local` if no remote path exists (so a sink reachable from BOTH a route and a `main()` is `remote`).
+- `gate(...)` returns `(reachable, confidence, note, trust)`.
+- `prove._apply_gate`: after the existing "no untrusted path → review" downgrade, add — a `confirmed` whose only
+  reaching entry is `local` → **`anomalous_state`** with a "reachable only via a local/CLI entry; remote
+  attacker-control not established; real only if run on untrusted input" note. A `remote` reach is untouched.
+
+Only `main` moves to the LOCAL tier for now (the observed bug); `handler`/`handle`/`lambda_handler`/etc. stay
+REMOTE (they are typically network/event handlers — moving them would cost real recall). The *mechanism* (trust
+tiers + local→review) is what generalizes; the exact name→tier mapping is tuning.
+
+## 5. Tradeoffs (honest)
+
+- **Recall cost:** a real vuln reachable only via a `main()` now sits in review until a remote path is shown.
+  For genuine CLI/CI-injection targets that is the correct, honest state (it *is* a judgment call). Route-based
+  web vulns are unaffected.
+- **Shift 2 introduces a model judgment** — bounded by the safe-direction guardrail (can only lower a claim to
+  review, never fabricate a confirm).
+- **Existing gates become inputs, not rivals:** `is_frontend`, `is_desktop_app`, `not_exploitable`, the taint
+  gate — all become *contributors to the one trust model* over time, rather than independent per-sink checks.
+
+## 6. Build order
+
+1. **Shift 3 — fail-safe default (entry trust tiers + local→review). BUILDING NOW.** Deterministic, testable,
+   caps every future blind spot. Encodes the Stirling CLI miss as a regression test.
+2. **Per-module desktop** (the tactical second fix) — a small step toward Shift 1's per-module context.
+3. **Shift 1 — trust-boundary artifact:** promote entry_points into the single reachability authority, with
+   per-module deployment context.
+4. **Shift 2 — model-classified entry/module trust**, retiring the `is_X` heuristics into it.
+
+## 7. Open questions
+
+1. Name→tier mapping: is `handler`/`handle` remote enough, or should ambiguous bare-name entries also be
+   `local` (more review, less recall)? Default: keep them remote; revisit with data.
+2. Should Shift 3 also require HIGH-confidence (non-ambiguous) reachability for *every* confirm, or only apply
+   the local-tier downgrade? Default: only the local-tier downgrade now (requiring high-confidence everywhere
+   would cost too much recall given the coarse name-based graph); revisit once value-taint (§10.4) lands.

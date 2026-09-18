@@ -261,6 +261,21 @@ def cmd_reconcile(args):
     _report.generate(args.target)
 
 
+def cmd_trust(args):
+    from . import codemap, trust as trustmod
+    cmap = codemap.build(args.target)
+    tm = trustmod.build(cmap, args.target)
+    trustmod.save(tm, args.target)
+    print(trustmod.summary(tm))
+    print("\nModules (deployment context):")
+    for mod, ctx in sorted(tm.modules.items(), key=lambda kv: kv[0]):
+        print(f"  [{ctx:8}] {mod}")
+    print(f"\nUntrusted entry points ({len(tm.entries)}):")
+    for name, e in sorted(tm.entries.items(), key=lambda kv: (kv[1]['trust'] != 'remote', kv[0]))[:60]:
+        print(f"  [{e['trust']:6} {e['kind']:8}] {name}")
+    print("\nwrote wave_trust.json")
+
+
 def _banner(n, title, detail=""):
     import time as _t
     _banner.t0 = getattr(_banner, "t0", _t.time())
@@ -567,6 +582,10 @@ def main():
     rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")
     rpt.add_argument("target")
     rpt.set_defaults(func=cmd_report)
+
+    tr = sub.add_parser("trust", help="build + show the trust boundary (untrusted entries + module contexts)")
+    tr.add_argument("target")
+    tr.set_defaults(func=cmd_trust)
 
     cf = sub.add_parser("config", help="set the model/endpoint once (~/.wave/config), so runs need no env")
     cf.add_argument("action", choices=["set", "show"])

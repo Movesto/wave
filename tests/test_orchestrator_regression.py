@@ -695,6 +695,38 @@ def test_reconcile_guardrail_witnessed_immutable_to_prose():
     assert reinvest == [("a.py", 10, "ssrf")]
 
 
+def test_trust_model_classifies_modules_and_entries(tmp_path):
+    from agent.orchestrator import codemap, trust
+    # a web module (a route), a desktop module (electron), a CLI script, a test file
+    (tmp_path / "saas").mkdir(); (tmp_path / "saas" / "build.gradle").write_text("plugins{}", encoding="utf-8")
+    (tmp_path / "saas" / "Ctrl.java").write_text(
+        "@RestController\nclass C { @GetMapping public String get(){ return sink(); } }", encoding="utf-8")
+    (tmp_path / "desk").mkdir(); (tmp_path / "desk" / "package.json").write_text(
+        '{"devDependencies":{"electron":"1"}}', encoding="utf-8")
+    (tmp_path / "scripts").mkdir(); (tmp_path / "scripts" / "tool.py").write_text(
+        "import argparse\ndef main():\n    import os; os.system('x')\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir(); (tmp_path / "tests" / "t_it.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    cmap = codemap.build(str(tmp_path))
+    tm = trust.build(cmap, str(tmp_path))
+    assert tm.module_context(str(tmp_path / "saas" / "Ctrl.java")) == "web"
+    assert tm.module_context(str(tmp_path / "desk" / "main.js")) == "desktop"
+    assert tm.module_context(str(tmp_path / "scripts" / "tool.py")) == "cli"       # path signal
+    assert tm.module_context(str(tmp_path / "tests" / "t_it.py")) == "test"        # path signal
+    # round-trips through disk
+    trust.save(tm, tmp_path)
+    tm2 = trust.load(tmp_path)
+    assert tm2 and tm2.modules == tm.modules
+
+
+def test_apply_gate_downgrades_confirmed_in_test_module(tmp_path):
+    from agent.orchestrator import trust
+    tm = trust.TrustModel(target=str(tmp_path), entries={}, modules={})
+    c = mock.Mock(cwe="CWE-918", family="ssrf", unit="step(x)",
+                  file=str(tmp_path / "tests" / "cucumber" / "steps.py"))
+    out = prove._apply_gate({"verdict": "confirmed", "why": "hit listener"}, c, None, tm)
+    assert out["verdict"] == "anomalous_state" and "test-module" in out["why"]
+
+
 def test_reconcile_reinvestigation_only_a_tool_run_changes_a_verdict(tmp_path):
     # Phase 2/3 recall: the model flags a dismissed look-alike twin, and ONLY a tool re-prove may upgrade it.
     import json as _json

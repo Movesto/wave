@@ -188,13 +188,20 @@ def _record_outcome(case, hyp_id, c, rec):
                     note=rec.get("why", ""))
 
 
-def _apply_gate(rec, c, cmap):
+def _apply_gate(rec, c, cmap, tm=None):
     """Context + reachability gates on a `confirmed` sink (never drops -- only re-categorizes to
     `anomalous_state`/human-review):
+      (0) MODULE CONTEXT (trust model): a sink in a TEST-HARNESS module is not a production runtime surface.
       (1) CONTEXT: a server-side class proven in FRONTEND/browser code is a mislabel (a browser fetch is not
           server-side SSRF; the browser has no SQL/fs/shell).
       (2) REACHABILITY: no path from an untrusted-facing entry reaches the sink -> may be internal/intended."""
     if rec.get("verdict") != "confirmed":
+        return rec
+    if tm is not None and tm.module_context(getattr(c, "file", "")) == "test":  # (0) trust-model module context
+        rec["verdict"] = "anomalous_state"
+        rec["why"] = ("[test-module] this sink is in TEST-HARNESS code (cucumber/behave/unit/e2e), not a "
+                      "production runtime surface -- exploitable only if the tests run on untrusted input; "
+                      "human review. " + rec.get("why", ""))
         return rec
     if c.cwe in reachability.SERVER_ONLY_CWE:                # (1) execution-context gate
         try:
@@ -249,7 +256,7 @@ def _apply_gate(rec, c, cmap):
 _AUTHZ_CWE = {"CWE-639", "CWE-284", "CWE-862", "CWE-863", "CWE-566"}
 
 
-def _desktop_authz(rec, c, target):
+def _desktop_authz(rec, c, target, tm=None):
     """On a single-user Tauri/Electron DESKTOP app there is no multi-tenant boundary, so an authz/IDOR finding
     is usually moot (the user owns their own data). Downgrade + note -- never touches injection classes, which
     stay real (a desktop app can still process untrusted files / hit a shared backend). Desktop-ness is judged
@@ -261,7 +268,9 @@ def _desktop_authz(rec, c, target):
         return rec
     if reachability.is_server_endpoint(getattr(c, "file", "")):   # a real web boundary -> authz applies
         return rec
-    if not reachability.is_desktop_app(target, getattr(c, "file", "")):
+    is_desktop = (tm.module_context(getattr(c, "file", "")) == "desktop" if tm is not None
+                  else reachability.is_desktop_app(target, getattr(c, "file", "")))
+    if not is_desktop:
         return rec
     rec["desktop_context"] = True
     rec["confidence"] = "low"
@@ -282,6 +291,8 @@ def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=
     target = str(target)
     cmap = cmap or codemap.build(target)
     rel_index = {_rel(target, p): fi for p, fi in cmap.files.items()}
+    from . import trust as trustmod
+    tm = trustmod.load(target) or trustmod.build(cmap, target)   # reuse the persisted trust boundary if present
     have_docker = shutil.which("docker") is not None
     case = recorder.CaseFile(target)
     out_recs = []
@@ -291,8 +302,8 @@ def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=
                              cwe=c.cwe, family=c.family).id
         rec = _prove_one(model, target, c, have_docker, max_steps, online=online)
         if gate:
-            rec = _apply_gate(rec, c, cmap)
-        rec = _desktop_authz(rec, c, target)
+            rec = _apply_gate(rec, c, cmap, tm)
+        rec = _desktop_authz(rec, c, target, tm)
         if rec.get("verdict") == "confirmed":
             from . import audit
             av, anote = audit.audit(model, c, rec)
@@ -328,6 +339,10 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
 
     cmap = codemap.build(target)
     rel_index = {_rel(target, p): fi for p, fi in cmap.files.items()}
+    from . import trust as trustmod                          # Shift 1: build+persist the trust boundary once
+    tm = trustmod.build(cmap, target)
+    trustmod.save(tm, out_dir)
+    print(f"[prove] {trustmod.summary(tm)}", flush=True)
 
     case = recorder.CaseFile(target)
     findings_log = out_dir / "wave_findings.jsonl"
@@ -363,8 +378,8 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
                                  cwe=c.cwe, family=c.family).id
             rec = _prove_one(model, target, c, have_docker, max_steps, online=online)
             if gate:                                        # untrusted-reachability gate on confirmations
-                rec = _apply_gate(rec, c, cmap)
-            rec = _desktop_authz(rec, c, target)           # single-user desktop app: authz/IDOR is moot
+                rec = _apply_gate(rec, c, cmap, tm)
+            rec = _desktop_authz(rec, c, target, tm)       # single-user desktop app: authz/IDOR is moot
             if rec.get("verdict") == "confirmed":           # final EVIDENCE AUDIT (only high-stakes confirms):
                 from . import audit                          # re-run the proof + a fresh clean-room skeptic
                 av, anote = audit.audit(model, c, rec)

@@ -1,4 +1,4 @@
-# Trust-Boundary & Fail-Safe Reachability  *(PLAN — Shift 3 building now; Shifts 1–2 later)*
+# Trust-Boundary & Fail-Safe Reachability  *(Shifts 1 + 3 BUILT + per-module desktop; Shift 2 next)*
 
 *Author: session 2026-09-18. Motivated by the Stirling-PDF run: a CLI script's command-injection was reported
 `confirmed`, and a SaaS IDOR got a repo-global "[desktop app]" tag. Both are blind spots in the Stage-3
@@ -94,12 +94,18 @@ tiers + local→review) is what generalizes; the exact name→tier mapping is tu
 
 ## 6. Build order
 
-1. **Shift 3 — fail-safe default (entry trust tiers + local→review). BUILDING NOW.** Deterministic, testable,
-   caps every future blind spot. Encodes the Stirling CLI miss as a regression test.
-2. **Per-module desktop** (the tactical second fix) — a small step toward Shift 1's per-module context.
-3. **Shift 1 — trust-boundary artifact:** promote entry_points into the single reachability authority, with
-   per-module deployment context.
-4. **Shift 2 — model-classified entry/module trust**, retiring the `is_X` heuristics into it.
+1. **Shift 3 — fail-safe default (entry trust tiers + local→review). ✅ BUILT** (`reachability.entry_trust`,
+   `gate` returns trust, `prove._apply_gate` downgrades a local-only confirm). Verified on Stirling.
+2. **Per-module desktop. ✅ BUILT** (`is_desktop_app(target, file)` module-scoped + `is_server_endpoint`
+   override; `_desktop_authz` per-finding).
+3. **Shift 1 — trust-boundary artifact. ✅ BUILT** (`trust.py`: `TrustModel{entries, modules}`, built once from
+   the codemap, persisted to `wave_trust.json`, viewable via `wave trust <target>`). Each entry is attributed
+   to its OWNING module (nearest-module rule); modules classify as web/desktop/cli/library, with test/CLI PATH
+   signals winning over the aggregate. `prove` builds+saves it and consults it: a `confirmed` in a TEST-HARNESS
+   module → review. Consumers (`_apply_gate`, `_desktop_authz`) take the model; fall back to live checks when
+   absent. Verified on Stirling (scripts→cli, cucumber→test, saas→web).
+4. **Shift 2 — model-classified entry/module trust** (NEXT): let the model enrich `wave_trust.json`
+   (safe-direction only — may only mark MORE trusted), retiring the remaining `is_X` heuristics into it.
 
 ## 7. Open questions
 

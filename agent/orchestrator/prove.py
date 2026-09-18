@@ -258,6 +258,48 @@ def _desktop_authz(rec, c, desktop):
     return rec
 
 
+def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=None):
+    """Re-run the proof ladder on SPECIFIC findings (Stage 5 re-investigation). Returns updated finding
+    records (same shape as run's output); does NOT write files -- the caller merges. A tool re-run is the ONLY
+    thing allowed to change a witnessed verdict (the reconcile guardrail). Reuses run()'s exact machinery."""
+    if not findings:
+        return []
+    target = str(target)
+    cmap = cmap or codemap.build(target)
+    rel_index = {_rel(target, p): fi for p, fi in cmap.files.items()}
+    desktop = reachability.is_desktop_app(target)
+    have_docker = shutil.which("docker") is not None
+    case = recorder.CaseFile(target)
+    out_recs = []
+    for surv in findings:
+        c = _to_candidate(surv, rel_index, target)
+        hyp_id = case.record("hypothesis", _subj(c), "seed", "believed", provenance=c.loc(),
+                             cwe=c.cwe, family=c.family).id
+        rec = _prove_one(model, target, c, have_docker, max_steps, online=online)
+        if gate:
+            rec = _apply_gate(rec, c, cmap)
+        rec = _desktop_authz(rec, c, desktop)
+        if rec.get("verdict") == "confirmed":
+            from . import audit
+            av, anote = audit.audit(model, c, rec)
+            if av != "confirmed":
+                rec["verdict"] = av
+                rec["why"] = anote + " " + rec.get("why", "")
+            rec["audit"] = anote
+        _record_outcome(case, hyp_id, c, rec)
+        rec.pop("_transcript", None)
+        rec.pop("_mode", "")
+        out_recs.append({"file": surv.get("file", ""), "line": int(surv.get("line") or 0),
+                         "class": str(surv.get("class") or "other").lower(), "cwe": c.cwe, "unit": c.unit,
+                         "sink": surv.get("sink", ""), "confidence": surv.get("confidence", ""), **rec})
+    if model is not None:
+        try:
+            model.unload()
+        except Exception:
+            pass
+    return out_recs
+
+
 def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=True, max_steps=8, gate=True,
         online=False):
     """Prove the detector's survivors (severity order, up to `budget`). Writes per-candidate verdicts to

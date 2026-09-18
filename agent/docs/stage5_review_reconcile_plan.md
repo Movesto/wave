@@ -1,4 +1,10 @@
-# Stage 5 — Review & Reconcile  *(PLAN — not built; review before implementing)*
+# Stage 5 — Review & Reconcile  *(BUILT — `reconcile.py`; Phases 1–3 complete, deterministic parts verified)*
+
+*Status 2026-09-17: Phase 1 (deterministic dedup + contradiction merge), Phase 2 (bounded per-cluster model
+reconcile), and Phase 3 (cross-file look-alike clustering + re-investigation recall) are all implemented and
+unit-tested. The model phases are opt-in: `wave reconcile <t> --deep` / `wave all <t> --deep-reconcile`. The
+guardrail (§3) is enforced in code, not just prompted. Live model+docker re-investigation is the one path
+still to exercise on a real repo.*
 
 *Author: session 2026-09-17. Supersedes nothing; extends `wave_architecture_plan.md` (four stages → five).
 Fold into that doc's §6/§7 after review.*
@@ -157,13 +163,17 @@ Nothing is deleted; every merge/flag is logged with its reason.
 
 ## 9. Build order (phased, each independently shippable + tested)
 
-- **Phase 1 — deterministic (no model):** location dedup + contradiction detection + the precedence-merge
-  rules + the reconciliation log + report section. This alone fixes the netdata 1508 contradiction and the
-  duplicate noise. Fully unit-testable, no GPU/model.
-- **Phase 2 — model reconciliation:** the bounded per-cluster reconcile call (reconcile-reasoned / annotate),
-  under the §3 invariant.
-- **Phase 3 — look-alike recall:** cross-file signature clustering + `reinvestigate` of dismissed twins.
-  (Optional deeper phase: scan the repomap for structural twins that were never even pinned — bigger, later.)
+- **Phase 1 — deterministic (no model): ✅ BUILT.** location dedup + contradiction detection + the
+  precedence-merge rules + the reconciliation log + report section. Fixes the netdata 1508 contradiction and
+  the duplicate noise. Fully unit-tested; verified live on netdata (7→6, 1508 resolved).
+- **Phase 2 — model reconciliation: ✅ BUILT.** `_clusters` + `_reconcile_cluster` + `_apply_cluster_actions`
+  — a bounded per-cluster call returning keep / annotate / reclassify(reasoned↔reasoned) / reinvestigate, with
+  the §3 invariant **enforced in `_apply_cluster_actions`** (a reclassify aimed at a witnessed verdict is
+  rejected + logged). Opt-in via `--deep` / `--deep-reconcile`. Unit-tested with a fake model.
+- **Phase 3 — look-alike recall: ✅ BUILT.** cross-file `(class, callee)` signature clustering →
+  `reinvestigate` of dismissed twins → `prove.reprove` (the only path that may change a witnessed verdict).
+  Unit-tested (fake model + monkeypatched reprove). *Deeper option still open:* scan the repomap for
+  structural twins that were never pinned (bigger recall, later).
 
 ## 10. Testing
 

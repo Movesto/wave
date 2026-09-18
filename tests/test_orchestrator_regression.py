@@ -637,6 +637,59 @@ def test_reconcile_is_idempotent_and_deletes_nothing():
     assert len(out2) == 2 and not log2
 
 
+def test_reconcile_clusters_crossfile_lookalikes_by_signature():
+    from agent.orchestrator import reconcile as rc
+    fs = [{"file": "a.py", "line": "10", "class": "ssrf", "sink": "requests.get(url)", "verdict": "confirmed"},
+          {"file": "b.py", "line": "20", "class": "ssrf", "sink": "requests.get(u)", "verdict": "not_exploitable"},
+          {"file": "c.py", "line": "30", "class": "sqli", "sink": "execute(q)", "verdict": "believed"}]
+    cl = rc._clusters(fs)
+    assert len(cl) == 1 and {m["file"] for m in cl[0]} == {"a.py", "b.py"}   # same (class,callee), divergent
+
+
+def test_reconcile_guardrail_witnessed_immutable_to_prose():
+    from agent.orchestrator import reconcile as rc
+    fs = [{"file": "a.py", "line": "10", "class": "ssrf", "sink": "requests.get(url)", "verdict": "confirmed"},
+          {"file": "b.py", "line": "20", "class": "ssrf", "sink": "requests.get(u)", "verdict": "not_exploitable"}]
+    by_ref = {f"{f['file']}:{f['line']}": f for f in fs}
+    log, reinvest = [], []
+    rc._apply_cluster_actions([
+        {"ref": "a.py:10", "action": "reclassify", "verdict": "not_exploitable", "reason": "downgrade a confirmed"},
+        {"ref": "b.py:20", "action": "reclassify", "verdict": "believed", "reason": "uncertain, keep as lead"},
+        {"ref": "a.py:10", "action": "reinvestigate", "reason": "twin dismissed elsewhere"},
+    ], by_ref, log, reinvest)
+    assert by_ref["a.py:10"]["verdict"] == "confirmed"       # NEVER reasoned away
+    assert by_ref["b.py:20"]["verdict"] == "believed"        # reasoned<->reasoned allowed
+    assert any(e["action"] == "rejected-reclassify" for e in log)
+    assert reinvest == [("a.py", 10, "ssrf")]
+
+
+def test_reconcile_reinvestigation_only_a_tool_run_changes_a_verdict(tmp_path):
+    # Phase 2/3 recall: the model flags a dismissed look-alike twin, and ONLY a tool re-prove may upgrade it.
+    import json as _json
+    from unittest import mock
+    from agent.orchestrator import reconcile as rc, prove
+    fs = [{"file": "a.py", "line": "10", "class": "ssrf", "sink": "requests.get(url)", "verdict": "confirmed"},
+          {"file": "b.py", "line": "20", "class": "ssrf", "sink": "requests.get(u)", "verdict": "not_exploitable"}]
+    (tmp_path / "wave_findings.jsonl").write_text("\n".join(_json.dumps(f) for f in fs), encoding="utf-8")
+
+    class FakeModel:
+        model_id = "fake"
+        def generate(self, sysmsg, user, **k):
+            return _json.dumps({"explanation": "b looks like a", "actions":
+                                [{"ref": "b.py:20", "action": "reinvestigate", "reason": "twin of a confirmed"}]})
+        def unload(self):
+            pass
+
+    def fake_reprove(model, target, todo, **k):              # a real tool run -> may change the verdict
+        return [{**t, "verdict": "confirmed", "evidence": "re-proved", "why": "tool re-run"} for t in todo]
+
+    with mock.patch.object(prove, "reprove", fake_reprove):
+        reconciled, log = rc.run(str(tmp_path), model=FakeModel())
+    by = {f["file"]: f["verdict"] for f in reconciled}
+    assert by["b.py"] == "confirmed"                         # upgraded via the tool re-run, not prose
+    assert any(e["action"] == "reinvestigated" for e in log)
+
+
 class _Res:
     def __init__(self, out): self.command, self.stdout, self.stderr, self.exit_code, self.duration, self.timed_out = "cmd", out, "", 0, 0.1, False
 

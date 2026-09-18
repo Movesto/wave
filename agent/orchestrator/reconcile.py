@@ -113,6 +113,160 @@ def reconcile(findings):
     return out, log
 
 
+# ----- Phase 2 (bounded model reconcile) + Phase 3 (cross-file look-alike recall) -----
+# THE GUARDRAIL (doc sec 3): the model may reconcile among REASONED verdicts, annotate, or request a tool
+# RE-INVESTIGATION -- it can NEVER change a WITNESSED verdict by reasoning. Enforced here, not just prompted.
+_WITNESSED = {"confirmed", "anomalous_state"}       # observation-backed -> prose-immutable
+_REASONED = {"believed", "not_exploitable"}         # the model's to reconcile, with the safe direction
+
+import re as _re
+
+
+def _callee(sink):
+    """A canonical call target for look-alike clustering: the name being called at the sink (execSync, curl,
+    posix_spawn, open, ...). Fuzzy on purpose -- a loose cluster only means the model looks at unrelated code
+    and says 'these differ, keep both', which the guardrail makes harmless."""
+    s = _norm_sink(sink)
+    m = _re.search(r'([A-Za-z_][\w.:]*)\s*\(', s)            # token right before the first '('
+    if m:
+        return m.group(1).split(".")[-1].split("::")[-1].lower()
+    s2 = _re.sub(r'[${}"\'`]', "", s)                        # shell: first bare word
+    toks = _re.findall(r'[A-Za-z_][\w-]*', s2)
+    return (toks[0].lower() if toks else s[:24].lower())
+
+
+def _signature(f):
+    return (str(f.get("class", "")).lower(), _callee(f.get("sink", "")))
+
+
+def _clusters(findings):
+    """Cross-file look-alike clusters worth a reconcile call: same (class, callee) signature, >1 member, and
+    DIVERGENT verdicts (a mix that includes a witnessed-vs-dismissed disagreement is exactly the interesting
+    case). Ranked by the highest attention in the cluster (so the budget spends on the sharpest conflicts)."""
+    sig = {}
+    for f in findings:
+        sig.setdefault(_signature(f), []).append(f)
+    out = []
+    for members in sig.values():
+        if len(members) < 2:
+            continue
+        verdicts = {m.get("verdict", "believed") for m in members}
+        if len(verdicts) > 1:                               # a disagreement to reconcile
+            out.append(members)
+    out.sort(key=lambda ms: min(_attention(m.get("verdict", "believed")) for m in ms))
+    return out
+
+
+_RECONCILE_SYS = (
+    "You are reconciling security findings that target STRUCTURALLY SIMILAR code but received DIFFERENT "
+    "verdicts. Explain the real difference (usually reachability / who controls the input / execution "
+    "context), or say which is wrong. STRICT RULES: (1) You may NOT change a WITNESSED verdict ('confirmed' "
+    "or 'anomalous_state') by reasoning -- if you believe a look-alike was WRONGLY DISMISSED, request "
+    "'reinvestigate' for it (only a tool re-run can change a witnessed result). (2) You MAY 'reclassify' "
+    "between the two REASONED verdicts 'believed' and 'not_exploitable', but only WITH a concrete cited reason, "
+    "and when unsure keep 'believed'. (3) Never invent findings. Return ONE json object: "
+    '{"explanation":"...","actions":[{"ref":"<file:line>","action":"keep|annotate|reinvestigate|reclassify",'
+    '"verdict":"believed|not_exploitable (only for reclassify)","reason":"..."}]}'
+)
+
+
+def _reconcile_cluster(model, target, cluster):
+    """One focused, evidence-anchored reconcile call over a single look-alike cluster. Returns parsed actions
+    (list) or []. Only the cluster + its code windows are shown -- never the whole report (bounds bias)."""
+    from . import briefs
+    parts = []
+    for f in cluster:
+        ref = f"{f.get('file')}:{f.get('line')}"
+        win = briefs._code_window(str(Path(target) / f.get("file", "")), int(f.get("line") or 0), ctx=14)
+        parts.append(f"### {ref}  [class={f.get('class')} verdict={f.get('verdict')}]\n"
+                     f"sink: {f.get('sink', '')}\nwhy: {(f.get('why') or '')[:240]}\ncode:\n{win}")
+    user = ("These findings look structurally similar but got different verdicts. Reconcile them per the "
+            "rules.\n\n" + "\n\n".join(parts))
+    try:
+        raw = model.generate(_RECONCILE_SYS, user, max_new_tokens=1200)
+    except Exception:
+        return []
+    for scope in ((raw or "").split("</think>")[-1], raw or ""):
+        m = _re.search(r'\{.*\}', scope, _re.S)
+        if m:
+            try:
+                d = json.loads(m.group(0))
+                acts = d.get("actions")
+                return acts if isinstance(acts, list) else []
+            except Exception:
+                continue
+    return []
+
+
+def _apply_cluster_actions(actions, by_ref, log, reinvest):
+    """Apply model actions under the guardrail: reclassify ONLY reasoned<->reasoned; witnessed verdicts are
+    prose-immutable (a reclassify aimed at one is REJECTED and logged); reinvestigate collects a key; annotate
+    appends the reason to `why`. Nothing is deleted."""
+    for a in actions or []:
+        if not isinstance(a, dict):
+            continue
+        ref = str(a.get("ref", "")).strip()
+        f = by_ref.get(ref)
+        if f is None:
+            continue
+        act = str(a.get("action", "")).lower()
+        reason = str(a.get("reason", ""))[:240]
+        cur = f.get("verdict", "believed")
+        if act == "reclassify":
+            new = str(a.get("verdict", "")).lower()
+            if cur in _WITNESSED:
+                log.append({"action": "rejected-reclassify", "ref": ref,
+                            "reason": f"cannot reason away a witnessed '{cur}' -- request reinvestigate instead"})
+            elif cur in _REASONED and new in _REASONED and reason:
+                f["verdict"] = new
+                f["why"] = ((f.get("why") or "") + f"  [reconcile: {cur}->{new}] {reason}").strip()
+                log.append({"action": "reclassify", "ref": ref, "from": cur, "to": new, "reason": reason})
+            # otherwise (unsafe/unsupported) -> ignore, safe direction keeps the current reasoned verdict
+        elif act == "reinvestigate":
+            reinvest.append((f.get("file", ""), int(f.get("line") or 0), str(f.get("class") or "other").lower()))
+            log.append({"action": "reinvestigate-queued", "ref": ref, "reason": reason})
+        elif act == "annotate" and reason:
+            f["why"] = ((f.get("why") or "") + f"  [reconcile note] {reason}").strip()
+            log.append({"action": "annotate", "ref": ref, "reason": reason})
+
+
+def _model_reconcile(model, target, findings, budget, do_reinvestigate, online):
+    """Phase 2+3: cluster look-alikes, run a bounded per-cluster reconcile call, then (optionally) re-prove the
+    findings the model flagged. Returns (findings, log). A tool re-prove is the only path that changes a
+    witnessed verdict."""
+    log = []
+    by_ref = {f"{f.get('file')}:{f.get('line')}": f for f in findings}
+    reinvest = []                                            # (file, line, class) keys the model asks to re-prove
+    for cl in _clusters(findings)[:budget]:
+        log.append({"action": "cluster", "signature": list(_signature(cl[0])),
+                    "refs": [f"{m.get('file')}:{m.get('line')}" for m in cl],
+                    "verdicts": [m.get("verdict") for m in cl]})
+        _apply_cluster_actions(_reconcile_cluster(model, target, cl), by_ref, log, reinvest)
+    # dedup the re-investigate queue; a witnessed 'confirmed' is already settled, so never re-prove it
+    todo, seen = [], set()
+    for (f, ln, cls) in reinvest:
+        k = (f, ln, cls)
+        rf = by_ref.get(f"{f}:{ln}")
+        if k in seen or (rf and rf.get("verdict") == "confirmed"):
+            continue
+        seen.add(k)
+        if rf is not None:
+            todo.append(rf)
+    if do_reinvestigate and todo:
+        from . import prove
+        todo = todo[:budget]
+        print(f"[reconcile] re-investigating {len(todo)} flagged finding(s) ...", flush=True)
+        updated = prove.reprove(model, target, todo, online=online)
+        upd = {(u["file"], int(u["line"]), u["class"]): u for u in updated}
+        for i, f in enumerate(findings):
+            k = (f.get("file", ""), int(f.get("line") or 0), str(f.get("class") or "other").lower())
+            if k in upd:
+                log.append({"action": "reinvestigated", "ref": f"{f.get('file')}:{f.get('line')}",
+                            "from": f.get("verdict"), "to": upd[k].get("verdict")})
+                findings[i] = upd[k]
+    return findings, log
+
+
 def _load(path):
     p = Path(path)
     if not p.exists():
@@ -128,20 +282,30 @@ def _load(path):
     return out
 
 
-def run(target, findings_path=None, out_dir=None):
-    """Stage 5 driver: load wave_findings.jsonl, reconcile in place, write wave_reconcile.jsonl (audit log).
-    Idempotent -- re-running on already-merged findings is a no-op. Returns (reconciled, log)."""
+def run(target, findings_path=None, out_dir=None, model=None, budget=6, reinvestigate=True, online=False):
+    """Stage 5 driver. Phase 1 (always): load wave_findings.jsonl, dedup + resolve contradictions. Phases 2/3
+    (when `model` is given): cluster cross-file look-alikes, run a bounded per-cluster reconcile call, and
+    re-prove the findings the model flags (recall). Writes reconciled findings in place + wave_reconcile.jsonl
+    (audit log). Deterministic phase is idempotent. Returns (reconciled, log)."""
     base = Path(out_dir) if out_dir else Path(findings_path).parent if findings_path else Path(target)
     fpath = Path(findings_path) if findings_path else base / "wave_findings.jsonl"
     findings = _load(fpath)
-    reconciled, log = reconcile(findings)
-    # write reconciled findings back in place (originals preserved in casefile.json); write the audit log
+    n_in = len(findings)
+    reconciled, log = reconcile(findings)                    # Phase 1 -- deterministic
+    if model is not None:                                    # Phases 2/3 -- bounded, guardrailed
+        reconciled, mlog = _model_reconcile(model, target, reconciled, budget, reinvestigate, online)
+        log += mlog
+        if any(e.get("action") == "reinvestigated" for e in mlog):
+            reconciled, dlog2 = reconcile(reconciled)        # re-dedup: re-proved verdicts may have shifted
+            log += dlog2
     fpath.write_text("\n".join(json.dumps(r) for r in reconciled) + ("\n" if reconciled else ""),
                      encoding="utf-8")
     (base / "wave_reconcile.jsonl").write_text("\n".join(json.dumps(e) for e in log) + ("\n" if log else ""),
                                                encoding="utf-8")
-    merged = sum(1 for e in log)
     contradictions = sum(1 for e in log if e["action"] == "contradiction")
-    print(f"[reconcile] {len(findings)} -> {len(reconciled)} findings "
-          f"({merged} merge(s), {contradictions} contradiction(s) resolved)", flush=True)
+    clusters = sum(1 for e in log if e["action"] == "cluster")
+    reproved = sum(1 for e in log if e["action"] == "reinvestigated")
+    print(f"[reconcile] {n_in} -> {len(reconciled)} findings ({contradictions} contradiction(s) resolved"
+          + (f", {clusters} look-alike cluster(s), {reproved} re-investigated" if model is not None else "")
+          + ")", flush=True)
     return reconciled, log

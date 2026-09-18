@@ -241,12 +241,21 @@ def cmd_patch(args):
 
 def cmd_reconcile(args):
     from . import reconcile as reconcilemod
-    reconciled, log = reconcilemod.run(args.target, findings_path=args.findings)
+    model = None
+    if getattr(args, "deep", False):                        # Phase 2/3: model reconcile + look-alike re-prove
+        from .model import Model
+        model = Model()
+    reconciled, log = reconcilemod.run(args.target, findings_path=args.findings, model=model,
+                                       online=getattr(args, "online", False))
     contradictions = [e for e in log if e["action"] == "contradiction"]
-    print(f"\nREVIEW & RECONCILE: {len(reconciled)} findings after dedup; "
-          f"{len(log)} merge(s), {len(contradictions)} contradiction(s) resolved")
+    reproved = [e for e in log if e["action"] == "reinvestigated"]
+    print(f"\nREVIEW & RECONCILE: {len(reconciled)} findings; "
+          f"{len(contradictions)} contradiction(s) resolved"
+          + (f", {len(reproved)} re-investigated" if model is not None else ""))
     for e in contradictions:
         print(f"  [contradiction] {e['file']}:{e['where']}  {e['verdicts']} -> kept '{e['kept']}'")
+    for e in reproved:
+        print(f"  [re-investigated] {e['ref']}  {e['from']} -> {e['to']}")
     # regenerate the readable report off the reconciled set
     from . import report as _report
     _report.generate(args.target)
@@ -329,7 +338,8 @@ def cmd_all(args):
         print("\n" + "=" * 66 + "\n== REVIEW & RECONCILE  — dedup findings + resolve contradictions\n" + "=" * 66,
               flush=True)
         from . import reconcile as _reconcile
-        reconciled, _rlog = _reconcile.run(t)
+        rc_model = model if getattr(args, "deep_reconcile", False) else None   # Phase 2/3 opt-in (adds model cost)
+        reconciled, _rlog = _reconcile.run(t, model=rc_model, online=args.online)
         by = {v: [] for v in ("confirmed", "anomalous_state", "refuted", "blocked", "believed",
                               "not_exploitable")}
         for f in reconciled:                                 # re-derive verdict groups so patch + summary reflect it
@@ -524,10 +534,13 @@ def main():
                     help="KEEP a patch that passed both gates (default: dry-run, restore the source)")
     pt.set_defaults(func=cmd_patch)
 
-    rc = sub.add_parser("reconcile", help="Stage 5: dedup findings by location + resolve contradictions")
+    rc = sub.add_parser("reconcile", help="Stage 5: dedup + resolve contradictions (+ --deep: cross-file reconcile)")
     rc.add_argument("target")
     rc.add_argument("--findings", default=None,
                     help="path to wave_findings.jsonl (default <target>/wave_findings.jsonl)")
+    rc.add_argument("--deep", action="store_true",
+                    help="Phase 2/3: load the model to reconcile cross-file look-alikes + re-investigate flags")
+    rc.add_argument("--online", action="store_true", help="allow web_search/web_read during re-investigation")
     rc.set_defaults(func=cmd_reconcile)
 
     al = sub.add_parser("all", help="one-shot pipeline: eyes(notebook) -> detect -> prove [-> patch]")
@@ -547,6 +560,8 @@ def main():
     al.add_argument("--interactive", action="store_true", help="propose the read set; prune/extend it before reading")
     al.add_argument("--no-reconcile", action="store_true",
                     help="skip Stage 5 (dedup + contradiction resolution) before patch/report")
+    al.add_argument("--deep-reconcile", action="store_true",
+                    help="Stage 5 Phase 2/3: also run the model cross-file reconcile + re-investigate (adds cost)")
     al.set_defaults(func=cmd_all)
 
     rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")

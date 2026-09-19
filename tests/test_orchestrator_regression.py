@@ -1320,13 +1320,26 @@ def test_believed_pushed_back_when_no_repro(monkeypatch):
     v = inv.investigate(m, "test brief", deps=False, max_steps=6)
     assert v.verdict == "believed" and m.n == 3        # the first 'believed' was pushed back -> 3 model calls
 
-def test_believed_accepted_after_a_real_repro(monkeypatch):
+def test_believed_after_repro_is_pushed_to_try_another_method(monkeypatch):
     monkeypatch.setattr(inv, "execute", lambda *a, **k: execmod.ExecResult(a[0] if a else "", "ran, nothing", "", 0, 0.1))
-    # actually RUN something -> conclude believed (accepted immediately, no push-back)
+    # RUN a repro -> conclude believed: now pushed ONCE to try a DIFFERENT method (pentester breadth), then accepted
     m = _ScriptedTool([_tc("run_command", command="cd /tmp && cargo run"),
-                       _tc("conclude", verdict="believed", why="ran the repro but the outbound effect was not observable in this sandbox; plausible from the code path")])
+                       _tc("conclude", verdict="believed", why="ran the repro but the outbound effect was not observable; plausible from the code path"),
+                       _tc("conclude", verdict="believed", why="tried a second vector too; still not witnessable in this sandbox")])
     v = inv.investigate(m, "test brief", deps=False, max_steps=6)
-    assert v.verdict == "believed" and m.n == 2        # repro attempted -> not pushed back
+    assert v.verdict == "believed" and m.n == 3        # repro attempted -> pushed once to try another method
+
+
+def test_methodology_is_captured_from_conclude(monkeypatch):
+    monkeypatch.setattr(inv, "execute", lambda *a, **k: execmod.ExecResult(a[0] if a else "", "uid=0(root)", "", 0, 0.1))
+    m = _ScriptedTool([_tc("run_command", command="python3 -c 'import app; app.f(\"; id\")'"),
+                       _tc("conclude", verdict="confirmed", why="injected id ran", evidence="uid=0(root)",
+                           methodology="shell-metachar injection via the path arg; also considered a header vector but the sink reads the path")])
+    v = inv.investigate(m, "test brief", deps=False, max_steps=6)
+    assert v.verdict == "confirmed"
+    assert "header vector" in v.methodology and "injection" in v.methodology
+    # the nudge text exists and names alternative vectors
+    assert "different" in inv._TRY_ANOTHER.lower() and "vector" in inv._TRY_ANOTHER.lower()
 
 
 # ============================ 21. notebook recall determinism ============================

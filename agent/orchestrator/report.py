@@ -136,6 +136,8 @@ def generate(target, out_dir=None, model="", patches_path=None):
                 lines.append(f"- **reachability:** {r['reachability']}")
             if r.get("oracle"):
                 lines.append(f"- **how:** {r['oracle']}")
+            if r.get("methodology"):
+                lines.append(f"- **method (model's approach):** {r['methodology']}")
             pat = patches.get((r.get("file"), r.get("line")))
             if pat:
                 st = pat.get("status", "")

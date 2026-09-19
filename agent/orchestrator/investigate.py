@@ -32,7 +32,8 @@ _AGENT_SYS = (
     '  write a file:  {"action":"write","path":"<relative path, e.g. app/.wave_repro.mjs>","content":"<full '
     'file>"}  (author your OWN repro when the provided scaffold does not fit -- then run it)\n'
     '  finish:        {"action":"conclude","verdict":"confirmed|refuted|believed|blocked|anomalous_state",'
-    '"cwe":"CWE-XX","why":"<why, citing what you OBSERVED>","evidence":"<the concrete observed effect>"}\n'
+    '"cwe":"CWE-XX","why":"<why, citing what you OBSERVED>","evidence":"<the concrete observed effect>",'
+    '"methodology":"<the method you used + why it fits, and other vectors/methods you tried or considered>"}\n'
     "  not a vuln:    a variant of conclude with verdict 'not_exploitable' -- use ONLY when you determined by "
     "READING the code that the flagged input CANNOT be attacker-controlled in the real threat model (it comes "
     "from a build-time env var / hardcoded constant / an internal trusted caller / an already-authenticated "
@@ -53,6 +54,10 @@ _AGENT_SYS = (
     "file first in one command with a heredoc, e.g. \"cat > t.py <<'EOF'\\n...\\nEOF\\npython3 t.py\". "
     "If a command fails, READ the error and try a DIFFERENT approach -- never repeat the same failing "
     "command.\n"
+    "WORK LIKE A PENTESTER: don't tunnel-vision on the first method. If your test doesn't prove it, try a "
+    "DIFFERENT angle before settling (another input vector -- path/query/header/body/a nested property -- a "
+    "different payload, or a different way the input reaches the sink). When you conclude, fill `methodology`: "
+    "the method you used and WHY it fits this sink/class, and the other methods/vectors you tried or considered. "
     "THE SCAFFOLD IS OPTIONAL: a fast-path repro may be provided in the task, but it is only a convenience. "
     "If it does not fit the target -- a framework component that needs a real renderer (e.g. React "
     "renderToStaticMarkup), a method that must be constructed first, a multi-file setup -- do NOT give up and "
@@ -111,6 +116,9 @@ _NATIVE_SYS = (
     "caller / already-authenticated ownership-scoped value / framework-sanitized) -- NAME that source in why. "
     "It is a reasoned SAFE-leaning judgment, not a proof; if UNSURE it is attacker-reachable use 'believed', "
     "and never use it just because you could not run the code. "
+    "WORK LIKE A PENTESTER: don't stop at the first method -- if a test doesn't prove it, try a DIFFERENT "
+    "vector/payload/entry before settling for 'believed'. In `methodology`, document the method you used, why "
+    "it fits, and the alternatives you tried or considered. "
     "THE SCAFFOLD IS OPTIONAL: a fast-path repro may be provided, but it is only a convenience. If it does "
     "not fit the target -- a framework component that needs a real renderer (e.g. React renderToStaticMarkup), "
     "a method that must be constructed first, a multi-file setup -- call write_file to author YOUR OWN repro "
@@ -158,6 +166,9 @@ _CONCLUDE_TOOL = {"type": "function", "function": {
         "why": {"type": "string", "description": "why, citing what you observed (or, for not_exploitable, the "
                                                  "concrete reason the input is not attacker-controlled)"},
         "evidence": {"type": "string", "description": "the concrete observed effect"},
+        "methodology": {"type": "string", "description": "your APPROACH like a pentester's notes: the method "
+                        "you used to test/exploit this and WHY it fits this sink/class, plus other methods or "
+                        "input vectors you tried or considered (and why they did/didn't work)"},
     }, "required": ["verdict", "why"]}}}
 
 
@@ -203,6 +214,13 @@ _FORCE_REPRO = (
     "(plus a benign control), then read what actually happened. Only after you have RUN it, conclude: "
     "'confirmed' if you witnessed the effect, 'refuted' if it ran safe, or 'blocked' if it genuinely cannot be "
     "built/run here (say the specific reason). Do it now -- run a command, don't just re-read.")
+
+_TRY_ANOTHER = (
+    "You ran a test but couldn't prove it, and you're about to settle for 'believed'. A real pentester does "
+    "NOT stop at one method -- the same bug is often reachable/triggerable a DIFFERENT way. Try ANOTHER angle "
+    "before concluding: a different INPUT VECTOR (path / query / header / body / a nested JSON property), a "
+    "different PAYLOAD shape, a different ENTRY by which the input reaches this sink, or provisioning a missing "
+    "dependency. Run one more, DIFFERENT attempt, then conclude -- and in `methodology` note what you tried.")
 
 
 def _is_repro_attempt(cmd):
@@ -486,6 +504,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
     seen_cmds = set()                                       # to nudge a model re-running the same command
     believed_nudged = False                                 # one-time: a belief must cite evidence
     repro_attempted = repro_forced = False                  # a 'believed' with NO repro attempt is pushed back once
+    method_nudged = False                                    # tried a method but couldn't prove -> try a DIFFERENT one
     recon_streak, recon_nudged = 0, False                   # consecutive read-only cmds -> one mid-loop nudge
     exp_name, exp_tok, exp_hint = _expected_lang(image)     # correct a wrong-language guess (e.g. Rust read as "V")
     used_expected, lang_nudged = False, False
@@ -520,6 +539,11 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                     repro_forced = True
                     messages.append({"role": "user", "content": _FORCE_REPRO})
                     continue
+                # tried a method but couldn't prove it -> push a DIFFERENT method once (pentester breadth)
+                if (verdict == "believed" and repro_attempted and not method_nudged and step < max_steps - 1):
+                    method_nudged = True
+                    messages.append({"role": "user", "content": _TRY_ANOTHER})
+                    continue
                 # a BELIEF is not a bare assertion -- it must cite evidence. One-time nudge if it doesn't.
                 if (verdict == "believed" and not believed_nudged and step < max_steps - 1
                         and len((evidence + why).strip()) < 40):
@@ -532,7 +556,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                     continue
                 print(f"[investigate:native] concluded: {verdict} after {ran} run(s)", flush=True)
                 return Verdict(verdict, why, evidence, str(args.get("cwe", "")), ran, trail,
-                               transcript=list(messages))
+                               transcript=list(messages), methodology=str(args.get("methodology", "")))
             if name == "grep_output":
                 content = _grep(run_log, str(args.get("pattern", "")), int(args.get("lines") or 10))
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
@@ -620,6 +644,7 @@ class Verdict:
     ran: int = 0                       # how many commands were actually executed
     trail: list = field(default_factory=list)   # [(command, result_summary)]
     transcript: list = field(default_factory=list)   # the FULL model conversation (for the trace-logger)
+    methodology: str = ""              # the model's documented approach: method used, why, alternatives tried
 
 
 def _parse_action(txt):
@@ -691,6 +716,7 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
     trail = []
     ran = 0
     repro_attempted = repro_forced = False                  # force a repro before 'believed' on a provable finding
+    method_nudged = False                                    # tried a method but couldn't prove -> try a DIFFERENT one
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
     exp_name, exp_tok, exp_hint = _expected_lang(image)     # correct a wrong-language guess (e.g. Rust read as "V")
     used_expected, lang_nudged = False, False
@@ -761,8 +787,14 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
                 repro_forced = True
                 trail.append(("(no repro attempted)", _FORCE_REPRO))
                 continue
+            # tried a method but couldn't prove it -> push a DIFFERENT method once (pentester breadth)
+            if (verdict == "believed" and repro_attempted and not method_nudged and step < max_steps - 1):
+                method_nudged = True
+                trail.append(("(try another method)", _TRY_ANOTHER))
+                continue
             print(f"[investigate] concluded: {verdict} after {ran} run(s)", flush=True)
-            return Verdict(verdict, why, str(act.get("evidence", "")), str(act.get("cwe", "")), ran, trail)
+            return Verdict(verdict, why, str(act.get("evidence", "")), str(act.get("cwe", "")), ran, trail,
+                           methodology=str(act.get("methodology", "")))
         else:
             trail.append((f"(unknown action {kind!r})", "expected run or conclude"))
     verdict = "blocked" if (saw_prov and not saw_real) or ran == 0 else "believed"

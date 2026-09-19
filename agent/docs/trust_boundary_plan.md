@@ -148,5 +148,10 @@ not *value-level* taint (does the specific attacker value reach the exact sink) 
 1. Name→tier mapping: is `handler`/`handle` remote enough, or should ambiguous bare-name entries also be
    `local` (more review, less recall)? Default: keep them remote; revisit with data.
 2. Should Shift 3 also require HIGH-confidence (non-ambiguous) reachability for *every* confirm, or only apply
-   the local-tier downgrade? Default: only the local-tier downgrade now (requiring high-confidence everywhere
-   would cost too much recall given the coarse name-based graph); revisit once value-taint (§10.4) lands.
+   the local-tier downgrade? **DECIDED (2026-09-18): no blunt high-confidence gate.** A blunt downgrade just
+   relabels uncertain confirms to "review" — it costs recall and adds no intelligence. Instead the investigate
+   loop now does the *pentester* thing: on an unsuccessful/uncertain attempt it is nudged to **try a DIFFERENT
+   method/vector** before settling (`_TRY_ANOTHER`), and it **documents its methodology** (method used, why,
+   alternatives tried) in a `methodology` field surfaced in the report. Uncertainty → more investigation +
+   transparency, not a quieter label. (The uptime-kuma run's low-confidence `send`/`res.send` collision is a
+   §10.1 name-graph issue; value-taint (§10.4) is the real fix for the citation, not a confidence gate.)

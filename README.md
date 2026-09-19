@@ -167,9 +167,17 @@ Useful flags:
   model select the N worth deep-reading. Lower it on a monorepo, raise it for full small-repo coverage.
 - `--online` — give the model opt-in `web_search`/`web_read` (network egress) for unfamiliar APIs; off by
   default (the box stays local).
-- `--jobs N` — prove **N survivors in parallel** (Stage 3). Requires a **cloud** model (a local single-GPU
-  model stays serial); each job gets an isolated scaffold, and `~4` fits a 32 GB / 6-core box (lower it for
-  heavy compiled builds). The big speedup on repos with many findings.
+- `--jobs N` — prove **N survivors at the same time** in Stage 3 (default **1** = serial, the old behavior).
+  You must give a **number** — there is no "use all cores" mode; `N` is the max concurrent proofs.
+  - **Cloud model only.** Parallelism runs N model calls + N docker sandboxes at once. That's fine for a cloud
+    model (deepseek/OpenRouter), so it's enabled there. A **local** single-GPU model can't generate in
+    parallel, so wave **auto-falls back to `--jobs 1`** and prints a note.
+  - **Sizing (per box, not cores):** each proof uses a light container (~0.5 GB) but a *compiled build*
+    (cargo/gradle/npm) can spike ~2 GB + 2 CPUs. On a **32 GB / 6-core** box, **`--jobs 4`** is the sweet spot;
+    drop to `2` for repos full of compiled-language builds, go up to `6` for light Python/JS.
+  - It's a **speed** knob only (turns the ~45-min serial runs / timeouts into ~4× faster) — it does **not**
+    change *which* findings you get. Distinct from the `--*-budget` flags below, which set *how many* items each
+    stage looks at.
 - `--patch` — run Stage 4 (dry-run by default; add `--write` to keep a patch that passed both gates).
 - `--no-reach-gate` — disable the reachability gate (use on libraries with public-API entry points, no routes).
 

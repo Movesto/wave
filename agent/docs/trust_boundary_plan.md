@@ -143,6 +143,24 @@ shapes on the same map):
 not *value-level* taint (does the specific attacker value reach the exact sink) — the taint gate (`taint.py`,
 §10.4) handles the value question separately, and the safe direction holds throughout.
 
+## 9. Binding-aware reachability (fixes the §10.1 name-collision false chains)
+
+The name-based call graph linked `execSync`-in-file-A to callers of `execSync`-in-file-B, and linked a library
+member call `childProcess.execSync(...)` to a same-named *user* function — manufacturing false chains (the
+uptime-kuma `lib.mjs` execSync falsely "reachable from `on:testChrome`"). Fix: the backward walk is now
+**file-anchored** over `(name, file)` nodes (`reachability.reaches_untrusted_entry_bound`, used by `gate` when
+`prove` passes the sink's file). An edge `caller(cfile) -> name` binds to OUR definition (name in `tfile`) only
+when it plausibly targets it:
+- a **non-self member call** (`obj.name()` / `Module.name()`) binds only if `cfile == tfile` (else it's a
+  different object's / library's method, e.g. `childProcess.execSync`);
+- a **bare or `self`/`this` call** binds when the name is defined in ONE file, or `cfile == tfile`.
+
+`codemap` records each call site's receiver kind (`""` / `"self"` / `"other"`) for this. **Verified on real
+uptime-kuma:** `lib.mjs` `execSync` went from a false `on:testChrome->...->execSync` (remote) to the correct
+`main->execSync` (local → needs-review, build tooling). Conservative direction: a genuine cross-file
+imported-namespace call to a same-named helper may be dropped (→ review, not a false confirm) — value/import
+resolution (§10.4) is the deeper follow-up.
+
 ## 7. Open questions
 
 1. Name→tier mapping: is `handler`/`handle` remote enough, or should ambiguous bare-name entries also be

@@ -188,6 +188,27 @@ def test_reachability_cli_main_is_local_not_remote(tmp_path):
     assert "local entry" in note
 
 
+def test_binding_aware_reachability_drops_crossfile_member_collision(tmp_path):
+    # a USER function `execSync` in a.js must not inherit callers of a library member call
+    # `childProcess.execSync(...)` in b.js -- the §10.1 name-collision that manufactured a false chain.
+    _write(tmp_path, "a.js",
+           "export function execSync(cmd){ return require('child_process').execSync(cmd); }\n"
+           "socket.on('doA', (data) => { execSync(data.x); });\n")
+    _write(tmp_path, "b.js",
+           "function installChromiumViaApt(p){ childProcess.execSync('apt ' + p); }\n"
+           "socket.on('testChrome', (data) => { installChromiumViaApt(data.p); });\n")
+    cmap = codemap.build(str(tmp_path))
+    afile = str(tmp_path / "a.js")
+    ent, path, trust = reachability.reaches_untrusted_entry_bound(cmap, "execSync", afile)
+    assert path is not None
+    assert not any("testChrome" in n for n in path)         # the cross-file member-call edge is dropped
+    assert any("doA" in n for n in path)                    # its OWN same-file bare-call chain is kept
+    # receiver kinds captured for binding resolution
+    recvs = {r for (_c, _f, r) in cmap.call_sites.get("execSync", [])}
+    assert "other" in recvs                                 # childProcess.execSync / require(...).execSync
+    assert "" in recvs                                      # the bare execSync(data.x) call
+
+
 def test_other_front_doors_are_remote_entries():
     # decorator/annotation-based entries: GraphQL / NestJS messaging+ws / Spring msg / Celery / gRPC / Tauri
     from types import SimpleNamespace as NS

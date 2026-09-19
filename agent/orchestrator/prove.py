@@ -234,7 +234,7 @@ def _apply_gate(rec, c, cmap, tm=None):
         rec["why"] = ("[value-taint] the sink arguments do not derive from untrusted input in this function "
                       "-- likely a mislabel; human review. " + rec.get("why", ""))
         return rec
-    reachable, conf, note, trust = reachability.gate(cmap, c.unit)  # (3) reachability gate (+ confidence + tier)
+    reachable, conf, note, trust = reachability.gate(cmap, c.unit, sink_file=getattr(c, "file", None))  # (3) reachability (binding-aware)
     rec["reachability"] = note
     if not reachable:
         rec["verdict"] = "anomalous_state"

@@ -139,6 +139,7 @@ class CodeMap:
     classes: dict = field(default_factory=lambda: defaultdict(list)) # name -> [Cls]
     files: dict = field(default_factory=dict)                        # path -> FileInfo (the by-file view)
     _callers: dict = field(default_factory=lambda: defaultdict(set)) # callee_name -> {caller_name}
+    call_sites: dict = field(default_factory=lambda: defaultdict(list))  # callee -> [(caller, call_file, recv)]
     event_handlers: set = field(default_factory=set)                 # fn names registered as socket/emitter handlers
 
     def entry_points(self):
@@ -219,6 +220,24 @@ def _callee_name(call_node):
                 or fn.child_by_field_name("selector"))
         return _txt(last) if last else _txt(fn).split("::")[-1].split(".")[-1].split("->")[-1]
     return _txt(fn).split("::")[-1].split(".")[-1].split("->")[-1].split("(")[0].split("<")[0].strip()
+
+
+def _call_receiver(call_node):
+    """Receiver kind of a call, for binding-aware reachability: "" for a BARE call `foo(...)`, "self" for a
+    self/this member call `this.foo()`/`self.foo()`/`$this->foo()`, "other" for any other member/scoped call
+    `obj.foo()` / `Module.foo()` (whose target is likely a DIFFERENT object's / library's method, not a bare
+    same-named user function)."""
+    fn = (call_node.child_by_field_name("function") or call_node.child_by_field_name("method")
+          or call_node.child_by_field_name("name"))
+    if fn is None:
+        return ""
+    if fn.type in ("identifier", "name", "constant", "field_identifier", "type_identifier"):
+        return ""                                           # bare foo(...)
+    obj = (fn.child_by_field_name("object") or fn.child_by_field_name("receiver")
+           or fn.child_by_field_name("scope") or (fn.children[0] if fn.children else None))
+    if obj is not None and _txt(obj).strip() in ("this", "self", "$this"):
+        return "self"
+    return "other"
 
 
 def _registered_event(node):
@@ -493,6 +512,7 @@ def _walk(node, m, file, lang, enclosing, finfo, cls):
         if callee:
             m.calls.append((enclosing, callee, file, node.start_point[0] + 1))
             m._callers[callee].add(enclosing)
+            m.call_sites[callee].append((enclosing, file, _call_receiver(node)))  # for binding-aware reachability
             if callee in ("require", "require_relative", "__import__", "load", "autoload"):  # +ruby require
                 args = node.child_by_field_name("arguments")
                 if args is not None:

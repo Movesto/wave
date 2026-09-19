@@ -145,12 +145,98 @@ def _ambiguous_names(cmap, path):
     return [n for n in path if len(cmap.funcs.get(n, [])) > 1]
 
 
-def gate(cmap, sink_func_name):
-    """Classify a proven sink by reachability. Returns (reachable: bool, confidence: str, note: str,
-    trust: str|None). confidence 'high' = a clean chain with no ambiguous (common-name) edges; 'low' = the
-    ONLY path relies on an ambiguous name-based edge. trust = the reached entry's tier ('remote'|'local'):
-    a 'local' (CLI/process) reach means remote exploitability is NOT established -> prove downgrades to review."""
-    entry, path, trust = reaches_untrusted_entry(cmap, (sink_func_name or "").split("(")[0].strip())
+# --- Binding-aware reachability (fixes the §10.1 name-collision false chains) -----------------------------
+# The name-based graph links `execSync`-in-file-A to callers of `execSync`-in-file-B, and links a library
+# member call `childProcess.execSync(...)` to a same-named user function. File-anchor the walk instead: a
+# backward edge binds to OUR definition (name in file F) only when the call plausibly targets it.
+
+def _norm(p):
+    return str(p or "").replace("\\", "/")
+
+
+def _bind(cmap):
+    """(def_files, funcat) indexes, memoized on the cmap. def_files: name -> {files defining it} (functions
+    AND class methods). funcat: (name, file) -> Func, for entry_trust at a specific definition."""
+    b = getattr(cmap, "_bind_cache", None)
+    if b is not None:
+        return b
+    from collections import defaultdict
+    def_files, funcat = defaultdict(set), {}
+    for name, fs in cmap.funcs.items():
+        for f in fs:
+            fp = _norm(getattr(f, "file", ""))
+            if fp:
+                def_files[name].add(fp)
+                funcat[(name, fp)] = f
+    for cl in cmap.classes.values():
+        for c in cl:
+            for m in getattr(c, "methods", []):
+                nm, fp = getattr(m, "name", ""), _norm(getattr(m, "file", ""))
+                if nm and fp:
+                    def_files[nm].add(fp)
+                    funcat[(nm, fp)] = m
+    b = (def_files, funcat)
+    try:
+        cmap._bind_cache = b
+    except Exception:
+        pass
+    return b
+
+
+def reaches_untrusted_entry_bound(cmap, sink_name, sink_file, max_hops=12):
+    """Binding-aware backward BFS over (name, file) nodes. An edge caller(cfile)->name binds to OUR def (name
+    in tfile) only if: a NON-self member call (`obj.name()`) came from the SAME file (else it's a different
+    object's / library's method); a bare/self call resolves when the name is defined in ONE file OR cfile==tfile
+    (same-file). Prefers a REMOTE entry, falls back to LOCAL. Returns (entry_func, path_names, trust)."""
+    from collections import deque
+    def_files, funcat = _bind(cmap)
+    sink_file = _norm(sink_file)
+
+    def binds(cfile, recv, name, tfile):
+        cfile = _norm(cfile)
+        if recv == "other":                                 # obj.name()/Module.name() -> only a same-file def
+            return cfile == tfile
+        return len(def_files.get(name, ())) <= 1 or cfile == tfile   # bare/self: unique name or same-file
+
+    start = (sink_name, sink_file)
+    f0 = funcat.get(start)
+    if f0 is not None and entry_trust(f0) == "remote":
+        return f0, [sink_name], "remote"
+    fallback = (f0, [sink_name], "local") if (f0 is not None and entry_trust(f0) == "local") else None
+    seen, q = {start}, deque([[start]])
+    while q:
+        path = q.popleft()
+        if len(path) > max_hops:
+            continue
+        cname, cfile_cur = path[0]
+        for (caller, cfile, recv) in cmap.call_sites.get(cname, []):
+            if not binds(cfile, recv, cname, cfile_cur):    # this call targets a DIFFERENT def -> skip
+                continue
+            node = (caller, _norm(cfile))
+            if node in seen:
+                continue
+            seen.add(node)
+            cf = funcat.get(node)
+            t = entry_trust(cf) if cf else None
+            names = [n for n, _f in ([node] + path)]
+            if t == "remote":
+                return cf, names, "remote"
+            if t == "local" and fallback is None:
+                fallback = (cf, names, "local")
+            q.append([node] + path)
+    return fallback if fallback else (None, None, None)
+
+
+def gate(cmap, sink_func_name, sink_file=None):
+    """Classify a proven sink by reachability. Returns (reachable, confidence, note, trust). With `sink_file`
+    the walk is BINDING-AWARE (file-anchored -- a name-collision in another file can't manufacture a chain);
+    without it, the legacy name-based walk. trust = the reached entry's tier ('remote'|'local'): a 'local'
+    (CLI/process) reach means remote exploitability is NOT established -> prove downgrades to review."""
+    name = (sink_func_name or "").split("(")[0].strip()
+    if sink_file is not None:
+        entry, path, trust = reaches_untrusted_entry_bound(cmap, name, sink_file)
+    else:
+        entry, path, trust = reaches_untrusted_entry(cmap, name)
     if entry is None:
         return False, "high", (
             "sink PROVEN to fire, but no path from an untrusted-facing entry (route / handler) reaches it -- "

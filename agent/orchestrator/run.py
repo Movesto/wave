@@ -168,7 +168,7 @@ def cmd_eyes(args):
 
     print(f"\nNOTEBOOK: reading {len(targets)} files (persisted + resumable)")
     notes, paths = notebook.read_notes(model, args.target, per_file, pinned, budget=budget,
-                                       out_dir=out_dir, targets=targets)
+                                       out_dir=out_dir, targets=targets, jobs=getattr(args, "jobs", 1))
     total = sum(len(n["findings"]) for n in notes)
     print(f"\nnotebook -> {paths['md']}  ({len(notes)} files noted, {total} findings)")
 
@@ -181,7 +181,7 @@ def cmd_detect(args):
     out_dir = str(Path(args.notebook).parent) if args.notebook else args.target
     model = Model()
     survivors, refuted, paths = detector.run(model, args.target, notebook_path=args.notebook,
-                                             budget=args.budget, out_dir=out_dir)
+                                             budget=args.budget, out_dir=out_dir, jobs=getattr(args, "jobs", 1))
     print(f"\nDETECTOR (clean-room falsification): {len(survivors)} survived, {len(refuted)} refuted")
     print(f"\nSURVIVORS -> {paths['candidates']}  (Stage 3 worklist, most-severe first):")
     for r in survivors:
@@ -224,7 +224,7 @@ def cmd_patch(args):
     out_dir = str(Path(args.findings).parent) if args.findings else args.target
     model = Model()
     results, paths = patchmod.run(model, args.target, findings_path=args.findings, budget=args.budget,
-                                  out_dir=out_dir, write=args.write)
+                                  out_dir=out_dir, write=args.write, jobs=getattr(args, "jobs", 1))
     fixed = [r for r in results if r["status"] == "fixed"]
     unver = [r for r in results if r["status"] == "patch-unverified"]
     rej = [r for r in results if r["status"] not in ("fixed", "patch-unverified")]
@@ -247,7 +247,7 @@ def cmd_reconcile(args):
         from .model import Model
         model = Model()
     reconciled, log = reconcilemod.run(args.target, findings_path=args.findings, model=model,
-                                       online=getattr(args, "online", False))
+                                       online=getattr(args, "online", False), jobs=getattr(args, "jobs", 1))
     contradictions = [e for e in log if e["action"] == "contradiction"]
     reproved = [e for e in log if e["action"] == "reinvestigated"]
     print(f"\nREVIEW & RECONCILE: {len(reconciled)} findings; "
@@ -333,14 +333,15 @@ def cmd_all(args):
         targets = [pk["path"] for pk in picks]
     print(f"[all] notebook: the model now READS each selected file into notes (one model call each -- "
           f"watch [notebook] i/N below) ...", flush=True)
-    notes, npaths = notebook.read_notes(model, t, per_file, pinned, budget=args.notes_budget, targets=targets)
+    notes, npaths = notebook.read_notes(model, t, per_file, pinned, budget=args.notes_budget, targets=targets,
+                                        jobs=getattr(args, "jobs", 1))
     total = sum(len(n["findings"]) for n in notes)
     print(f"[all] notebook DONE: {len(notes)} files noted, {total} findings -> {npaths['md']}", flush=True)
 
     # Stage 2 -- clean-room falsification -> survivors
     _banner(2, "DETECTOR: clean-room falsify each finding",
             f"one fresh model call per finding (up to {args.detect_budget}) -- watch [detect] i/N below ...")
-    survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget)
+    survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget, jobs=getattr(args, "jobs", 1))
     print(f"[all] detect DONE: {len(survivors)} survived, {len(refuted)} refuted -> {dpaths['candidates']}",
           flush=True)
     if not survivors:
@@ -363,7 +364,7 @@ def cmd_all(args):
               flush=True)
         from . import reconcile as _reconcile
         rc_model = model if getattr(args, "deep_reconcile", False) else None   # Phase 2/3 opt-in (adds model cost)
-        reconciled, _rlog = _reconcile.run(t, model=rc_model, online=args.online)
+        reconciled, _rlog = _reconcile.run(t, model=rc_model, online=args.online, jobs=getattr(args, "jobs", 1))
         by = {v: [] for v in ("confirmed", "anomalous_state", "refuted", "blocked", "believed",
                               "not_exploitable")}
         for f in reconciled:                                 # re-derive verdict groups so patch + summary reflect it
@@ -376,7 +377,8 @@ def cmd_all(args):
                 f"the model writes a fix for each confirmed finding, then the SAME proof re-runs "
                 f"({'writing' if args.write else 'dry-run, source restored'}) ...")
         from . import patch as patchmod
-        pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write)
+        pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write,
+                                 jobs=getattr(args, "jobs", 1))
         fixed = [r for r in pres if r["status"] == "fixed"]
         print(f"[all] patch: {len(fixed)} fixed of {len(pres)} confirmed "
               f"({'wrote' if args.write else 'dry-run'})", flush=True)
@@ -524,6 +526,8 @@ def main():
     e.add_argument("--interactive", action="store_true",
                    help="when the model selects targets on a large repo, pause to let you steer the list "
                         "(drop/add) before deep-reading; without it, auto-proceeds")
+    e.add_argument("--jobs", type=int, default=1, metavar="N",
+                   help="read notebook files in PARALLEL (cloud model only; ~4 fits a 32GB/6-core box)")
     e.set_defaults(func=cmd_eyes)
 
     dt = sub.add_parser("detect", help="Stage 2: clean-room falsify the notebook's findings -> candidates")
@@ -532,6 +536,7 @@ def main():
                     help="path to wave_notebook.jsonl (default <target>/wave_notebook.jsonl)")
     dt.add_argument("--budget", type=int, default=40, metavar="N",
                     help="max findings to falsify this run (severity+confidence order; resumable)")
+    dt.add_argument("--jobs", type=int, default=1, metavar="N", help="falsify in PARALLEL (cloud model only)")
     dt.set_defaults(func=cmd_detect)
 
     pr = sub.add_parser("prove", help="Stage 3: run the detector's survivors through the confirmation ladder")
@@ -559,6 +564,8 @@ def main():
                     help="max confirmed findings to patch this run")
     pt.add_argument("--write", action="store_true",
                     help="KEEP a patch that passed both gates (default: dry-run, restore the source)")
+    pt.add_argument("--jobs", type=int, default=1, metavar="N",
+                    help="patch confirmed findings in PARALLEL (cloud model only; per-file serialized)")
     pt.set_defaults(func=cmd_patch)
 
     rc = sub.add_parser("reconcile", help="Stage 5: dedup + resolve contradictions (+ --deep: cross-file reconcile)")
@@ -568,6 +575,7 @@ def main():
     rc.add_argument("--deep", action="store_true",
                     help="Phase 2/3: load the model to reconcile cross-file look-alikes + re-investigate flags")
     rc.add_argument("--online", action="store_true", help="allow web_search/web_read during re-investigation")
+    rc.add_argument("--jobs", type=int, default=1, metavar="N", help="reconcile clusters in PARALLEL (cloud model, with --deep)")
     rc.set_defaults(func=cmd_reconcile)
 
     al = sub.add_parser("all", help="one-shot pipeline: eyes(notebook) -> detect -> prove [-> patch]")

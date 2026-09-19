@@ -289,11 +289,12 @@ def _render_md(root, notes):
     return "\n".join(out)
 
 
-def read_notes(model, root, per_file, pinned, budget=20, out_dir=None, resume=True, targets=None):
+def read_notes(model, root, per_file, pinned, budget=20, out_dir=None, resume=True, targets=None, jobs=1):
     """Read files into persistent notes. `targets` (an ordered list of absolute paths, e.g. from
     select_targets) overrides the default top-`budget` pin-density order. Appends each note to
     wave_notebook.jsonl as it is produced (durable + resumable: a re-run skips files already noted), then
-    renders wave_notebook.md. Returns (notes, paths)."""
+    renders wave_notebook.md. `jobs`>1 reads files CONCURRENTLY (cloud model only). Returns (notes, paths)."""
+    from .parallel import fan_out, is_cloud_model
     out_dir = Path(out_dir or root)
     jsonl = out_dir / "wave_notebook.jsonl"
     done = {}
@@ -305,21 +306,33 @@ def read_notes(model, root, per_file, pinned, budget=20, out_dir=None, resume=Tr
             except Exception:
                 pass
     targets = list(targets) if targets is not None else pinned[:budget]
+    todo = [p for p in targets if _rel(root, p) not in done]
+    for p in targets:
+        if _rel(root, p) in done:
+            print(f"[notebook] skip (already noted) {_rel(root, p)}", flush=True)
+    if jobs > 1 and not is_cloud_model(model):
+        print("[notebook] --jobs>1 needs a cloud model -- reading serially", flush=True)
+        jobs = 1
+
+    def _compute(path, i):
+        rel = _rel(root, path)
+        print(f"[notebook] {i}/{len(todo)} reading {rel} ...", flush=True)
+        try:
+            return read_note(model, root, path, per_file[path])
+        except Exception as e:                              # never let one file kill the pass
+            print(f"[notebook]   read failed {rel}: {type(e).__name__}: {e}", flush=True)
+            return None
+
     with jsonl.open("a", encoding="utf-8") as fh:
-        for i, path in enumerate(targets, 1):
-            rel = _rel(root, path)
-            if rel in done:
-                print(f"[notebook] {i}/{len(targets)} skip (already noted) {rel}", flush=True)
-                continue
-            print(f"[notebook] {i}/{len(targets)} reading {rel} ...", flush=True)
-            note = read_note(model, root, path, per_file[path])
+        def _commit(path, note, i):
             if note is None:
-                continue
+                return
             fh.write(json.dumps(note) + "\n")
             fh.flush()
-            done[rel] = note
+            done[_rel(root, path)] = note
             print(f"[notebook]   -> {len(note['findings'])} finding(s); "
                   f"try {note['classes_to_try_first'] or '-'}", flush=True)
+        fan_out(todo, _compute, _commit, jobs)
     notes = [done[_rel(root, p)] for p in pinned if _rel(root, p) in done]
     md = _render_md(root, notes)
     (out_dir / "wave_notebook.md").write_text(md, encoding="utf-8")

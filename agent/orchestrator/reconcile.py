@@ -230,18 +230,32 @@ def _apply_cluster_actions(actions, by_ref, log, reinvest):
             log.append({"action": "annotate", "ref": ref, "reason": reason})
 
 
-def _model_reconcile(model, target, findings, budget, do_reinvestigate, online):
+def _model_reconcile(model, target, findings, budget, do_reinvestigate, online, jobs=1):
     """Phase 2+3: cluster look-alikes, run a bounded per-cluster reconcile call, then (optionally) re-prove the
     findings the model flagged. Returns (findings, log). A tool re-prove is the only path that changes a
-    witnessed verdict."""
+    witnessed verdict. `jobs`>1 runs the per-cluster reconcile CALLS concurrently (cloud model); actions are
+    APPLIED on the main thread."""
+    from .parallel import fan_out, is_cloud_model
     log = []
     by_ref = {f"{f.get('file')}:{f.get('line')}": f for f in findings}
     reinvest = []                                            # (file, line, class) keys the model asks to re-prove
-    for cl in _clusters(findings)[:budget]:
+    clusters = _clusters(findings)[:budget]
+    if jobs > 1 and not is_cloud_model(model):
+        jobs = 1
+
+    def _compute(cl, i):
+        try:
+            return cl, _reconcile_cluster(model, target, cl)   # model call -> actions (parallel-safe)
+        except Exception:
+            return cl, []
+
+    def _commit(cl, result, i):                             # apply actions on the MAIN thread (mutates shared state)
+        _cl, actions = result
         log.append({"action": "cluster", "signature": list(_signature(cl[0])),
                     "refs": [f"{m.get('file')}:{m.get('line')}" for m in cl],
                     "verdicts": [m.get("verdict") for m in cl]})
-        _apply_cluster_actions(_reconcile_cluster(model, target, cl), by_ref, log, reinvest)
+        _apply_cluster_actions(actions, by_ref, log, reinvest)
+    fan_out(clusters, _compute, _commit, jobs)
     # dedup the re-investigate queue; a witnessed 'confirmed' is already settled, so never re-prove it
     todo, seen = [], set()
     for (f, ln, cls) in reinvest:
@@ -282,7 +296,7 @@ def _load(path):
     return out
 
 
-def run(target, findings_path=None, out_dir=None, model=None, budget=6, reinvestigate=True, online=False):
+def run(target, findings_path=None, out_dir=None, model=None, budget=6, reinvestigate=True, online=False, jobs=1):
     """Stage 5 driver. Phase 1 (always): load wave_findings.jsonl, dedup + resolve contradictions. Phases 2/3
     (when `model` is given): cluster cross-file look-alikes, run a bounded per-cluster reconcile call, and
     re-prove the findings the model flags (recall). Writes reconciled findings in place + wave_reconcile.jsonl
@@ -293,7 +307,7 @@ def run(target, findings_path=None, out_dir=None, model=None, budget=6, reinvest
     n_in = len(findings)
     reconciled, log = reconcile(findings)                    # Phase 1 -- deterministic
     if model is not None:                                    # Phases 2/3 -- bounded, guardrailed
-        reconciled, mlog = _model_reconcile(model, target, reconciled, budget, reinvestigate, online)
+        reconciled, mlog = _model_reconcile(model, target, reconciled, budget, reinvestigate, online, jobs=jobs)
         log += mlog
         if any(e.get("action") == "reinvestigated" for e in mlog):
             reconciled, dlog2 = reconcile(reconciled)        # re-dedup: re-proved verdicts may have shifted

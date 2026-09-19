@@ -706,6 +706,51 @@ def test_parallel_prove_commits_all_and_runs_concurrently(tmp_path):
     assert n == 4 and maxseen[0] >= 2          # all committed, and genuinely concurrent
 
 
+def test_parallel_detect_and_notebook_commit_all_concurrently(tmp_path):
+    import json as _json, time, threading
+    from agent.orchestrator import detector, notebook
+
+    class FakeCloud:
+        api_base = "https://openrouter.ai/api/v1"; _is_local_api = False; model_id = "fake"; supports_tools = True
+
+    # --- detect ---
+    notes = [{"file": f"f{i}.py", "findings": [{"line": 1, "class": "ssrf", "sink": "get(u)", "cwe": "CWE-918",
+              "confidence": "high", "why": "x"}]} for i in range(6)]
+    (tmp_path / "wave_notebook.jsonl").write_text("\n".join(_json.dumps(n) for n in notes), encoding="utf-8")
+    mx, active, lk = [0], [], threading.Lock()
+    def fake_falsify(model, root, f):
+        with lk:
+            active.append(1); mx[0] = max(mx[0], len(active))
+        time.sleep(0.15)
+        with lk:
+            active.pop()
+        return {"verdict": "survives", "reason": "kept"}
+    with mock.patch.object(detector, "falsify", fake_falsify):
+        surv, ref, _p = detector.run(FakeCloud(), str(tmp_path), budget=10, jobs=4)
+    assert len(surv) == 6 and mx[0] >= 2
+    assert sum(1 for _ in open(tmp_path / "wave_detect.jsonl")) == 6
+
+    # --- notebook ---
+    ndir = tmp_path / "nb"; ndir.mkdir()
+    for i in range(5):
+        (ndir / f"m{i}.py").write_text("x=1\n", encoding="utf-8")
+    pinned = [str(ndir / f"m{i}.py") for i in range(5)]
+    per_file = {p: {} for p in pinned}
+    mx2, active2, lk2 = [0], [], threading.Lock()
+    def fake_read_note(model, root, path, pf):
+        with lk2:
+            active2.append(1); mx2[0] = max(mx2[0], len(active2))
+        time.sleep(0.15)
+        with lk2:
+            active2.pop()
+        from agent.orchestrator.notebook import _rel
+        return {"file": _rel(root, path), "findings": [], "classes_to_try_first": []}
+    with mock.patch.object(notebook, "read_note", fake_read_note):
+        got, _pp = notebook.read_notes(FakeCloud(), str(ndir), per_file, pinned, budget=10,
+                                       out_dir=str(ndir), jobs=4)
+    assert len(got) == 5 and mx2[0] >= 2
+
+
 def test_local_model_forces_serial_prove(tmp_path):
     import json as _json
     from agent.orchestrator import prove

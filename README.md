@@ -167,8 +167,9 @@ Useful flags:
   model select the N worth deep-reading. Lower it on a monorepo, raise it for full small-repo coverage.
 - `--online` — give the model opt-in `web_search`/`web_read` (network egress) for unfamiliar APIs; off by
   default (the box stays local).
-- `--jobs N` — prove **N survivors at the same time** in Stage 3 (default **1** = serial, the old behavior).
-  You must give a **number** — there is no "use all cores" mode; `N` is the max concurrent proofs.
+- `--jobs N` — run **N model tasks at the same time** across every model-heavy stage — the **notebook**
+  (Stage 1b, the slow one on big repos), **detect**, **prove**, **patch**, and deep-reconcile (default **1** =
+  serial). You must give a **number** — there is no "use all cores" mode; `N` is the max concurrency.
   - **Cloud model only.** Parallelism runs N model calls + N docker sandboxes at once. That's fine for a cloud
     model (deepseek/OpenRouter), so it's enabled there. A **local** single-GPU model can't generate in
     parallel, so wave **auto-falls back to `--jobs 1`** and prints a note.

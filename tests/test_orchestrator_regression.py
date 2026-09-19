@@ -210,10 +210,14 @@ def test_named_socketio_handler_becomes_untrusted_entry(tmp_path):
     assert "addMonitor" in cmap.event_handlers
     fs = cmap.funcs.get("addMonitor", [])
     assert fs and reachability.entry_trust(fs[0]) == "remote"
-    # an INLINE arrow (anonymous) is NOT captured -- the honest residual limit
-    _write(tmp_path, "inline.js", 'socket.on("x", (data) => { fetch(data.url); });\n')
+    # an INLINE arrow handler is now given a SYNTHETIC name (data-flow-lite) so it becomes a reachable entry
+    _write(tmp_path, "inline.js",
+           'function req(u){ return axios.get(u); }\nsocket.on("addMon", (data) => { req(data.url); });\n')
     cmap2 = codemap.build(str(tmp_path))
-    assert not any(h for h in cmap2.event_handlers if h == "x")   # the string event name is never a handler
+    assert "on:addMon" in cmap2.funcs                             # inline arrow got a synthetic front-door name
+    assert reachability.entry_trust(cmap2.funcs["on:addMon"][0]) == "remote"
+    reach, _c, _n, trust = reachability.gate(cmap2, "req")        # a sink under the inline handler is reachable
+    assert reach and trust == "remote"
 
 
 def test_apply_gate_downgrades_local_only_confirm_to_review(tmp_path):

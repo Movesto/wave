@@ -82,6 +82,18 @@ _CALL = {"call", "call_expression", "function_call_expression", "member_call_exp
 # event/handler REGISTRATION calls: `socket.on("evt", fn)`, `emitter.once(...)`, `ee.addListener(...)`,
 # `stream.subscribe(...)`. A named fn passed to one of these is a front door (socket.io/ws/pub-sub handler).
 _REGISTER_CALLS = {"on", "once", "addlistener", "addeventlistener", "prependlistener", "subscribe"}
+# lifecycle / signal / connection events carry NO attacker data -> not a front door (avoid over-capturing
+# process.on("SIGINT")/server.on("close")/socket.on("error") as untrusted entries). Data events (message,
+# data, request, and app-specific names like addMonitor) are NOT here, so they still register.
+_LIFECYCLE_EVENTS = {"connect", "connection", "disconnect", "disconnecting", "close", "open", "error", "end",
+                     "exit", "beforeexit", "listening", "ready", "drain", "finish", "timeout", "abort",
+                     "sigint", "sigterm", "sighup", "sigkill", "sigusr1", "sigusr2", "uncaughtexception",
+                     "unhandledrejection", "spawn", "pipe", "unpipe", "newlistener", "removelistener",
+                     "install", "activate", "online", "offline", "visibilitychange"}
+
+
+def _is_data_event(ev):
+    return bool(ev) and ev.strip("\"'` \n").lower() not in _LIFECYCLE_EVENTS
 
 
 @dataclass
@@ -207,6 +219,26 @@ def _callee_name(call_node):
                 or fn.child_by_field_name("selector"))
         return _txt(last) if last else _txt(fn).split("::")[-1].split(".")[-1].split("->")[-1]
     return _txt(fn).split("::")[-1].split(".")[-1].split("->")[-1].split("(")[0].split("<")[0].strip()
+
+
+def _registered_event(node):
+    """If an anonymous arrow/function `node` is the callback of a registration call -- socket.on("evt", <node>),
+    emitter.once(...), stream.subscribe(...), ee.addListener(...) -- return the event-name string. This makes
+    an INLINE handler a named front door: the arrow gets a synthetic name so its body's calls (and any sink in
+    it) become reachable from an untrusted entry, without a full value-flow engine."""
+    p = node.parent
+    if p is None or p.type not in ("arguments", "argument_list"):
+        return None
+    call = p.parent
+    if call is None or call.type not in _CALL:
+        return None
+    if _callee_name(call).split(".")[-1].lower() not in _REGISTER_CALLS:
+        return None
+    for c in p.children:                                     # the event name = the first string argument
+        if c.type in ("string", "template_string", "raw_string_literal"):
+            ev = _txt(c).strip("\"'` \n")[:40]
+            return ev if _is_data_event(ev) else None        # skip lifecycle/signal events (no attacker data)
+    return None
 
 
 def _def_name(node):
@@ -438,9 +470,15 @@ def _walk(node, m, file, lang, enclosing, finfo, cls):
             new_cls = c_obj
     elif t in _FUNC_DEF:
         name = _def_name(node)
+        decs = _decorators(node)
+        if not name and node.type in ("arrow_function", "function_expression"):
+            ev = _registered_event(node)                    # an INLINE socket.on("evt", (d)=>{...}) handler?
+            if ev:                                           # give the anonymous handler a synthetic NAME so its
+                name = f"on:{ev}"                            # body's calls join the graph under a front-door node
+                decs = decs + ["wave:event-handler"]
         if name:
             fobj = Func(name=name, file=file, line=node.start_point[0] + 1, end=node.end_point[0] + 1,
-                        exported=_is_exported(node, lang), decorators=_decorators(node), sig=_params(node))
+                        exported=_is_exported(node, lang), decorators=decs, sig=_params(node))
             m.funcs[name].append(fobj)
             if cls is not None:                            # a method of the enclosing class
                 cls.methods.append(fobj)
@@ -463,7 +501,8 @@ def _walk(node, m, file, lang, enclosing, finfo, cls):
                 a = node.child_by_field_name("arguments")          # a NAMED registered event handler = a front door
                 if a is not None:
                     kids = [c for c in a.children if c.type not in ("(", ")", ",")]
-                    if kids and kids[0].type in ("string", "template_string", "raw_string_literal"):
+                    if (kids and kids[0].type in ("string", "template_string", "raw_string_literal")
+                            and _is_data_event(_txt(kids[0]))):    # skip lifecycle/signal events
                         for k in kids[1:]:                         # a bare identifier arg = the handler fn name
                             if k.type == "identifier":
                                 m.event_handlers.add(_txt(k))

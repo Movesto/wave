@@ -131,11 +131,17 @@ shapes on the same map):
   `.addListener(...)` / `.subscribe(...)` is tagged `wave:event-handler` (a front door). Second pass in
   `codemap.build`.
 
-**Honest residual:** an INLINE ANONYMOUS handler — `socket.on("evt", (data) => { ...sink... })` — has no name,
-so it can't be a node in the name-based call graph and can't join the entry set. That is uptime-kuma's exact
-shape, and covering it needs more than a list (synthetic-naming of inline handlers, or value/data-flow
-reachability) — a real mechanism, deferred. Safe direction holds meanwhile: such findings stay `believed`
-(review), never a false confirm.
+- **Inline anonymous handlers** (`codemap`, the uptime-kuma shape): `socket.on("evt", (data) => { ...sink... })`
+  has no name, so it couldn't be a node in the name-based call graph. Fixed by **synthetic-naming**
+  (data-flow-lite): when an anonymous arrow/function is the callback of a registration call, `_registered_event`
+  gives it a synthetic name `on:<event>` and tags it `wave:event-handler`, so its body's calls (and any sink in
+  it) join the graph under a front-door node. **Lifecycle/signal/connection events** (`close`/`error`/`SIGINT`/
+  `connection`/…) are excluded (`_LIFECYCLE_EVENTS`) — they carry no attacker data. On uptime-kuma this took the
+  entry set from 5 → **111** real socket-API handlers (`on:addMonitor`, `on:addNotification`, …).
+
+**Remaining honest limit:** this is *function-level* reachability (the handler's body is untrusted-reachable),
+not *value-level* taint (does the specific attacker value reach the exact sink) — the taint gate (`taint.py`,
+§10.4) handles the value question separately, and the safe direction holds throughout.
 
 ## 7. Open questions
 

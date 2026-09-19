@@ -188,6 +188,33 @@ def test_reachability_cli_main_is_local_not_remote(tmp_path):
     assert "local entry" in note
 
 
+def test_install_packages_serialized_across_parallel_jobs():
+    # under prove --jobs N, several proofs could each `pip install <bigpkg>` at once and OOM the box;
+    # the install semaphore serializes the heavy installs (the proofs stay parallel).
+    import time, threading
+    from agent.orchestrator import execute as execmod
+    active, mx, lk = [], [0], threading.Lock()
+
+    def fake_run(cmd, **k):
+        with lk:
+            active.append(1); mx[0] = max(mx[0], len(active))
+        time.sleep(0.1)
+        with lk:
+            active.pop()
+        return execmod.subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with mock.patch.object(execmod.shutil, "which", lambda _x: "/usr/bin/docker"), \
+         mock.patch.object(execmod, "_docker_mount", lambda p: p), \
+         mock.patch.object(execmod.subprocess, "run", fake_run):
+        threads = [threading.Thread(target=execmod.install_packages, args=(["ansible"],),
+                                    kwargs={"deps": f"/tmp/d{i}"}) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert mx[0] == 1, f"installs ran {mx[0]} at once -- semaphore not serializing"
+
+
 def test_binding_aware_reachability_drops_crossfile_member_collision(tmp_path):
     # a USER function `execSync` in a.js must not inherit callers of a library member call
     # `childProcess.execSync(...)` in b.js -- the §10.1 name-collision that manufactured a false chain.

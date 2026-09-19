@@ -22,8 +22,14 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
+
+# Dependency installs (pip/npm) are network- AND memory-heavy -- pip resolving a big package (e.g. ansible)
+# in a 2GB container is fine ONCE, but under `prove --jobs N` several would run AT ONCE and OOM the box.
+# Serialize them (the model reasoning/proof stays parallel; only the heavy installs queue). Env-tunable.
+_INSTALL_SEM = threading.Semaphore(max(1, int(os.environ.get("WAVE_INSTALL_JOBS", "1"))))
 
 # Where a per-investigation dependency store is bind-mounted inside the sandbox. Packages the model asks
 # for are downloaded here ONCE (with network); every later run mounts this read-back so `network=none`
@@ -163,8 +169,9 @@ def install_packages(packages, *, deps: str, image: str = "python:3.12-slim", ki
            "-v", _docker_mount(deps) + ":" + _DEPS_MOUNT, img, "sh", "-c", inner]
     t0 = time.time()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           encoding="utf-8", errors="replace")
+        with _INSTALL_SEM:                                   # serialize heavy installs across parallel jobs
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                               encoding="utf-8", errors="replace")
         return ExecResult("install: " + " ".join(pkgs), r.stdout or "", r.stderr or "",
                           r.returncode, time.time() - t0)
     except subprocess.TimeoutExpired:

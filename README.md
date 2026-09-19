@@ -175,7 +175,9 @@ Useful flags:
     parallel, so wave **auto-falls back to `--jobs 1`** and prints a note.
   - **Sizing (per box, not cores):** each proof uses a light container (~0.5 GB) but a *compiled build*
     (cargo/gradle/npm) can spike ~2 GB + 2 CPUs. On a **32 GB / 6-core** box, **`--jobs 4`** is the sweet spot;
-    drop to `2` for repos full of compiled-language builds, go up to `6` for light Python/JS.
+    drop to `2` for repos full of compiled-language builds, go up to `6` for light Python/JS. **Dependency
+    installs** (`pip install <bigpkg>` / `npm install`) are serialized across jobs by default (they're
+    memory-heavy — 4 at once can OOM the box); raise with `WAVE_INSTALL_JOBS=2` if you have RAM to spare.
   - It's a **speed** knob only (turns the ~45-min serial runs / timeouts into ~4× faster) — it does **not**
     change *which* findings you get. Distinct from the `--*-budget` flags below, which set *how many* items each
     stage looks at.

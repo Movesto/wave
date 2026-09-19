@@ -691,20 +691,29 @@ def _lang_of(candidate):
     return "py" if (getattr(candidate, "file", "") or "").endswith(".py") else ""
 
 
+import threading as _threading
+# The IN-PROCESS executor monkeypatches GLOBALS (os.system, subprocess, builtins.open, module stubs), so two
+# micro_exec calls cannot run at once without corrupting each other's patches. Serialize it -- it's fast
+# (in-process, no docker), so this costs ~nothing while the slow docker/model work stays parallel (prove --jobs).
+_EXEC_LOCK = _threading.Lock()
+
+
 def micro_exec(candidate, target_param=None, rt=None) -> MicroResult:
     """Confirm a candidate by micro-execution. Dispatch an EXECUTOR by language to run the function and
     return raw facts; the canary OBSERVER renders the verdict. Try IN-PROCESS first (fast; needs deps on
-    the host), then fall back to IN-CONTAINER when a prepared `rt` is given (deps live in the image)."""
-    cwe = getattr(candidate, "cwe", "")
-    payload, marker = _payload(cwe)
-    executor = _EXECUTORS.get(_lang_of(candidate), _PY_EXEC)   # unknown lang -> Python (yields its own error)
-    mr = _observe(executor.run(candidate, payload, target_param), marker, cwe)
-    if mr.verdict in ("proven", "safe"):
+    the host), then fall back to IN-CONTAINER when a prepared `rt` is given (deps live in the image).
+    Serialized via _EXEC_LOCK -- the in-process path patches globals and is not thread-safe."""
+    with _EXEC_LOCK:
+        cwe = getattr(candidate, "cwe", "")
+        payload, marker = _payload(cwe)
+        executor = _EXECUTORS.get(_lang_of(candidate), _PY_EXEC)   # unknown lang -> Python (yields its own error)
+        mr = _observe(executor.run(candidate, payload, target_param), marker, cwe)
+        if mr.verdict in ("proven", "safe"):
+            return mr
+        if rt is not None:
+            cmr = _observe(PythonContainerExecutor().run(candidate, payload, rt), marker, cwe)
+            if cmr.verdict in ("proven", "safe"):
+                return cmr
+            if mr.verdict == "unknown" and cmr.verdict != "unknown":
+                return cmr
         return mr
-    if rt is not None:
-        cmr = _observe(PythonContainerExecutor().run(candidate, payload, rt), marker, cwe)
-        if cmr.verdict in ("proven", "safe"):
-            return cmr
-        if mr.verdict == "unknown" and cmr.verdict != "unknown":
-            return cmr
-    return mr

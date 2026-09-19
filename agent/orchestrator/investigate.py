@@ -350,13 +350,15 @@ def _do_install(packages, *, deps, image, kind, state):
             "npm, or the real distribution name), or conclude 'blocked' if you cannot provision it.")
 
 
-def _do_write(path, content, mount):
+def _do_write(path, content, mount, tag=""):
     """The model's write_file action: create a NEW file in the sandbox mount so it can author its OWN repro
     (a React render, a custom driver, a fixture) when the pre-built scaffold doesn't fit. Safety: the path
     stays INSIDE the mount (never absolute, never via '..') and NEVER overwrites an existing file -- the
     target's own source must stay pristine or the proof is meaningless. Written paths are recorded in a
-    manifest (.wave_written.txt) that repro.remove() deletes afterward. Returns a short message; never raises."""
+    per-job manifest (.wave_written{tag}.txt) that repro.remove(target, tag) deletes afterward (the `tag`
+    isolates PARALLEL proofs). Returns a short message; never raises."""
     from pathlib import Path as _P
+    manifest_name = f".wave_written{('_' + tag) if tag else ''}.txt"
     if not mount:
         return "write_file unavailable here (no sandbox mount)."
     raw = (path or "").strip().replace("\\", "/")
@@ -371,13 +373,13 @@ def _do_write(path, content, mount):
         dest.relative_to(base)                              # reject '..' escaping the mount
     except Exception:
         return f"write_file: refused '{path}' -- the path must stay inside the sandbox (no '..' or absolute)."
-    if dest.name in (".wave_written.txt",) or dest.exists():
+    if dest.name.startswith(".wave_written") or dest.exists():
         return (f"write_file: '{rel}' already exists -- I will NOT overwrite existing/target source. Pick a "
                 f"NEW filename for your repro (e.g. {rel}.wave.mjs).")
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
-        with (base / ".wave_written.txt").open("a", encoding="utf-8") as _fh:
+        with (base / manifest_name).open("a", encoding="utf-8") as _fh:
             _fh.write(rel + "\n")
     except Exception as e:
         return f"write_file FAILED for '{rel}': {type(e).__name__}: {e}"
@@ -488,7 +490,8 @@ _WEB_READ_TOOL = {"type": "function", "function": {
 
 
 def _investigate_native(model, brief, *, image, mount, container, network, max_steps, step_timeout,
-                        online=False, deps=None, dep_kind="py", install_budget=6, repro_expected=True):
+                        online=False, deps=None, dep_kind="py", install_budget=6, repro_expected=True,
+                        write_tag=""):
     """Tool-calling loop over the model's NATIVE tools interface (structured tool_calls)."""
     import json as _json
     messages = [{"role": "system", "content": _NATIVE_SYS}, {"role": "user", "content": brief}]
@@ -566,7 +569,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
                 continue
             if name == "write_file":                         # model authors its OWN repro when the scaffold doesn't fit
-                content = _do_write(args.get("path"), args.get("content"), mount)
+                content = _do_write(args.get("path"), args.get("content"), mount, write_tag)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
                 continue
             if name == "install":                            # model asks for a missing dep -> fetch it (visible)
@@ -678,7 +681,7 @@ def _dep_kind_for(image):
 
 def investigate(model, brief, *, image="python:3.12-slim", mount=None, container=None,
                 network="none", max_steps=6, step_timeout=60, max_new_tokens=2000, online=False,
-                deps=None, install_budget=6, repro_expected=True) -> Verdict:
+                deps=None, install_budget=6, repro_expected=True, write_tag="") -> Verdict:
     """Let the model investigate `brief` (a hypothesis + the relevant code) by running commands in a
     sandbox, until it concludes or the step budget is spent. `mount` binds the target dir into the box;
     `container` runs inside the app's own container instead. `online=True` adds the opt-in web_search /
@@ -698,19 +701,20 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
         return _investigate(model, brief, image=image, mount=mount, container=container, network=network,
                             max_steps=max_steps, step_timeout=step_timeout, max_new_tokens=max_new_tokens,
                             online=online, deps=deps, install_budget=install_budget,
-                            repro_expected=repro_expected)
+                            repro_expected=repro_expected, write_tag=write_tag)
     finally:
         if own_deps and deps:
             shutil.rmtree(deps, ignore_errors=True)
 
 
 def _investigate(model, brief, *, image, mount, container, network, max_steps, step_timeout,
-                 max_new_tokens, online, deps, install_budget, repro_expected=True):
+                 max_new_tokens, online, deps, install_budget, repro_expected=True, write_tag=""):
     dep_kind = _dep_kind_for(image)
     if getattr(model, "supports_tools", False):
         return _investigate_native(model, brief, image=image, mount=mount, container=container,
                                    network=network, max_steps=max_steps, step_timeout=step_timeout,
                                    online=online, deps=deps, dep_kind=dep_kind, install_budget=install_budget,
+                                   write_tag=write_tag,
                                    repro_expected=repro_expected)
     inst_state = {"installs": 0, "budget": install_budget, "done": set()}
     trail = []
@@ -735,7 +739,7 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
             trail.append(("install " + ", ".join(act.get("packages") or []), msg))
             continue
         if kind in ("write", "write_file"):                 # author your OWN repro when the scaffold doesn't fit
-            msg = _do_write(act.get("path"), act.get("content"), mount)
+            msg = _do_write(act.get("path"), act.get("content"), mount, write_tag)
             trail.append((f"write_file {act.get('path')}", msg))
             continue
         if kind == "run":

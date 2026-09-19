@@ -138,10 +138,15 @@ def _rel(path, target):
         return Path(path).name
 
 
-def build(candidate, target, mode="call", workdir="/work"):
+def _sfx(tag):
+    return f"_{tag}" if tag else ""
+
+
+def build(candidate, target, mode="call", workdir="/work", tag=""):
     """Write a reproduction scaffold next to the mounted repo (host side); return (container_path,
     run_hint) the model can invoke, or None if we can't scaffold this candidate. Caller must remove()
-    it afterwards."""
+    it afterwards. `tag` gives each PARALLEL proof its own scaffold file so concurrent jobs on the same
+    target don't clobber each other's `.wave_repro`."""
     func = (getattr(candidate, "unit", "") or "").split("(")[0].strip()
     if not func:
         return None
@@ -150,29 +155,31 @@ def build(candidate, target, mode="call", workdir="/work"):
     mod_c = f"{workdir}/{rel}"
     is_js = path.lower().endswith((".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"))
     root = Path(target)
+    sfx = _sfx(tag)
     if is_js:
-        host = root / ".wave_repro.mjs"
+        host = root / f".wave_repro{sfx}.mjs"
         host.write_text(_JS.format(target=mod_c, func=func, mode=mode), encoding="utf-8")
-        cont = f"{workdir}/.wave_repro.mjs"
+        cont = f"{workdir}/.wave_repro{sfx}.mjs"
         return cont, f"tsx {cont} '<payload>'"
     if path.lower().endswith(".py"):
-        host = root / ".wave_repro.py"
+        host = root / f".wave_repro{sfx}.py"
         host.write_text(_PY.format(root=workdir, target=mod_c, func=func), encoding="utf-8")
-        cont = f"{workdir}/.wave_repro.py"
+        cont = f"{workdir}/.wave_repro{sfx}.py"
         return cont, f"python3 {cont} '<payload>'"
     return None
 
 
-def remove(target):
-    """Delete any scaffold we wrote, plus any files the MODEL authored via write_file (recorded in the
-    .wave_written.txt manifest) so the target repo is left pristine."""
+def remove(target, tag=""):
+    """Delete the scaffold we wrote for this (tagged) job, plus any files the MODEL authored via write_file
+    (recorded in the per-job .wave_written{tag}.txt manifest) so the target repo is left pristine."""
     root = Path(target)
-    for name in (".wave_repro.mjs", ".wave_repro.py"):
+    sfx = _sfx(tag)
+    for name in (f".wave_repro{sfx}.mjs", f".wave_repro{sfx}.py"):
         try:
             (root / name).unlink()
         except OSError:
             pass
-    manifest = root / ".wave_written.txt"
+    manifest = root / f".wave_written{sfx}.txt"
     try:
         rels = manifest.read_text(encoding="utf-8").splitlines()
     except OSError:

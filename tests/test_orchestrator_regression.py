@@ -656,6 +656,75 @@ def test_not_exploitable_is_shown_in_report_not_hidden(tmp_path):
 
 # ============================ 9. Stage 5 -- review & reconcile (deterministic dedup) ============================
 
+def test_repro_scaffold_and_manifest_are_tag_isolated(tmp_path):
+    # parallel proofs must not clobber each other's scaffold / write-manifest -> per-job tag
+    from agent.orchestrator import repro
+    (tmp_path / "a.py").write_text("def f(x):\n    import os; os.system(x)\n", encoding="utf-8")
+    c = mock.Mock(file=str(tmp_path / "a.py"), unit="f(x)", line=2)
+    repro.build(c, str(tmp_path), mode="call", tag="j1")
+    repro.build(c, str(tmp_path), mode="call", tag="j2")
+    assert (tmp_path / ".wave_repro_j1.py").exists() and (tmp_path / ".wave_repro_j2.py").exists()
+    inv._do_write("r_j1.py", "x", str(tmp_path), "j1")
+    assert (tmp_path / ".wave_written_j1.txt").exists()
+    repro.remove(str(tmp_path), "j1")                       # cleans ONLY j1's files, not j2's
+    assert not (tmp_path / ".wave_repro_j1.py").exists() and (tmp_path / ".wave_repro_j2.py").exists()
+    assert not (tmp_path / ".wave_written_j1.txt").exists()
+
+
+def test_prove_is_cloud_model_guard():
+    from agent.orchestrator import prove
+    assert prove._is_cloud_model(mock.Mock(api_base="https://openrouter.ai/api/v1", _is_local_api=False))
+    assert not prove._is_cloud_model(mock.Mock(api_base="http://localhost:11434/v1", _is_local_api=True))
+    assert not prove._is_cloud_model(mock.Mock(api_base=None, _is_local_api=False))
+    assert not prove._is_cloud_model(None)
+
+
+def test_parallel_prove_commits_all_and_runs_concurrently(tmp_path):
+    import json as _json, time, threading
+    from agent.orchestrator import prove
+    for i in range(4):
+        (tmp_path / f"m{i}.py").write_text(f"def h{i}(x):\n    import os; os.system(x)\n", encoding="utf-8")
+    cands = [{"file": f"m{i}.py", "line": 2, "class": "cmd", "sink": "os.system(x)"} for i in range(4)]
+    (tmp_path / "wave_candidates.jsonl").write_text("\n".join(_json.dumps(c) for c in cands), encoding="utf-8")
+
+    class FakeCloud:
+        api_base = "https://openrouter.ai/api/v1"; model_id = "fake"; supports_tools = True; _is_local_api = False
+        def unload(self): pass
+
+    active, maxseen, lk = [], [0], threading.Lock()
+    def fake_prove_one(model, target, c, have_docker, max_steps, online=False, tag=""):
+        with lk:
+            active.append(1); maxseen[0] = max(maxseen[0], len(active))
+        time.sleep(0.2)
+        with lk:
+            active.pop()
+        return {"verdict": "believed", "why": "stub", "ran": 1, "oracle": "investigate (1 run(s), call)", "taint": "unknown"}
+
+    with mock.patch.object(prove, "_prove_one", fake_prove_one):
+        by, _paths = prove.run(FakeCloud(), str(tmp_path), budget=10, jobs=4)
+    n = sum(1 for _ in open(tmp_path / "wave_findings.jsonl"))
+    assert n == 4 and maxseen[0] >= 2          # all committed, and genuinely concurrent
+
+
+def test_local_model_forces_serial_prove(tmp_path):
+    import json as _json
+    from agent.orchestrator import prove
+    (tmp_path / "m.py").write_text("def h(x):\n    import os; os.system(x)\n", encoding="utf-8")
+    (tmp_path / "wave_candidates.jsonl").write_text(
+        _json.dumps({"file": "m.py", "line": 2, "class": "cmd", "sink": "os.system(x)"}), encoding="utf-8")
+
+    class FakeLocal:
+        api_base = "http://localhost:11434/v1"; model_id = "local"; supports_tools = True; _is_local_api = True
+        def unload(self): pass
+
+    seen_jobs = []
+    with mock.patch.object(prove, "_is_cloud_model", return_value=False):
+        with mock.patch.object(prove, "_prove_one",
+                               lambda *a, **k: {"verdict": "believed", "why": "x", "ran": 0, "oracle": "", "taint": "unknown"}):
+            prove.run(FakeLocal(), str(tmp_path), budget=5, jobs=4)   # jobs>1 but local -> must not crash / serial
+    assert (tmp_path / "wave_findings.jsonl").exists()
+
+
 def test_reconcile_merges_same_line_contradiction_keeps_witnessed():
     # the netdata 1508 shape: same file+line, near-identical sinks (one with a `|| fatal` tail), contradictory
     # verdicts -> ONE merged finding, the witnessed verdict kept over the reasoned one, dropped read preserved.

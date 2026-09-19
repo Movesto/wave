@@ -167,6 +167,9 @@ Useful flags:
   model select the N worth deep-reading. Lower it on a monorepo, raise it for full small-repo coverage.
 - `--online` — give the model opt-in `web_search`/`web_read` (network egress) for unfamiliar APIs; off by
   default (the box stays local).
+- `--jobs N` — prove **N survivors in parallel** (Stage 3). Requires a **cloud** model (a local single-GPU
+  model stays serial); each job gets an isolated scaffold, and `~4` fits a 32 GB / 6-core box (lower it for
+  heavy compiled builds). The big speedup on repos with many findings.
 - `--patch` — run Stage 4 (dry-run by default; add `--write` to keep a patch that passed both gates).
 - `--no-reach-gate` — disable the reachability gate (use on libraries with public-API entry points, no routes).
 

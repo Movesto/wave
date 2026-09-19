@@ -113,8 +113,9 @@ def _subj(c):
     return f"{c.cwe or c.family} {c.loc()}"
 
 
-def _prove_one(model, target, c, have_docker, max_steps, online=False):
-    """Run ONE candidate through the ladder -> a verdict record dict."""
+def _prove_one(model, target, c, have_docker, max_steps, online=False, tag=""):
+    """Run ONE candidate through the ladder -> a verdict record dict. `tag` isolates this job's scaffold +
+    write-manifest so PARALLEL proofs on the same target don't clobber each other's files."""
     tstatus, tnote = taint.analyze(c)                        # intra-function value taint (Python + JS/TS; else unknown)
     reason = "not a canary-provable Python handler"
     if c.provable:
@@ -135,7 +136,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False):
     if tnote:                                                # resolve the slice for the model (structure, its job)
         reason = f"{reason} | value-taint: {tstatus} -- {tnote}"
     mode = briefs._proof_mode(c)                             # sanitizer/ssti/protopoll/deser/render/call
-    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"))
+    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag)
     img = briefs._image_for(c.file)
     if briefs._is_js(c.file):                                # JS/TS need tsx + the repo's node_modules;
         from . import js_env                                 # DOM render ALSO needs a real browser --
@@ -152,9 +153,9 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False):
         # controlled egress point when online, not blanket container network access.
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode),
                                image=img, mount=target, network="none", max_steps=max_steps,
-                               step_timeout=step_to, online=online)
+                               step_timeout=step_to, online=online, write_tag=tag)
     finally:
-        repro.remove(target)
+        repro.remove(target, tag)
     verdict = v.verdict
     # DIFFERENTIAL (IDOR/access-control): a witnessed boundary crossing is a business-logic JUDGMENT anchored
     # to an observed state change -- always human-review, never a tool-witnessed `confirmed` (design + §10.7).
@@ -334,10 +335,19 @@ def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=
     return out_recs
 
 
+def _is_cloud_model(model):
+    """A remote API model (OpenRouter/GLM) -- safe to call concurrently. A LOCAL model (ollama or in-process
+    transformers) is single-GPU and must stay serial."""
+    if model is None:
+        return False
+    return bool(getattr(model, "api_base", None)) and not getattr(model, "_is_local_api", True)
+
+
 def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=True, max_steps=8, gate=True,
-        online=False, enrich_trust=False):
+        online=False, enrich_trust=False, jobs=1):
     """Prove the detector's survivors (severity order, up to `budget`). Writes per-candidate verdicts to
-    wave_findings.jsonl (resumable) + casefile.json. Returns (by_verdict, paths)."""
+    wave_findings.jsonl (resumable) + casefile.json. Returns (by_verdict, paths). `jobs` > 1 proves multiple
+    survivors CONCURRENTLY (only with a CLOUD model -- a local single-GPU model stays serial)."""
     target = str(target)
     out_dir = Path(out_dir or target)
     candidates_path = candidates_path or (out_dir / "wave_candidates.jsonl")
@@ -372,51 +382,87 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
     have_docker = shutil.which("docker") is not None
     if not have_docker:
         print("[prove] docker not available -- canary-only; unsettled candidates stay 'believed'", flush=True)
-    n_todo = min(budget, sum(1 for s in survs if _key(s) not in skip))
-    worked = 0
-    with findings_log.open("a", encoding="utf-8") as fh:
-        for surv in survs:
-            k = _key(surv)
-            if k in skip:
-                continue
-            if worked >= budget:
-                break
-            worked += 1
+
+    worklist = []
+    for surv in survs:
+        if _key(surv) in skip:
+            continue
+        if len(worklist) >= budget:
+            break
+        worklist.append(surv)
+    n_todo = len(worklist)
+
+    if jobs > 1 and not _is_cloud_model(model):              # single-GPU local model can't run in parallel
+        print("[prove] --jobs>1 needs a CLOUD model (local is single-GPU) -- running serial", flush=True)
+        jobs = 1
+
+    # COMPUTE (parallel-safe: model API + docker, each with its own tag; no shared writes) -> a finished rec.
+    def _compute(surv, tag):
+        c = _to_candidate(surv, rel_index, target)
+        rec = _prove_one(model, target, c, have_docker, max_steps, online=online, tag=tag)
+        if gate:                                            # untrusted-reachability gate on confirmations
+            rec = _apply_gate(rec, c, cmap, tm)
+        rec = _desktop_authz(rec, c, target, tm)            # single-user desktop app: authz/IDOR is moot
+        if rec.get("verdict") == "confirmed":               # final EVIDENCE AUDIT (only high-stakes confirms)
+            from . import audit
+            av, anote = audit.audit(model, c, rec)
+            if av != "confirmed":
+                rec["verdict"] = av
+                rec["why"] = anote + " " + rec.get("why", "")
+            rec["audit"] = anote
+        return c, rec
+
+    # COMMIT (MAIN THREAD ONLY -- serializes all shared state: CaseFile, findings log, prior, traces).
+    def _commit(surv, c, rec, fh, i):
+        hyp_id = case.record("hypothesis", _subj(c), "seed", "believed", provenance=c.loc(),
+                             cwe=c.cwe, family=c.family).id
+        transcript = rec.pop("_transcript", None)
+        trace_mode = rec.pop("_mode", "")
+        from . import traces
+        if traces.enabled() and transcript:
+            traces.save(target=target, file=surv.get("file", ""), line=int(surv.get("line") or 0),
+                        cls=str(surv.get("class") or "other").lower(), cwe=c.cwe, verdict=rec["verdict"],
+                        evidence=rec.get("evidence", ""), oracle=rec.get("oracle", ""),
+                        model=getattr(model, "model_id", ""), mode=trace_mode, ran=rec.get("ran", 0),
+                        transcript=transcript)
+        _record_outcome(case, hyp_id, c, rec)
+        out = {"file": surv.get("file", ""), "line": int(surv.get("line") or 0),
+               "class": str(surv.get("class") or "other").lower(), "cwe": c.cwe, "unit": c.unit,
+               "sink": surv.get("sink", ""), "confidence": surv.get("confidence", ""), **rec}
+        fh.write(json.dumps(out) + "\n")
+        fh.flush()
+        prior[_key(surv)] = out
+        print(f"[prove] {i}/{n_todo} {rec['verdict'].upper()} {c.cwe or surv.get('class')}@"
+              f"{surv.get('file')}:{surv.get('line')} -- {(rec.get('evidence') or rec.get('why', ''))[:90]}",
+              flush=True)
+
+    def _safe_compute(surv, tag):                           # never let one candidate's crash kill the pool
+        try:
+            return _compute(surv, tag)
+        except Exception as e:
             c = _to_candidate(surv, rel_index, target)
-            print(f"[prove] {worked}/{n_todo} {c.cwe or surv.get('class')}@{surv.get('file')}:"
-                  f"{surv.get('line')} ({c.unit or 'no-func'}) ...", flush=True)
-            hyp_id = case.record("hypothesis", _subj(c), "seed", "believed", provenance=c.loc(),
-                                 cwe=c.cwe, family=c.family).id
-            rec = _prove_one(model, target, c, have_docker, max_steps, online=online)
-            if gate:                                        # untrusted-reachability gate on confirmations
-                rec = _apply_gate(rec, c, cmap, tm)
-            rec = _desktop_authz(rec, c, target, tm)       # single-user desktop app: authz/IDOR is moot
-            if rec.get("verdict") == "confirmed":           # final EVIDENCE AUDIT (only high-stakes confirms):
-                from . import audit                          # re-run the proof + a fresh clean-room skeptic
-                av, anote = audit.audit(model, c, rec)
-                if av != "confirmed":
-                    rec["verdict"] = av
-                    rec["why"] = anote + " " + rec.get("why", "")
-                rec["audit"] = anote
-                print(f"[prove]   audit -> {rec['verdict']}", flush=True)
-            _record_outcome(case, hyp_id, c, rec)
-            transcript = rec.pop("_transcript", None)       # trace-logger fields -- not for the findings file
-            trace_mode = rec.pop("_mode", "")
-            from . import traces                             # capture the FINAL (post-gate/audit) verdict's drive
-            if traces.enabled() and transcript:
-                traces.save(target=target, file=surv.get("file", ""), line=int(surv.get("line") or 0),
-                            cls=str(surv.get("class") or "other").lower(), cwe=c.cwe, verdict=rec["verdict"],
-                            evidence=rec.get("evidence", ""), oracle=rec.get("oracle", ""),
-                            model=getattr(model, "model_id", ""), mode=trace_mode, ran=rec.get("ran", 0),
-                            transcript=transcript)
-            out = {"file": surv.get("file", ""), "line": int(surv.get("line") or 0),
-                   "class": str(surv.get("class") or "other").lower(), "cwe": c.cwe, "unit": c.unit,
-                   "sink": surv.get("sink", ""), "confidence": surv.get("confidence", ""), **rec}
-            fh.write(json.dumps(out) + "\n")
-            fh.flush()
-            prior[k] = out
-            print(f"[prove]   -> {rec['verdict'].upper()}: "
-                  f"{(rec.get('evidence') or rec.get('why', ''))[:100]}", flush=True)
+            return c, {"verdict": "blocked", "evidence": "", "why": f"prove error: {type(e).__name__}: {e}",
+                       "ran": 0, "oracle": "", "taint": "unknown"}
+
+    with findings_log.open("a", encoding="utf-8") as fh:
+        if jobs <= 1 or n_todo <= 1:                        # serial (default / trivial)
+            for i, surv in enumerate(worklist, 1):
+                print(f"[prove] {i}/{n_todo} proving {surv.get('file')}:{surv.get('line')} ...", flush=True)
+                c, rec = _safe_compute(surv, "")
+                _commit(surv, c, rec, fh, i)
+        else:                                               # parallel: warm images on #1, then fan out
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            print(f"[prove] proving {n_todo} survivors with {jobs} parallel workers (cloud model) ...", flush=True)
+            c, rec = _safe_compute(worklist[0], "j0")       # warm docker images / js_env before fanning out
+            _commit(worklist[0], c, rec, fh, 1)
+            done = 1
+            with ThreadPoolExecutor(max_workers=jobs) as ex:
+                futs = {ex.submit(_safe_compute, s, f"j{i}"): s for i, s in enumerate(worklist[1:], 1)}
+                for fut in as_completed(futs):
+                    surv = futs[fut]
+                    c, rec = fut.result()
+                    done += 1
+                    _commit(surv, c, rec, fh, done)
 
     if model is not None:
         try:

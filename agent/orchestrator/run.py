@@ -200,7 +200,8 @@ def cmd_prove(args):
     out_dir = str(Path(args.candidates).parent) if args.candidates else args.target
     model = Model()
     by, paths = prove.run(model, args.target, candidates_path=args.candidates, budget=args.budget,
-                          out_dir=out_dir, gate=not args.no_reach_gate, online=args.online)
+                          out_dir=out_dir, gate=not args.no_reach_gate, online=args.online,
+                          jobs=getattr(args, "jobs", 1))
     conf, anom, refu = by["confirmed"], by["anomalous_state"], by["refuted"]
     blk, bel = by["blocked"], by["believed"]
     print(f"\nPROOF LOOP: {len(conf)} confirmed, {len(anom)} anomalous-state, {len(refu)} refuted, "
@@ -351,7 +352,7 @@ def cmd_all(args):
             f"canary + model investigation per survivor (up to {args.prove_budget}) -- watch [prove]/"
             f"[investigate] below; first XSS builds the browser image once ...")
     by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online,
-                        enrich_trust=getattr(args, "deep_reconcile", False))
+                        enrich_trust=getattr(args, "deep_reconcile", False), jobs=getattr(args, "jobs", 1))
     print(f"[all] prove DONE: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
           f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
 
@@ -545,6 +546,9 @@ def main():
     pr.add_argument("--online", action="store_true",
                     help="give the model opt-in web_search / web_read tools (the box is otherwise fully "
                          "local; sends queries off-box only when the model is unsure about an API/service)")
+    pr.add_argument("--jobs", type=int, default=1, metavar="N",
+                    help="prove N survivors in PARALLEL (cloud model only; local single-GPU stays serial). "
+                         "~4 fits a 32GB/6-core box; lower for heavy compiled builds")
     pr.set_defaults(func=cmd_prove)
 
     pt = sub.add_parser("patch", help="Stage 4: patch each confirmed finding + reverify with the same proof")
@@ -585,6 +589,8 @@ def main():
                     help="skip Stage 5 (dedup + contradiction resolution) before patch/report")
     al.add_argument("--deep-reconcile", action="store_true",
                     help="Stage 5 Phase 2/3: also run the model cross-file reconcile + re-investigate (adds cost)")
+    al.add_argument("--jobs", type=int, default=1, metavar="N",
+                    help="prove N survivors in PARALLEL (cloud model only; ~4 fits a 32GB/6-core box)")
     al.set_defaults(func=cmd_all)
 
     rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")

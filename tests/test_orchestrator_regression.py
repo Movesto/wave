@@ -188,6 +188,34 @@ def test_reachability_cli_main_is_local_not_remote(tmp_path):
     assert "local entry" in note
 
 
+def test_other_front_doors_are_remote_entries():
+    # decorator/annotation-based entries: GraphQL / NestJS messaging+ws / Spring msg / Celery / gRPC / Tauri
+    from types import SimpleNamespace as NS
+    for dec in ("@Query()", "@Mutation()", "@MessagePattern('t')", "@SubscribeMessage('m')",
+                "@KafkaListener", "@shared_task", "#[tauri::command]", "@GrpcMethod", "@WebSocketGateway()"):
+        assert reachability.entry_trust(NS(decorators=[dec], name="h")) == "remote", dec
+    # realtime/consumer handler NAMES
+    for nm in ("onMessage", "handle_event", "on_data", "resolver"):
+        assert reachability.entry_trust(NS(decorators=[], name=nm)) == "remote", nm
+    # unchanged: main is local, an ordinary helper is not an entry
+    assert reachability.entry_trust(NS(decorators=[], name="main")) == "local"
+    assert reachability.entry_trust(NS(decorators=[], name="helper")) is None
+
+
+def test_named_socketio_handler_becomes_untrusted_entry(tmp_path):
+    # socket.on("evt", namedHandler) / emitter.on(...) registers a front door -> namedHandler is a remote entry
+    _write(tmp_path, "sh.js",
+           'function addMonitor(data){ return fetch(data.url); }\nsocket.on("addMonitor", addMonitor);\n')
+    cmap = codemap.build(str(tmp_path))
+    assert "addMonitor" in cmap.event_handlers
+    fs = cmap.funcs.get("addMonitor", [])
+    assert fs and reachability.entry_trust(fs[0]) == "remote"
+    # an INLINE arrow (anonymous) is NOT captured -- the honest residual limit
+    _write(tmp_path, "inline.js", 'socket.on("x", (data) => { fetch(data.url); });\n')
+    cmap2 = codemap.build(str(tmp_path))
+    assert not any(h for h in cmap2.event_handlers if h == "x")   # the string event name is never a handler
+
+
 def test_apply_gate_downgrades_local_only_confirm_to_review(tmp_path):
     # a confirmed cmd-injection reachable only via a CLI main() -> anomalous_state (needs review), not confirmed
     _write(tmp_path, "scripts/tool.py", _CLI_SRC)

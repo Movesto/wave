@@ -115,6 +115,28 @@ tiers + local→review) is what generalizes; the exact name→tier mapping is tu
 **Net:** the three gate blind spots are closed at the root, the fail-safe default caps future ones, and the
 `is_X` heuristics are consolidating into one inspectable, model-enrichable artifact (`wave_trust.json`).
 
+## 8. Front-door breadth (the untrusted-entry set)
+
+Shift 1's entry set started with HTTP routes + a few handler names. The uptime-kuma run exposed that
+event-driven backends have OTHER front doors the set missed. Extended (no new architecture — just more door
+shapes on the same map):
+- **Decorator/annotation entries** (`reachability._ROUTE_HINTS`): GraphQL (`@Query`/`@Mutation`/`@Resolver`),
+  NestJS messaging + websockets (`@MessagePattern`/`@EventPattern`/`@SubscribeMessage`/`@WebSocketGateway`),
+  gRPC (`@GrpcMethod`), Spring/JVM messaging (`@KafkaListener`/`@RabbitListener`/`@JmsListener`/
+  `@MessageMapping`), Celery (`@task`/`@shared_task`), cloud functions (Azure `*_trigger`, GCP
+  `functions_framework`), Tauri IPC (`#[tauri::command]`). Distinctive strings → near-zero false positives.
+- **Handler NAMES** (`_REMOTE_ENTRY_NAMES`): realtime/consumer conventions (`onMessage`, `on_data`,
+  `handle_message`, `handle_event`, `resolver`).
+- **Named registered handlers** (`codemap`): a fn passed to `socket.on("evt", fn)` / `emitter.once(...)` /
+  `.addListener(...)` / `.subscribe(...)` is tagged `wave:event-handler` (a front door). Second pass in
+  `codemap.build`.
+
+**Honest residual:** an INLINE ANONYMOUS handler — `socket.on("evt", (data) => { ...sink... })` — has no name,
+so it can't be a node in the name-based call graph and can't join the entry set. That is uptime-kuma's exact
+shape, and covering it needs more than a list (synthetic-naming of inline handlers, or value/data-flow
+reachability) — a real mechanism, deferred. Safe direction holds meanwhile: such findings stay `believed`
+(review), never a false confirm.
+
 ## 7. Open questions
 
 1. Name→tier mapping: is `handler`/`handle` remote enough, or should ambiguous bare-name entries also be

@@ -79,6 +79,10 @@ _CALL = {"call", "call_expression", "function_call_expression", "member_call_exp
          "function_call",                                         # lua
          "apply"}                                                 # haskell
 
+# event/handler REGISTRATION calls: `socket.on("evt", fn)`, `emitter.once(...)`, `ee.addListener(...)`,
+# `stream.subscribe(...)`. A named fn passed to one of these is a front door (socket.io/ws/pub-sub handler).
+_REGISTER_CALLS = {"on", "once", "addlistener", "addeventlistener", "prependlistener", "subscribe"}
+
 
 @dataclass
 class Func:
@@ -123,6 +127,7 @@ class CodeMap:
     classes: dict = field(default_factory=lambda: defaultdict(list)) # name -> [Cls]
     files: dict = field(default_factory=dict)                        # path -> FileInfo (the by-file view)
     _callers: dict = field(default_factory=lambda: defaultdict(set)) # callee_name -> {caller_name}
+    event_handlers: set = field(default_factory=set)                 # fn names registered as socket/emitter handlers
 
     def entry_points(self):
         """Functions untrusted input can enter through: exported / decorated (routes) / top-level mains."""
@@ -454,6 +459,14 @@ def _walk(node, m, file, lang, enclosing, finfo, cls):
                 args = node.child_by_field_name("arguments")
                 if args is not None:
                     m.imports[file].add(_txt(args).strip("()\"' "))
+            elif callee.split(".")[-1].lower() in _REGISTER_CALLS:  # socket.on("evt", handler) / emitter.on(...)
+                a = node.child_by_field_name("arguments")          # a NAMED registered event handler = a front door
+                if a is not None:
+                    kids = [c for c in a.children if c.type not in ("(", ")", ",")]
+                    if kids and kids[0].type in ("string", "template_string", "raw_string_literal"):
+                        for k in kids[1:]:                         # a bare identifier arg = the handler fn name
+                            if k.type == "identifier":
+                                m.event_handlers.add(_txt(k))
     elif t in ("import_statement", "import_from_statement", "import_declaration",
                "require_once_expression", "require_expression", "include_expression",   # php
                "include_once_expression", "namespace_use_declaration",
@@ -490,4 +503,10 @@ def build(target, progress=True):
         n += 1
         if progress and n % 300 == 0:
             print(f"[codemap] parsed {n} files ...", flush=True)
+    # second pass: tag functions registered as socket/emitter event handlers so entry detection treats them
+    # as untrusted-facing front doors (reachability._ROUTE_HINTS matches the synthetic "wave:event-handler").
+    for name in m.event_handlers:
+        for f in m.funcs.get(name, []):
+            if "wave:event-handler" not in f.decorators:
+                f.decorators.append("wave:event-handler")
     return m

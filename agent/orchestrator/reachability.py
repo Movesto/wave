@@ -60,12 +60,26 @@ _ROUTE_HINTS = ("route", ".get(", ".post(", ".put(", ".delete(", ".patch(", "app
                 "#[get", "#[post", "#[put", "#[delete", "#[patch", "#[head", "#[options", "#[route",  # rust
                 "@getmapping", "@postmapping", "@putmapping", "@deletemapping", "@patchmapping",       # spring
                 "@requestmapping",
-                "[httpget", "[httppost", "[httpput", "[httpdelete", "[httppatch", "[route(", "#[route")  # c#/symfony
+                "[httpget", "[httppost", "[httpput", "[httpdelete", "[httppatch", "[route(", "#[route",  # c#/symfony
+                # --- other front doors: RPC / GraphQL / messaging / realtime / serverless / IPC (all carry
+                # external input). Distinctive annotation strings -> near-zero false-positive risk. ---
+                "@messagepattern", "@eventpattern", "@subscribemessage", "@websocketgateway", "@grpcmethod",  # nestjs
+                "@query", "@mutation", "@subscription", "@resolver", "@fieldresolver", "@resolvefield",       # graphql
+                "@kafkalistener", "@rabbitlistener", "@jmslistener", "@sqslistener", "@streamlistener",        # jvm msg
+                "@messagemapping", "@subscribemapping", "@rabbithandler",                                      # spring ws
+                "@task", "shared_task", "@periodic_task", "@celery", "@app.task",                              # celery
+                "functions_framework", "@functionname", "queue_trigger", "topic_trigger", "servicebus",        # gcp/azure
+                "blob_trigger", "event_grid_trigger", "timer_trigger", "cosmos_trigger", "eventhub_trigger",    # azure fns
+                "tauri::command", "#[command",                                                                  # tauri IPC
+                "wave:event-handler")                        # synthetic tag: a fn registered as an emitter/socket handler
 # Entry TRUST TIERS (Shift 3, docs/trust_boundary_plan.md). 'remote' = a network/route/event handler that
 # carries ATTACKER input. 'local' = a process/CLI entry -- a script's main() run from a shell, whose input is
 # argv/local and whose operator is a developer/CI, NOT a remote attacker. A `confirmed` needs a REMOTE path;
 # a merely-LOCAL reach means remote exploitability is NOT established -> human review (fail-safe default).
-_REMOTE_ENTRY_NAMES = {"handler", "handle", "lambda_handler", "handle_request", "on_message", "on_request"}
+# realtime/messaging handler NAMES (socket.io/ws/consumer conventions) -- distinctive enough to be low-FP.
+_REMOTE_ENTRY_NAMES = {"handler", "handle", "lambda_handler", "handle_request", "on_message", "on_request",
+                       "onmessage", "on_data", "handle_message", "message_handler", "handle_event",
+                       "resolver", "resolve_reference"}
 _LOCAL_ENTRY_NAMES = {"main"}                               # a CLI/process main() is NOT a remote attack surface
 
 

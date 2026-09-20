@@ -515,6 +515,31 @@ def test_apply_gate_intrinsic_sink_high_confidence_kept(tmp_path):
     assert prove._apply_gate(rec, c, cmap)["verdict"] == "confirmed"
 
 
+def test_apply_gate_low_confidence_reach_downgrades_any_class(tmp_path):
+    # Shift 1 (grounded-confirm bar): a NON-intrinsic confirm (cmd/CWE-78) reachable ONLY via an ambiguous
+    # name-based edge is a shaky-chain guess -> anomalous_state, not confirmed. This is the general
+    # false-confirm class -- previously only intrinsic sinks got this bar.
+    _write(tmp_path, "a.py", _AMBIG_SRC)
+    cmap = codemap.build(str(tmp_path))
+    c = _cand(file=str(tmp_path / "a.py"), unit="decode(name)", line=12, cwe="CWE-78")
+    rec = {"verdict": "confirmed", "oracle": "investigate (3 run(s))", "taint": "flows", "why": ""}
+    out = prove._apply_gate(rec, c, cmap)
+    assert out["verdict"] == "anomalous_state" and "low-confidence-reach" in out["why"]
+    assert out["reach_conf"] == "low"
+
+
+def test_apply_gate_high_confidence_remote_confirm_kept_and_stamped(tmp_path):
+    # a high-confidence remote reach stays confirmed AND is stamped with the grounding (reach_conf/reach_trust)
+    # so the report can show "confirmed (reachability: high-confidence remote path)".
+    _write(tmp_path, "r.py", _REACH_SRC)
+    cmap = codemap.build(str(tmp_path))
+    c = _cand(file=str(tmp_path / "r.py"), unit="do_it(name)", line=11, cwe="CWE-78")
+    rec = {"verdict": "confirmed", "oracle": "investigate (2 run(s))", "taint": "flows", "why": ""}
+    out = prove._apply_gate(rec, c, cmap)
+    assert out["verdict"] == "confirmed"
+    assert out["reach_conf"] == "high" and out["reach_trust"] == "remote"
+
+
 # ============================ 7. repomap pins (class detection + frontend suppression) ============================
 
 def _pin(lang, line):

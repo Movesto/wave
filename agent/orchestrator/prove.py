@@ -242,6 +242,8 @@ def _apply_gate(rec, c, cmap, tm=None):
         return rec
     reachable, conf, note, trust = reachability.gate(cmap, c.unit, sink_file=getattr(c, "file", None))  # (3) reachability (binding-aware)
     rec["reachability"] = note
+    rec["reach_conf"] = conf                                 # stamp the grounding on the record: a KEPT confirm
+    rec["reach_trust"] = trust                               # now carries "how grounded is the reachability half"
     if not reachable:
         rec["verdict"] = "anomalous_state"
         rec["why"] = f"[reachability] {note}. " + rec.get("why", "")
@@ -266,6 +268,19 @@ def _apply_gate(rec, c, cmap, tm=None):
         rec["why"] = (f"[intrinsic-sink] {c.cwe} executes arbitrary input (mechanism proven), but "
                       f"attacker-control of that input is NOT established -- reachability is {conf}-confidence "
                       f"({note}). Verify the caller/input source. " + rec.get("why", ""))
+        return rec
+    # (5) GROUNDED-CONFIRM BAR (Shift 1, precision_and_measurement_plan.md): a `confirmed` = witnessed effect
+    # AND a GROUNDED reachability half. We ground the EFFECT dynamically but only INFER reachability. When the
+    # only path to the untrusted entry leans on an ambiguous name-based edge (conf != "high"), attacker-
+    # reachability is a GUESS, not grounded -- so the finding is a review lead, not a `confirmed`. Generalizes
+    # the intrinsic-sink bar above to ALL classes (the false-confirm class this session was shaky-chain reaches
+    # wearing a confirmed badge). Never touches a high-confidence remote reach -> genuine confirms stand.
+    if conf != "high":
+        rec["verdict"] = "anomalous_state"
+        rec["why"] = ("[low-confidence-reach] the sink FIRED (effect witnessed) but the only path to an "
+                      f"untrusted entry is {conf}-confidence -- it leans on an ambiguous name-based edge "
+                      f"({note}); attacker-reachability is INFERRED, not grounded. Human review. "
+                      + rec.get("why", ""))
     return rec
 
 

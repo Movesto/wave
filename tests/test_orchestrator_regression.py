@@ -236,6 +236,26 @@ def test_binding_aware_reachability_drops_crossfile_member_collision(tmp_path):
     assert "" in recvs                                      # the bare execSync(data.x) call
 
 
+def test_cli_command_decorators_are_local_not_web_routes():
+    # a Typer/Click @app.command() must NOT be a remote web route (the fastapi scripts/docs.py false-confirm:
+    # @app.command() contains "app." which used to match the web-route hints)
+    from types import SimpleNamespace as NS
+    for dec in ("@app.command()", "@click.command()", "@cli.command", "@app.callback()", "@app.command(help='x')"):
+        assert reachability.entry_trust(NS(decorators=[dec], name="f")) == "local", dec
+    # real web routes stay remote
+    for dec in ("@app.get('/x')", "@router.post('/y')", "@app.route('/z')", "@app.websocket('/ws')"):
+        assert reachability.entry_trust(NS(decorators=[dec], name="f")) == "remote", dec
+
+
+def test_apply_gate_downgrades_confirmed_in_cli_module():
+    from agent.orchestrator import trust
+    tm = trust.TrustModel(target="/t", modules={})
+    tm.module_context = lambda f: "cli"                     # scripts/ build-tooling module
+    c = mock.Mock(cwe="CWE-22", family="path", unit="stage(x)", file="/t/scripts/docs.py")
+    out = prove._apply_gate({"verdict": "confirmed", "why": "rmtree traversal"}, c, None, tm)
+    assert out["verdict"] == "anomalous_state" and "cli-module" in out["why"]
+
+
 def test_other_front_doors_are_remote_entries():
     # decorator/annotation-based entries: GraphQL / NestJS messaging+ws / Spring msg / Celery / gRPC / Tauri
     from types import SimpleNamespace as NS

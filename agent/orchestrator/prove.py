@@ -207,6 +207,12 @@ def _apply_gate(rec, c, cmap, tm=None):
                           "production runtime surface -- exploitable only if the tests run on untrusted input; "
                           "human review. " + rec.get("why", ""))
             return rec
+        if mctx == "cli":                                    # CLI/build tooling module (scripts/, packaging/, ...)
+            rec["verdict"] = "anomalous_state"
+            rec["why"] = ("[cli-module] this sink is in CLI / build tooling (scripts/, packaging/, ...), run by "
+                          "a developer or CI with local args -- not a remote runtime surface; real only if run "
+                          "on untrusted input (e.g. CI on an untrusted PR). Human review. " + rec.get("why", ""))
+            return rec
         if mctx == "internal":                               # Shift 2: model marked this module non-remote-facing
             rec["verdict"] = "anomalous_state"
             rec["why"] = ("[internal-module] this module was assessed as INTERNAL / not remote/internet-facing "

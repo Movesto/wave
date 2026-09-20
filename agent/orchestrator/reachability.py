@@ -55,7 +55,12 @@ def is_frontend(path, source="", imports=()):
 # decorator / attribute-macro / annotation signals that a function receives external input DIRECTLY.
 # Matched (lowercased) against a function's captured decorators -- codemap now captures Rust #[get], Java
 # @GetMapping, C#/PHP [Http*]/#[Route] as decorators too, so these cover the non-py/js web frameworks.
-_ROUTE_HINTS = ("route", ".get(", ".post(", ".put(", ".delete(", ".patch(", "app.", "router.", "blueprint",
+# CLI-command decorators (Typer/Click/etc.) look like a route but are a LOCAL entry -- a command run from a
+# shell, whose args are dev/CI-supplied, not remote input. Checked BEFORE _ROUTE_HINTS so `@app.command()`
+# (which contains "app.") is not mistaken for a web route (the fastapi scripts/docs.py false-confirm).
+_CLI_ENTRY_DECOS = ("command(", "@command", ".callback(", "click.", "@click", "@group", "@cli.", "add_command",
+                    "typer", "argh", "@arg(", "console_script")
+_ROUTE_HINTS = ("route", ".get(", ".post(", ".put(", ".delete(", ".patch(", "blueprint",
                 "@get", "@post", "@put", "@delete", "@patch", "endpoint", "api_route", "websocket", "on_event",
                 "#[get", "#[post", "#[put", "#[delete", "#[patch", "#[head", "#[options", "#[route",  # rust
                 "@getmapping", "@postmapping", "@putmapping", "@deletemapping", "@patchmapping",       # spring
@@ -85,8 +90,11 @@ _LOCAL_ENTRY_NAMES = {"main"}                               # a CLI/process main
 
 def entry_trust(func):
     """The trust level of an entry point: 'remote' (route decorator or a network/event handler name),
-    'local' (a bare CLI/process main()), or None (not an entry). Route decorators always win."""
+    'local' (a CLI command decorator, or a bare process main()), or None (not an entry). CLI-command
+    decorators are checked FIRST so a Typer/Click `@app.command()` is a LOCAL entry, not a web route."""
     decs = " ".join(getattr(func, "decorators", None) or []).lower()
+    if any(h in decs for h in _CLI_ENTRY_DECOS):            # Typer/Click CLI command = local (argv, not remote)
+        return "local"
     if any(h in decs for h in _ROUTE_HINTS):
         return "remote"
     name = (getattr(func, "name", "") or "").lower()

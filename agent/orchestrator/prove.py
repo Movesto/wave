@@ -198,8 +198,10 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     # Half-B honesty (A1): did the model witness the reach path, or only exercise the sink? Read its own
     # stated conclusion; default to 'inferred' (a path exists but was not driven) / 'none' (no entry path).
     meth = ((getattr(v, "methodology", "") or "") + " " + (v.why or "")).lower()
-    reach_proof = ("witnessed" if ("reach witnessed" in meth or "drove from" in meth)
-                   else ("inferred" if reach else "none"))
+    said_witnessed = (("reach witnessed" in meth or "drove from" in meth)
+                      and "not witnessed" not in meth and "not drive" not in meth)
+    reach_proof = "witnessed" if said_witnessed else ("inferred" if reach else "none")
+    driven_trust = reachability.entry_trust(entry_fn) if (said_witnessed and entry_fn is not None) else None
     # DIFFERENTIAL (IDOR/access-control): a witnessed boundary crossing is a business-logic JUDGMENT anchored
     # to an observed state change -- always human-review, never a tool-witnessed `confirmed` (design + §10.7).
     if mode == "differential" and verdict == "confirmed":
@@ -207,6 +209,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     return {"verdict": verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
             "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
             "reach_proof": reach_proof,                       # witnessed | inferred | none (Half-B honesty)
+            "driven_trust": driven_trust,                     # trust tier of the entry the model DROVE from
             "methodology": (getattr(v, "methodology", "") or "")[:400],   # the model's documented approach
             "_transcript": v.transcript, "_mode": mode}   # for the trace-logger (stripped before findings write)
 
@@ -275,6 +278,19 @@ def _apply_gate(rec, c, cmap, tm=None):
                           f"(the browser makes this call); review as a client-side concern if any. "
                           + rec.get("why", ""))
             return rec
+    # (1.5) WITNESSED-REACH OVERRIDE (Shift A / A3): the model DROVE the attacker value from the untrusted
+    # entry down to the sink -- a TOOL-grounded proof of Half B. That beats every STATIC Half-B heuristic
+    # below (taint / reachability / confidence / intrinsic-bar), which only INFER the path and caused this
+    # session's false down/upgrades. We still respect the execution/module CONTEXT gates above (a witnessed
+    # reach inside test/CLI/browser code is still not a production surface) and the LOCAL-vs-remote nature of
+    # the entry we drove from (a witnessed reach from a CLI main() proves only LOCAL exploitability).
+    if rec.get("reach_proof") == "witnessed":
+        rec["reachability"] = "reach WITNESSED: attacker value driven from the untrusted entry to the sink"
+        if rec.get("driven_trust") == "local":               # witnessed, but only via a LOCAL/CLI entry
+            rec["verdict"] = "anomalous_state"
+            rec["why"] = ("[local-entry] the reach was witnessed but only from a LOCAL/CLI entry (not a remote "
+                          "route) -- remote attacker-control NOT established; human review. " + rec.get("why", ""))
+        return rec
     # (2) value-taint gate: a MODEL-confirmed sink whose args don't derive from untrusted input in this
     # function is likely a mislabel (the eval-runner shape). Conservative: only 'unrelated' (never the
     # cross-function 'unknown'), and NEVER override a canary -- that dynamically WITNESSED the value at the

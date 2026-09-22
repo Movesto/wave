@@ -570,6 +570,41 @@ def test_repro_entry_mode_scaffolds_the_entry_not_the_sink(tmp_path):
     repro.remove(str(tmp_path))
 
 
+def test_apply_gate_witnessed_remote_reach_overrides_static_gate(tmp_path):
+    # A3: the model DROVE the attacker value from a remote entry to the sink -> tool-grounded Half B. This
+    # beats the static reachability gate, which here (internal_only has no static entry path) would downgrade.
+    _write(tmp_path, "r.py", _REACH_SRC)
+    cmap = codemap.build(str(tmp_path))
+    c = _cand(file=str(tmp_path / "r.py"), unit="internal_only(name)", line=12, cwe="CWE-78")
+    rec = {"verdict": "confirmed", "oracle": "investigate (2 run(s))", "taint": "unknown",
+           "reach_proof": "witnessed", "driven_trust": "remote", "why": ""}
+    out = prove._apply_gate(rec, c, cmap)
+    assert out["verdict"] == "confirmed" and "WITNESSED" in out["reachability"]
+
+
+def test_apply_gate_witnessed_local_reach_is_review(tmp_path):
+    # A3: a witnessed reach from a LOCAL/CLI entry proves only LOCAL exploitability -> human review.
+    _write(tmp_path, "r.py", _REACH_SRC)
+    cmap = codemap.build(str(tmp_path))
+    c = _cand(file=str(tmp_path / "r.py"), unit="do_it(name)", line=10, cwe="CWE-78")
+    rec = {"verdict": "confirmed", "oracle": "investigate (2 run(s))", "taint": "unknown",
+           "reach_proof": "witnessed", "driven_trust": "local", "why": ""}
+    out = prove._apply_gate(rec, c, cmap)
+    assert out["verdict"] == "anomalous_state" and "local-entry" in out["why"]
+
+
+def test_apply_gate_witnessed_still_respects_module_context():
+    # A3 guardrail: a witnessed reach inside CLI/build tooling is still not a production surface -> the
+    # module-context gate wins over the witnessed override.
+    from agent.orchestrator import trust
+    tm = trust.TrustModel(target="/t", modules={})
+    tm.module_context = lambda f: "cli"
+    c = mock.Mock(cwe="CWE-22", family="path", unit="stage(x)", file="/t/scripts/docs.py")
+    rec = {"verdict": "confirmed", "reach_proof": "witnessed", "driven_trust": "remote", "why": "x"}
+    out = prove._apply_gate(rec, c, None, tm)
+    assert out["verdict"] == "anomalous_state" and "cli-module" in out["why"]
+
+
 # ============================ 7. repomap pins (class detection + frontend suppression) ============================
 
 def _pin(lang, line):

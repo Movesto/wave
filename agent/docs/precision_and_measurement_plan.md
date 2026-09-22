@@ -1,6 +1,6 @@
 # Precision & Measurement Plan — closing the SAST reachability gap
 
-Status: **Shift 1 (grounded-confirm bar) BUILT. Shift A (prove Half B) BUILDING.**
+Status: **Shift 1 BUILT. Shift A (prove Half B) BUILT (A1+A2+A3).** Next: Shift 2 (run the bench as a gate).
 Date: 2026-09-21. Branch: `corpus-rebuild-and-dpo`.
 
 ## The real problem, stated plainly
@@ -64,12 +64,15 @@ longer manufacture a false confirm, because a tool now proves the path.
 
 - **Shift 1 — grounded-confirm bar** *(BUILT, commit 2100433).* A confirm on a low-confidence static
   reach → review. Down payment on "don't confirm on weak inference."
-- **Shift A — prove Half B** *(BUILDING).* Increment A1: thread the reachability **entry + path** into
-  the prove record and the model brief, and instruct the prover to **reconstruct and drive the attacker
-  value from the entry through the path to the sink**; stamp `reach_proof`. Increment A2: scaffold the
-  entry directly (`repro.build` entry mode) so the drive is set up, not just requested. Increment A3:
-  gate `confirmed` on `reach_proof == "witnessed"` (subsumes/retires the brittle static Half-B gate for
-  cases where the path was witnessed).
+- **Shift A — prove Half B** *(BUILT).* A1 *(commit 96d7266)*: thread the reachability **entry + path**
+  into the record and brief; instruct the prover to drive the attacker value from the entry to the sink;
+  stamp `reach_proof`. A2 *(commit f6eb2dd)*: `repro.build(entry=)` scaffolds the entry directly so the
+  drive is set up, not just requested. A3: a **witnessed** reach (`reach_proof=="witnessed"`) is
+  tool-grounded Half B — it **overrides the static Half-B gate** (taint/reachability/confidence/intrinsic),
+  while still respecting the execution/module CONTEXT gates and the local-vs-remote nature of the driven
+  entry (a witnessed reach from a CLI entry proves only LOCAL exploitability). A non-witnessed proof falls
+  back to Shift 1 (no regression: rung1 canary confirms are unaffected). *Honest limit:* the witnessed
+  signal is parsed from the model's stated methodology; a structured conclude-field is the follow-up.
 - **Shift 2 — measurement.** A ground-truth harness already exists: `agent/bench/ghsa_bench.py` scores
   the current pipeline on 500 real CVEs vs ground-truth files; `bench.py` scores controlled targets.
   It is an instrument, not a decision-maker. Discipline gap: run it as a regression check after Shift A,

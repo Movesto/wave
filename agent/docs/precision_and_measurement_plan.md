@@ -78,6 +78,14 @@ longer manufacture a false confirm, because a tool now proves the path.
   the current pipeline on 500 real CVEs vs ground-truth files; `bench.py` scores controlled targets.
   It is an instrument, not a decision-maker. Discipline gap: run it as a regression check after Shift A,
   not eyeball real repos.
+- **Recall floor (detect seeds from codemap sink-pins)** *(BUILT).* Root cause found via the pyvuln/GHSA/HA
+  runs: detect read ONLY the notebook's findings, so an empty/failed model note on a vulnerable file blanked
+  the whole pipeline (pyvuln: notebook returned `findings:[]` for the one vulnerable file -> 0 candidates ->
+  prove never ran, though codemap had pinned all 18 sinks). Fix: `detector._load_findings(root=)` merges the
+  codemap's classified `[SINK:<class>]` pins (`repomap.scan_pins`) with the notebook findings, deduped. Now
+  the deterministic sinks codemap already found always reach detect; the notebook is an ADDITIVE model pass,
+  not a single point of failure. This is the RECALL half of the gap (the tests showed misses dominate on
+  library/component code) -- complementary to Shift A's precision work.
 - **Static taint upgrades (cross-function, type-resolved)** — *optional, later, as slice quality only.*
   Diminishing returns on Python/JS; never the confirm authority.
 

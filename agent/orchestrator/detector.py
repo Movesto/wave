@@ -47,8 +47,37 @@ _FALSIFY_SYS = (
     "verdict that contradicts your own reason.")
 
 
-def _load_findings(notebook_path):
-    """Flatten the notebook's per-file findings into deduped candidate records."""
+def _codemap_pins(root):
+    """Deterministic candidates straight from the codemap's classified sink-pins (the same [SINK:<class>]
+    pins repomap renders into wave_map.md). This is the RECALL FLOOR: a notebook whiff -- an empty/failed
+    model note on a vulnerable file -- can no longer blank the pipeline, because the sinks codemap already
+    found still flow to detect. Same record shape as a notebook finding (confidence '' -> ranked below the
+    model's own high-confidence leads, so notebook findings still get budget priority)."""
+    from . import codemap, repomap
+    out = []
+    try:
+        cmap = codemap.build(str(root))
+    except Exception:
+        return out
+    rootp = Path(root)
+    for p, finfo in cmap.files.items():
+        try:
+            _routes, sinks, _dyn = repomap.scan_pins(finfo)
+        except Exception:
+            continue
+        try:
+            rel = str(Path(p).resolve().relative_to(rootp.resolve())).replace("\\", "/")
+        except Exception:
+            rel = Path(p).name
+        for (ln, label, code) in sinks:
+            out.append({"file": rel, "line": int(ln or 0), "class": str(label or "other").lower(),
+                        "sink": str(code or ""), "input": "", "why": "codemap sink-pin", "confidence": ""})
+    return out
+
+
+def _load_findings(notebook_path, root=None):
+    """Flatten the notebook's per-file findings into deduped candidate records, MERGED with the codemap's
+    deterministic sink-pins (when `root` is given) so detection never depends on the notebook alone."""
     out, seen = [], set()
     for line in Path(notebook_path).read_text(encoding="utf-8", errors="replace").splitlines():
         try:
@@ -70,6 +99,13 @@ def _load_findings(notebook_path):
             out.append({"file": note.get("file", ""), "line": ln, "class": cls,
                         "sink": str(f.get("sink") or ""), "input": str(f.get("input") or ""),
                         "why": str(f.get("why") or ""), "confidence": str(f.get("confidence") or "")})
+    if root is not None:                                    # recall floor: codemap sink-pins (deduped)
+        for f in _codemap_pins(root):
+            key = (f["file"], f["line"], f["class"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(f)
     return out
 
 
@@ -145,7 +181,7 @@ def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True, j
     notebook_path = notebook_path or (out_dir / "wave_notebook.jsonl")
     if not Path(notebook_path).exists():
         raise SystemExit(f"no notebook at {notebook_path} -- run `eyes --notes` first")
-    findings = sorted(_load_findings(notebook_path), key=_rank_key, reverse=True)
+    findings = sorted(_load_findings(notebook_path, root=root), key=_rank_key, reverse=True)
 
     detect_log = out_dir / "wave_detect.jsonl"
     done = {}

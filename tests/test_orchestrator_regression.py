@@ -554,6 +554,27 @@ def test_brief_instructs_drive_from_entry_half_b(tmp_path):
     assert "REACHABILITY -- prove" not in briefs._brief_for(c, str(tmp_path), "x")
 
 
+def test_detect_seeds_from_codemap_pins_when_notebook_is_empty(tmp_path):
+    # RECALL FLOOR: a notebook that whiffed (empty findings) must NOT blank the pipeline -- the codemap's
+    # deterministic sink-pins still flow to detect. (The pyvuln failure: notebook returned an empty note for
+    # the one vulnerable file -> 0 candidates -> prove never ran.)
+    _write(tmp_path, "app.py",
+           "import os\n"
+           "def search(q):\n"
+           "    return os.popen('grep ' + q).read()   # cmd injection sink\n")
+    # notebook exists but has NO findings for app.py (the whiff)
+    (tmp_path / "wave_notebook.jsonl").write_text(
+        json.dumps({"file": "app.py", "purpose": "", "untrusted_inputs": "", "findings": []}) + "\n",
+        encoding="utf-8")
+    from agent.orchestrator import detector
+    # notebook alone -> nothing
+    assert detector._load_findings(str(tmp_path / "wave_notebook.jsonl")) == []
+    # notebook + codemap pins -> the cmd sink is recovered as a candidate
+    merged = detector._load_findings(str(tmp_path / "wave_notebook.jsonl"), root=str(tmp_path))
+    hits = [f for f in merged if f["class"] == "cmd" and f["file"] == "app.py"]
+    assert hits and hits[0]["why"] == "codemap sink-pin"
+
+
 def test_reach_witnessed_is_a_structured_conclude_field(tmp_path):
     # hardening: the witnessed signal is a STRUCTURED field (conclude tool + Verdict), not just prose parsing.
     from agent.orchestrator import investigate as inv

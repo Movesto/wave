@@ -21,6 +21,7 @@ class Route:
     path: str
     file: str
     function: str
+    framework: str = ""            # which extractor produced it -> picks the drive recipe
 
 
 def _iter(target, exts):
@@ -305,13 +306,19 @@ def _laravel_routes(target):
     return routes
 
 
+_EXTRACTORS = [(_openapi_routes, "openapi"), (_express_routes, "express"), (_nest_routes, "nestjs"),
+               (_flask_routes, "flask"), (_rust_routes, "rust"), (_spring_routes, "spring"),
+               (_csharp_routes, "aspnet"), (_go_routes, "go"), (_rails_routes, "rails"),
+               (_laravel_routes, "laravel")]
+
+
 def extract_routes(target, profile=None):
-    """All routes across supported frameworks (deduped)."""
+    """All routes across supported frameworks (deduped), each tagged with its framework."""
+    from dataclasses import replace
     routes = []
-    for fn in (_openapi_routes, _express_routes, _nest_routes, _flask_routes,
-               _rust_routes, _spring_routes, _csharp_routes, _go_routes, _rails_routes, _laravel_routes):
+    for fn, name in _EXTRACTORS:
         try:
-            routes += fn(target)
+            routes += [replace(r, framework=name) for r in fn(target)]
         except Exception:
             continue
     seen, out = set(), []
@@ -322,6 +329,62 @@ def extract_routes(target, profile=None):
         seen.add(k)
         out.append(r)
     return out
+
+
+# Per-framework "drive the real route" recipe -- how to issue an actual request to a route IN-PROCESS (no
+# real server/port), so the model witnesses the attacker value reaching the sink through the framework's
+# request handling (Half B), instead of calling the handler positionally (which fails -- handlers read the
+# request object, not positional args). {m}=lowercase method, {M}=method, {path}=route path. Model-facing.
+DRIVE_RECIPES = {
+    "flask": ("Flask:   from <app module> import app; c=app.test_client(); "
+              "r=c.{m}('{path}', query_string={{'<param>':'<payload>'}}); print(r.status_code, r.get_data())\n"
+              "  FastAPI: from fastapi.testclient import TestClient; from <app module> import app; "
+              "c=TestClient(app); r=c.{m}('{path}', params={{'<param>':'<payload>'}}); print(r.status_code, r.text)"),
+    "openapi": ("Connexion/OpenAPI (Python): import the Connexion app; its underlying Flask app is `app.app` -- "
+                "`c=app.app.test_client(); r=c.{m}('{path}?<param>=<payload>'); print(r.status_code, r.get_data())`."),
+    "express": ("Node Express: `const request=require('supertest'); const app=require('<app module>'); "
+                "const r=await request(app).{m}('{path}').query({{'<param>':'<payload>'}}); console.log(r.status, r.text)` "
+                "(supertest needs no listening port). If the app isn't exported, call the handler with a mock "
+                "req/res: `handler({{query:{{...}}, params:{{...}}, body:{{...}}}}, mockRes)`."),
+    "nestjs": ("NestJS: bootstrap a testing module (`Test.createTestingModule({{imports:[AppModule]}})`) + supertest "
+               "against the app, {M} {path}; or instantiate the controller and call the handler method with the "
+               "crafted argument (a DTO/param object)."),
+    "spring": ("Java Spring: MockMvc -- `mockMvc.perform({m}(\"{path}\").param(\"<name>\",\"<payload>\"))` under "
+               "@WebMvcTest/@SpringBootTest; or instantiate the @Controller and call the handler method directly "
+               "with the crafted argument."),
+    "aspnet": ("ASP.NET: `WebApplicationFactory<Program>` / TestServer -- "
+               "`factory.CreateClient().GetAsync(\"{path}?<param>=<payload>\")`; or call the controller action "
+               "method directly with the crafted argument."),
+    "go": ("Go: `req := httptest.NewRequest(\"{M}\", \"{path}?<param>=<payload>\", body); w := httptest.NewRecorder(); "
+           "router.ServeHTTP(w, req); fmt.Println(w.Code, w.Body.String())` (or call the handler func directly)."),
+    "rails": ("Rails: an integration test -- `{m} \"{path}\", params: {{'<param>'=>'<payload>'}}` -- or instantiate "
+              "the controller and call the action."),
+    "laravel": ("Laravel/PHP: a feature test -- `$this->{m}('{path}?<param>=<payload>')` through the HTTP kernel; "
+                "or call the controller method with a crafted Request."),
+    "rust": ("Rust actix: `let req = test::TestRequest::{m}().uri(\"{path}?<param>=<payload>\").to_request(); "
+             "let resp = test::call_service(&app, req).await;` -- Rocket: "
+             "`let client = Client::tracked(rocket()).unwrap(); client.{m}(\"{path}?<param>=<payload>\").dispatch()`."),
+}
+
+
+def drive_recipe(route):
+    """The framework-specific 'drive the real route' recipe for a Route, or '' if the framework is unknown."""
+    tpl = DRIVE_RECIPES.get(getattr(route, "framework", "") or "")
+    if not tpl:
+        return ""
+    return tpl.format(m=(route.method or "get").lower(), M=(route.method or "GET"), path=route.path)
+
+
+def find_route(routes, file, function):
+    """The Route object reaching a sink at (file, function) -- function-name match first (handler sinks),
+    then same-file. Returns the Route (carrying method/path/framework) or None. Companion to route_for."""
+    if function:
+        hit = [r for r in routes if r.function == function]
+        if hit:
+            return hit[0]
+    base = Path(file).name
+    hit = [r for r in routes if Path(r.file).name == base and r.file != r.function]
+    return hit[0] if hit else None
 
 
 def handler_functions(routes):

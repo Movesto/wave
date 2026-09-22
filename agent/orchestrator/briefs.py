@@ -402,7 +402,26 @@ def _reach_block(reach):
         f"the value reach the sink (leave it false if you only exercised the sink function in isolation).")
 
 
-def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None):
+def _route_block(route):
+    """Half-B via the REAL HTTP route (framework-aware). `route` = (method, path, framework, recipe). Drive an
+    actual request to the route with the framework's in-process test client -- NOT a positional handler call
+    (handlers read the request object, not positional args -- the pyvuln Flask misfire)."""
+    if not route:
+        return ""
+    method, path, framework, recipe = route
+    body = (f"\n\nDRIVE THE ROUTE -- prove reachability through the REAL entry. This sink is reached from the "
+            f"{framework or 'web'} route `{method} {path}`. Issue an ACTUAL request to it; do NOT call the "
+            f"handler positionally (framework handlers read the request object, not positional args). Use the "
+            f"framework's in-process test client (install deps if needed):")
+    if recipe:
+        body += "\n  " + recipe
+    body += (f"\nPut your attacker payload in the relevant query param / path segment / body field, run it in "
+             f"the sandbox, and observe the sink fire. If you drove the value to the sink through this route, "
+             f"set `reach_witnessed: true` when you conclude (else leave it false).")
+    return body
+
+
+def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
     fn = str(candidate.unit).split("(")[0].strip()
@@ -536,4 +555,5 @@ def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None
             f"Suspected {candidate.cwe} ({candidate.family}); sink: {candidate.sink}.\n"
             f"A quick automatic check was inconclusive ({reason}).\n\nCode around the sink:\n{code}\n\n"
             f"The whole repository is mounted at your working directory (/work). Prove or refute whether "
-            f"this is a REAL, exploitable {candidate.cwe} by running code.{extra}{_reach_block(reach)}")
+            f"this is a REAL, exploitable {candidate.cwe} by running code.{extra}"
+            f"{_route_block(route) if route else _reach_block(reach)}")

@@ -585,6 +585,34 @@ def test_reach_witnessed_is_a_structured_conclude_field(tmp_path):
     assert inv.Verdict("confirmed", "why").reach_witnessed is False   # defaults false (not witnessed)
 
 
+def test_route_drive_is_framework_aware(tmp_path):
+    # A2b: for a real HTTP route, the brief must tell the model to DRIVE THE ROUTE via the framework's test
+    # client (not call the handler positionally -- the pyvuln Flask misfire where fetch(url) TypeError'd).
+    from agent.orchestrator import routes
+    _write(tmp_path, "app.py",
+           "from flask import Flask, request\n"
+           "app = Flask(__name__)\n"
+           "@app.route('/ping')\n"
+           "def ping():\n"
+           "    import os; return os.popen('echo ' + request.args.get('host','')).read()\n")
+    rl = routes.extract_routes(str(tmp_path))
+    r = routes.find_route(rl, str(tmp_path / "app.py"), "ping")
+    assert r is not None and r.framework == "flask" and r.method == "GET" and r.path == "/ping"
+    rec = routes.drive_recipe(r)
+    assert "test_client" in rec and "/ping" in rec
+    c = _cand(file=str(tmp_path / "app.py"), unit="ping()", line=5, cwe="CWE-78")
+    brief = briefs._brief_for(c, str(tmp_path), "x", route=(r.method, r.path, r.framework, rec))
+    assert "DRIVE THE ROUTE" in brief and "GET /ping" in brief and "test_client" in brief
+
+
+def test_every_extracted_framework_has_a_drive_recipe():
+    # universal coverage: every framework routes.py can extract must have a drive recipe (no silent gap).
+    from agent.orchestrator import routes
+    for _fn, name in routes._EXTRACTORS:
+        assert name in routes.DRIVE_RECIPES, name
+        assert routes.DRIVE_RECIPES[name].format(m="get", M="GET", path="/x")   # template is well-formed
+
+
 def test_repro_entry_mode_scaffolds_the_entry_not_the_sink(tmp_path):
     # A2: given an untrusted entry distinct from the sink, the scaffold loads+calls the ENTRY, so running it
     # drives the real chain down to the sink (Half B witnessed), instead of poking the sink in isolation.
@@ -881,7 +909,7 @@ def test_parallel_prove_commits_all_and_runs_concurrently(tmp_path):
         def unload(self): pass
 
     active, maxseen, lk = [], [0], threading.Lock()
-    def fake_prove_one(model, target, c, have_docker, max_steps, online=False, tag="", cmap=None):
+    def fake_prove_one(model, target, c, have_docker, max_steps, online=False, tag="", cmap=None, route_list=None):
         with lk:
             active.append(1); maxseen[0] = max(maxseen[0], len(active))
         time.sleep(0.2)

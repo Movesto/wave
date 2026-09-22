@@ -23,7 +23,7 @@ import json
 import shutil
 from pathlib import Path
 
-from . import briefs, codemap, reachability, recorder, repro, rung1, taint
+from . import briefs, codemap, reachability, recorder, repro, routes, rung1, taint
 from . import investigate as invmod
 from .models import Candidate
 
@@ -138,7 +138,7 @@ def _reach_for_brief(cmap, c):
     return (getattr(entry, "name", ""), path)
 
 
-def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", cmap=None):
+def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", cmap=None, route_list=None):
     """Run ONE candidate through the ladder -> a verdict record dict. `tag` isolates this job's scaffold +
     write-manifest so PARALLEL proofs on the same target don't clobber each other's files. `cmap` (when
     given) lets the brief instruct the model to drive from the untrusted ENTRY and WITNESS the reach path
@@ -168,8 +168,18 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     # A2: for a generic injection (call mode) with a DISTINCT entry, scaffold the ENTRY so calling it drives
     # the real chain to the sink -> reach WITNESSED. Specialized modes feed the sink fn directly, so not there.
     sink_fn = (c.unit or "").split("(")[0].strip()
+    # A2b: if the sink is reached from a real HTTP route, the model should DRIVE THE ROUTE via the framework's
+    # test client (handlers read the request object, not positional args). Framework-aware, covers every
+    # framework routes.py extracts. When a route is found, skip the positional entry-scaffold (it TypeErrors
+    # on a route handler -- the pyvuln Flask misfire) and let the route-drive brief block lead.
+    route = None
+    if route_list:
+        en = getattr(entry_fn, "name", "") if entry_fn is not None else ""
+        r = routes.find_route(route_list, getattr(c, "file", ""), en or sink_fn)
+        if r is not None:
+            route = (r.method, r.path, r.framework, routes.drive_recipe(r))
     build_entry = None
-    if mode == "call" and entry_fn is not None:
+    if route is None and mode == "call" and entry_fn is not None:
         en, ef = getattr(entry_fn, "name", ""), getattr(entry_fn, "file", "")
         if en and ef and en != sink_fn:
             build_entry = (en, ef)
@@ -189,7 +199,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
         # controlled egress point when online, not blanket container network access.
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode,
-                                                        reach=reach),
+                                                        reach=reach, route=route),
                                image=img, mount=target, network="none", max_steps=max_steps,
                                step_timeout=step_to, online=online, write_tag=tag)
     finally:
@@ -387,6 +397,10 @@ def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=
     target = str(target)
     cmap = cmap or codemap.build(target)
     rel_index = {_rel(target, p): fi for p, fi in cmap.files.items()}
+    try:
+        route_list = routes.extract_routes(target)
+    except Exception:
+        route_list = []
     from . import trust as trustmod
     tm = trustmod.load(target) or trustmod.build(cmap, target)   # reuse the persisted trust boundary if present
     have_docker = shutil.which("docker") is not None
@@ -396,7 +410,8 @@ def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=
         c = _to_candidate(surv, rel_index, target)
         hyp_id = case.record("hypothesis", _subj(c), "seed", "believed", provenance=c.loc(),
                              cwe=c.cwe, family=c.family).id
-        rec = _prove_one(model, target, c, have_docker, max_steps, online=online, cmap=cmap)
+        rec = _prove_one(model, target, c, have_docker, max_steps, online=online, cmap=cmap,
+                         route_list=route_list)
         if gate:
             rec = _apply_gate(rec, c, cmap, tm)
         rec = _desktop_authz(rec, c, target, tm)
@@ -444,6 +459,10 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
 
     cmap = codemap.build(target)
     rel_index = {_rel(target, p): fi for p, fi in cmap.files.items()}
+    try:                                                    # HTTP routes (all frameworks) -> drive-the-route brief
+        route_list = routes.extract_routes(target)
+    except Exception:
+        route_list = []
     from . import trust as trustmod                          # Shift 1: build+persist the trust boundary once
     tm = trustmod.build(cmap, target)
     if enrich_trust and model is not None:                   # Shift 2 (opt-in): model refines it, safe-direction
@@ -485,7 +504,8 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
     # COMPUTE (parallel-safe: model API + docker, each with its own tag; no shared writes) -> a finished rec.
     def _compute(surv, tag):
         c = _to_candidate(surv, rel_index, target)
-        rec = _prove_one(model, target, c, have_docker, max_steps, online=online, tag=tag, cmap=cmap)
+        rec = _prove_one(model, target, c, have_docker, max_steps, online=online, tag=tag, cmap=cmap,
+                         route_list=route_list)
         if gate:                                            # untrusted-reachability gate on confirmations
             rec = _apply_gate(rec, c, cmap, tm)
         rec = _desktop_authz(rec, c, target, tm)            # single-user desktop app: authz/IDOR is moot

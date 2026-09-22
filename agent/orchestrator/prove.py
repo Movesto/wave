@@ -113,6 +113,25 @@ def _subj(c):
     return f"{c.cwe or c.family} {c.loc()}"
 
 
+# the model's own account of driving the untrusted entry / real route -> the reach was WITNESSED (a safety net
+# over the structured reach_witnessed flag, which the model sometimes forgets after clearly driving the route).
+_DRIVE_PHRASES = ("reach witnessed", "drove from", "drove the", "driving the", "i drove", "drove a real",
+                  "test_client", "test client", "testclient", "supertest", "mockmvc", "serveHTTP".lower(),
+                  "issued a get", "issued a post", "issued a real", "sent a get", "sent a post",
+                  "via the route", "through the route", "call_service")
+_NOT_DRIVE = ("not witnessed", "not drive", "could not drive", "couldn't drive", "unable to drive",
+              "did not drive", "didn't drive", "failed to drive")
+
+
+def _said_witnessed(text):
+    """True when the model's methodology/why says it DROVE the untrusted entry / real route and observed the
+    value reach the sink (Half B witnessed). Guarded against negations ('could not drive')."""
+    t = (text or "").lower()
+    if any(n in t for n in _NOT_DRIVE):
+        return False
+    return any(p in t for p in _DRIVE_PHRASES)
+
+
 def _reach_of(cmap, c):
     """The untrusted entry Func + path to this sink, or (None, None). The entry's name+file let us
     scaffold the ENTRY (Half B); the path drives the brief's instruction."""
@@ -207,14 +226,11 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     verdict = v.verdict
     # Half-B honesty (A1): did the model witness the reach path, or only exercise the sink? Read its own
     # stated conclusion; default to 'inferred' (a path exists but was not driven) / 'none' (no entry path).
-    # Half-B witnessed signal: PREFER the structured conclude field (reach_witnessed); fall back to parsing
-    # the model's stated methodology only when the field is absent (older/native replies).
-    meth = ((getattr(v, "methodology", "") or "") + " " + (v.why or "")).lower()
-    text_witnessed = (("reach witnessed" in meth or "drove from" in meth)
-                      and "not witnessed" not in meth and "not drive" not in meth)
-    said_witnessed = bool(getattr(v, "reach_witnessed", False)) or text_witnessed
-    # never trust a 'witnessed' claim when there was no entry path to drive from (nothing to witness)
-    said_witnessed = said_witnessed and reach is not None
+    # Half-B witnessed signal: PREFER the structured conclude field (reach_witnessed); fall back to the
+    # model's own account of DRIVING THE ROUTE (it often proves the reach but forgets the boolean -- pyvuln
+    # cmd/sqli/path did exactly this and got falsely downgraded by the static value-taint gate).
+    meth = (getattr(v, "methodology", "") or "") + " " + (v.why or "")
+    said_witnessed = (bool(getattr(v, "reach_witnessed", False)) or _said_witnessed(meth)) and reach is not None
     reach_proof = "witnessed" if said_witnessed else ("inferred" if reach else "none")
     driven_trust = reachability.entry_trust(entry_fn) if (said_witnessed and entry_fn is not None) else None
     # DIFFERENTIAL (IDOR/access-control): a witnessed boundary crossing is a business-logic JUDGMENT anchored

@@ -575,6 +575,19 @@ def test_detect_seeds_from_codemap_pins_when_notebook_is_empty(tmp_path):
     assert hits and hits[0]["why"] == "codemap sink-pin"
 
 
+def test_said_witnessed_recognizes_route_drive_language():
+    # the model often DRIVES the real route (proving Half B) but forgets to set reach_witnessed=true -- the
+    # static value-taint gate then falsely downgrades it (pyvuln cmd/sqli/path). Recognize the drive from its
+    # own words as a safety net. These are the EXACT phrasings from the pyvuln false-downgrades.
+    assert prove._said_witnessed("Drove the real Flask route GET /ping with query param host via app.test_client()")
+    assert prove._said_witnessed("The /search route concatenates ... Driving the route with q=' UNION SELECT ...")
+    assert prove._said_witnessed("I drove a real HTTP request to /read?file=../../etc/passwd")
+    assert prove._said_witnessed("used supertest to POST /login")
+    # negations and non-drive reasoning must NOT count as witnessed
+    assert not prove._said_witnessed("could not drive the route; only reasoned about the code")
+    assert not prove._said_witnessed("the sink is a plain dict lookup, not attacker-controlled")
+
+
 def test_reach_witnessed_is_a_structured_conclude_field(tmp_path):
     # hardening: the witnessed signal is a STRUCTURED field (conclude tool + Verdict), not just prose parsing.
     from agent.orchestrator import investigate as inv

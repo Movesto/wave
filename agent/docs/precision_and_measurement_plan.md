@@ -1,85 +1,89 @@
-# Precision & Measurement Plan
+# Precision & Measurement Plan — closing the SAST reachability gap
 
-Status: **Shift 1 (grounded-confirm bar) — BUILDING.** Shifts 2–3 designed, not built.
-Date: 2026-09-20. Branch: `corpus-rebuild-and-dpo`.
+Status: **Shift 1 (grounded-confirm bar) BUILT. Shift A (prove Half B) BUILDING.**
+Date: 2026-09-21. Branch: `corpus-rebuild-and-dpo`.
 
-## Why this doc exists
+## The real problem, stated plainly
 
-After ~10 real-repo scans this session, every correctness fix landed in **one seam**: the
-trust/reachability classifier (fastapi `@app.command()`→false-remote; §10.1 name-collision false
-chains; CLI-script and desktop blind spots). Each fix was another string-matching heuristic. That
-pattern is the signal — not a broken engine, but a design tension worth naming.
+A vulnerability is a hypothesis in **two halves**:
+- **Half A** — *if bad input reaches this function, the sink does damage.*
+- **Half B** — *an attacker can actually get bad input to that function.*
 
-### The engine is sound
+Today the harness **proves Half A** (the scaffold imports the sink's enclosing function and runs it
+with a marked payload; the registry sink-oracle witnesses the effect) but **only infers Half B**
+(`prove._apply_gate` reads the static call graph — `reachability.py` — and *guesses* whether an
+untrusted entry reaches the sink). When that static guess is wrong, it **overrides the model's confirm**
+and mislabels the finding. **Every false confirm this session was a wrong Half-B guess** (fastapi
+`@app.command()`, the §10.1 name-collision).
 
-The prove stage does its job: when it says an effect happened (rmtree ran with `../`, a path escaped
-root) it **witnessed** that with a tool. We have ~zero "wave hallucinated a vuln that isn't in the
-code." Do not rebuild the loop.
+The model is not struggling to confirm — it confirms Half A fine. The scaffold simply never pointed it
+at the front door, so Half B is never *run*, only read off the graph. Stage 5 didn't fix this because it
+re-runs the same two-part machinery (prove A, guess B).
 
-### The actual flaw — one sentence
+## Why "SAST to 100%" is the wrong target
 
-> We **ground the effect dynamically** (run it, watch the sink fire) but **infer reachability
-> statically/heuristically** — yet a `confirmed` verdict claims *both*.
+Deciding Half B precisely for arbitrary code is undecidable (Rice's theorem). Every static taint engine
+is an approximation and must choose: **sound** (never miss → floods false positives) or **precise**
+(few alarms → silently misses). There is no static setting that is both. So more static heuristics
+(cross-function taint, type resolution) only **move** the frontier and **relocate** the whack-a-mole
+(into framework/library/dynamic-dispatch models — worst exactly in Python/JS, our main targets) while
+adding a permanent maintenance treadmill. They are worth doing — but as *hypothesis/slice quality*,
+never as the thing that grants `confirmed`.
 
-A `confirmed` today = "effect witnessed AND reachability heuristic passed." Only the first half is
-grounded. Every false confirm this session was a **reachability guess wearing a `confirmed` badge**.
-The grounding rule ("confirmed must cite a tool-witnessed effect") is honored for the effect and
-silently violated for reachability.
+## The fix that closes the CLASS permanently
 
-### The second flaw — we can't measure ourselves
+Apply wave's own grounding rule — *translate, then prove with a tool* — to **Half B as well as Half A**:
 
-~10 repos judged by eye, on code we don't own, with no ground truth. The only reason the fastapi
-false-confirm was caught is a hand-read. We cannot tell whether a gate change *regressed* something —
-the 223 unit tests are synthetic fixtures, not real repos. "We keep seeing issues" is partly *"we have
-no baseline to know if we're improving."*
+> **A top-tier `confirmed` may never rest on an inferred path. Either the path is WITNESSED, or the
+> finding is a review lead with its best static trace attached.**
 
-## The three shifts (priority order)
+This bounds the failure mode: when we can't witness the path, we degrade to "here's the traced lead,"
+never a silent false confirm. Uncertainty stays (unavoidable); **confident lies stop** (the actual pain).
 
-### Shift 1 — grounded-confirm bar (this change, cheap, high-impact)
+### How we witness Half B without booting the whole app
 
-**Reserve `confirmed` for witnessed-effect AND a *high-confidence* path to a *remote* entry.** Anything
-softer → `anomalous_state` (needs-review). The finding is never dropped — only the *label* changes to
-match what we actually proved.
+`reachability.reaches_untrusted_entry_bound` already computes the **untrusted entry + the call path** to
+the sink. Instead of scaffolding the *sink's* function, drive from the **entry** through that path:
 
-Operational definition of "grounded enough" for a `confirmed`:
-- effect witnessed (already required), AND
-- reachable to an entry whose trust tier is `remote` (not `local`/CLI — already gated), AND
-- the reach path is **high-confidence** (does not lean on an ambiguous name-based edge).
+1. **Scaffold the entry, not the sink.** Import the untrusted-entry function; call IT with the attacker
+   payload (marked tracer). Execution flows naturally down the real chain to the sink.
+2. **The existing sink-oracle (registry hooks) witnesses the landing.** If the marker reaches the sink
+   in an unsafe position, **both halves are proven in one in-process run** — no app boot, no routing/DB.
+3. **`reach_proof` on the record:** `witnessed` (drove from an entry and the marked value hit the sink)
+   → true `confirmed`; `inferred` (only the static gate) → `anomalous_state` / review; `none` → review.
+4. **Widen the mirror on failure (build-don't-abstain).** If the chain won't run standalone (a caller
+   needs a value from elsewhere, a missing import), the model reflects more real source into the sandbox
+   until the chain runs — the same instinct already used for Half A. Still can't run → stays a review
+   lead with the static trace, never a false confirm.
 
-The gate already computes this `confidence` and already enforces `conf == "high"` — **but only for
-intrinsic sinks** (deser/eval/ssti). Shift 1 generalizes that bar to **all** classes. A witnessed cmd
-/sqli/path confirm reachable only through an ambiguous chain is now review, not confirmed — exactly the
-false-confirm class.
+Static analysis (Shift 1 gate, and any future cross-function taint / type resolution) becomes the
+**hypothesis + slice generator** feeding step 1 — never the confirm authority. Its unsoundness can no
+longer manufacture a false confirm, because a tool now proves the path.
 
-Also: **stamp the grounding on the record** (`reach_conf`, `reach_trust`) so a reader sees *"confirmed
-(effect witnessed; reachability: high-confidence remote path)"* vs a review item, instead of a bare
-badge. Honesty about which half is grounded.
+## Build order
 
-What Shift 1 does **not** fix: an entry *mis*classification (recognized as the wrong tier, e.g. the
-fastapi decorator bug) on an otherwise-clean path. That needs better entry heuristics (done per-case)
-or value taint (Shift 3). Shift 1 is complementary — it removes the *shaky-chain* confirms.
+- **Shift 1 — grounded-confirm bar** *(BUILT, commit 2100433).* A confirm on a low-confidence static
+  reach → review. Down payment on "don't confirm on weak inference."
+- **Shift A — prove Half B** *(BUILDING).* Increment A1: thread the reachability **entry + path** into
+  the prove record and the model brief, and instruct the prover to **reconstruct and drive the attacker
+  value from the entry through the path to the sink**; stamp `reach_proof`. Increment A2: scaffold the
+  entry directly (`repro.build` entry mode) so the drive is set up, not just requested. Increment A3:
+  gate `confirmed` on `reach_proof == "witnessed"` (subsumes/retires the brittle static Half-B gate for
+  cases where the path was witnessed).
+- **Shift 2 — measurement.** A ground-truth harness already exists: `agent/bench/ghsa_bench.py` scores
+  the current pipeline on 500 real CVEs vs ground-truth files; `bench.py` scores controlled targets.
+  It is an instrument, not a decision-maker. Discipline gap: run it as a regression check after Shift A,
+  not eyeball real repos.
+- **Static taint upgrades (cross-function, type-resolved)** — *optional, later, as slice quality only.*
+  Diminishing returns on Python/JS; never the confirm authority.
 
-Refinement deferred: the confidence signal (`_ambiguous_names`) counts a name as ambiguous by raw
-multi-definition, ignoring that the binding-aware walk may have resolved it same-file/self. Making
-confidence binding-aware (only genuinely weak — co-located member — edges count) would protect recall
-further. Deferred to avoid churning the suite in the same change; tracked here.
+## Second-order effects (checked, per the "does the fix create new problems?" test)
 
-### Shift 2 — a ground-truth regression harness (highest long-term leverage)
-
-A small fixture set of **real repos** with *known* vulns AND known safe-context sinks (docs/examples/
-CLI tooling), run end-to-end, emitting a precision/recall number. Then every gate change is *measured*,
-not eyeballed. Turns "we keep seeing issues" into "precision 0.71 → 0.83." Design:
-- `bench/` manifest: `{repo, ref, expected: [{file, line, class, verdict}], known_safe: [...]}`.
-- runner scans each at pinned ref, diffs verdicts vs expected → P/R + a confusion table.
-- run on every gate/reachability change before merge.
-
-### Shift 3 — value-level interprocedural taint (§10.4, the deep fix, expensive)
-
-Track whether the sink's argument actually derives from an untrusted entry's input, replacing
-"does the enclosing function *look* untrusted-facing." The principled replacement for the heuristic
-gate. Real build, own imprecision risk → **do not start blind**; start only after Shift 2 can measure
-it.
-
-## Order
-
-Shift 1 now (stops the bleeding) → Shift 2 (lets us see) → Shift 3 (endgame, measured).
+- *Driving from the entry can need setup the sink-only scaffold didn't* (entry args, app context). →
+  Mitigated by build-don't-abstain (widen the mirror) and by falling back to Half-A-only + inferred
+  reach (review), never a false confirm.
+- *Some entries genuinely can't be reconstructed standalone* (deep framework coupling). → Those stay
+  review leads with the static trace — honest, and the same as today's ceiling, minus the false confirms.
+- *Does the class recur?* No: because `confirmed` now requires a witnessed path, a wrong static guess
+  can only ever *under*-claim (leave a real vuln as a review lead), never *over*-claim (false confirm).
+  Under-claims are safe and visible; over-claims were the bug.

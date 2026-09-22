@@ -540,6 +540,20 @@ def test_apply_gate_high_confidence_remote_confirm_kept_and_stamped(tmp_path):
     assert out["reach_conf"] == "high" and out["reach_trust"] == "remote"
 
 
+def test_brief_instructs_drive_from_entry_half_b(tmp_path):
+    # Shift A / A1: the prover must be told to DRIVE the attacker value from the untrusted ENTRY through
+    # the path to the sink (prove Half B -- reachability), not just prove the sink fires (Half A).
+    _write(tmp_path, "r.py", _REACH_SRC)
+    cmap = codemap.build(str(tmp_path))
+    c = _cand(file=str(tmp_path / "r.py"), unit="do_it(name)", line=11, cwe="CWE-78")
+    reach = prove._reach_for_brief(cmap, c)
+    assert reach and reach[0] == "run_route"                      # the route handler is the untrusted entry
+    brief = briefs._brief_for(c, str(tmp_path), "inconclusive", reach=reach)
+    assert "REACHABILITY" in brief and "run_route" in brief and "reach WITNESSED" in brief
+    # no reach info -> no Half-B block (never a false/empty instruction)
+    assert "REACHABILITY -- prove" not in briefs._brief_for(c, str(tmp_path), "x")
+
+
 # ============================ 7. repomap pins (class detection + frontend suppression) ============================
 
 def _pin(lang, line):
@@ -785,7 +799,7 @@ def test_parallel_prove_commits_all_and_runs_concurrently(tmp_path):
         def unload(self): pass
 
     active, maxseen, lk = [], [0], threading.Lock()
-    def fake_prove_one(model, target, c, have_docker, max_steps, online=False, tag=""):
+    def fake_prove_one(model, target, c, have_docker, max_steps, online=False, tag="", cmap=None):
         with lk:
             active.append(1); maxseen[0] = max(maxseen[0], len(active))
         time.sleep(0.2)

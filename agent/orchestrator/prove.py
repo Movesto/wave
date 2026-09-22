@@ -113,9 +113,27 @@ def _subj(c):
     return f"{c.cwe or c.family} {c.loc()}"
 
 
-def _prove_one(model, target, c, have_docker, max_steps, online=False, tag=""):
+def _reach_for_brief(cmap, c):
+    """The untrusted entry + path to this sink (for the brief's Half-B instruction). None if unknown."""
+    if cmap is None:
+        return None
+    name = (getattr(c, "unit", "") or "").split("(")[0].strip()
+    if not name:
+        return None
+    try:
+        entry, path, _trust = reachability.reaches_untrusted_entry_bound(cmap, name, getattr(c, "file", None))
+    except Exception:
+        return None
+    if entry is None or not path:
+        return None
+    return (getattr(entry, "name", name), path)
+
+
+def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", cmap=None):
     """Run ONE candidate through the ladder -> a verdict record dict. `tag` isolates this job's scaffold +
-    write-manifest so PARALLEL proofs on the same target don't clobber each other's files."""
+    write-manifest so PARALLEL proofs on the same target don't clobber each other's files. `cmap` (when
+    given) lets the brief instruct the model to drive from the untrusted ENTRY and WITNESS the reach path
+    (Half B), not just prove the sink fires (Half A) -- precision_and_measurement_plan.md."""
     tstatus, tnote = taint.analyze(c)                        # intra-function value taint (Python + JS/TS; else unknown)
     reason = "not a canary-provable Python handler"
     if c.provable:
@@ -136,6 +154,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag=""):
     if tnote:                                                # resolve the slice for the model (structure, its job)
         reason = f"{reason} | value-taint: {tstatus} -- {tnote}"
     mode = briefs._proof_mode(c)                             # sanitizer/ssti/protopoll/deser/render/call
+    reach = _reach_for_brief(cmap, c)                        # entry + path -> brief tells the model to prove Half B
     scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag)
     img = briefs._image_for(c.file)
     if briefs._is_js(c.file):                                # JS/TS need tsx + the repo's node_modules;
@@ -151,18 +170,25 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag=""):
     try:
         # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
         # controlled egress point when online, not blanket container network access.
-        v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode),
+        v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode,
+                                                        reach=reach),
                                image=img, mount=target, network="none", max_steps=max_steps,
                                step_timeout=step_to, online=online, write_tag=tag)
     finally:
         repro.remove(target, tag)
     verdict = v.verdict
+    # Half-B honesty (A1): did the model witness the reach path, or only exercise the sink? Read its own
+    # stated conclusion; default to 'inferred' (a path exists but was not driven) / 'none' (no entry path).
+    meth = ((getattr(v, "methodology", "") or "") + " " + (v.why or "")).lower()
+    reach_proof = ("witnessed" if ("reach witnessed" in meth or "drove from" in meth)
+                   else ("inferred" if reach else "none"))
     # DIFFERENTIAL (IDOR/access-control): a witnessed boundary crossing is a business-logic JUDGMENT anchored
     # to an observed state change -- always human-review, never a tool-witnessed `confirmed` (design + §10.7).
     if mode == "differential" and verdict == "confirmed":
         verdict = "anomalous_state"
     return {"verdict": verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
             "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
+            "reach_proof": reach_proof,                       # witnessed | inferred | none (Half-B honesty)
             "methodology": (getattr(v, "methodology", "") or "")[:400],   # the model's documented approach
             "_transcript": v.transcript, "_mode": mode}   # for the trace-logger (stripped before findings write)
 
@@ -331,7 +357,7 @@ def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=
         c = _to_candidate(surv, rel_index, target)
         hyp_id = case.record("hypothesis", _subj(c), "seed", "believed", provenance=c.loc(),
                              cwe=c.cwe, family=c.family).id
-        rec = _prove_one(model, target, c, have_docker, max_steps, online=online)
+        rec = _prove_one(model, target, c, have_docker, max_steps, online=online, cmap=cmap)
         if gate:
             rec = _apply_gate(rec, c, cmap, tm)
         rec = _desktop_authz(rec, c, target, tm)
@@ -420,7 +446,7 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
     # COMPUTE (parallel-safe: model API + docker, each with its own tag; no shared writes) -> a finished rec.
     def _compute(surv, tag):
         c = _to_candidate(surv, rel_index, target)
-        rec = _prove_one(model, target, c, have_docker, max_steps, online=online, tag=tag)
+        rec = _prove_one(model, target, c, have_docker, max_steps, online=online, tag=tag, cmap=cmap)
         if gate:                                            # untrusted-reachability gate on confirmations
             rec = _apply_gate(rec, c, cmap, tm)
         rec = _desktop_authz(rec, c, target, tm)            # single-user desktop app: authz/IDOR is moot

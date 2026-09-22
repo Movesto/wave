@@ -384,7 +384,25 @@ def _differential_brief(candidate, target, rel, code, fn):
         f"handler to drive it, conclude 'blocked'.")
 
 
-def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
+def _reach_block(reach):
+    """Half-B instruction (precision_and_measurement_plan.md): don't stop at proving the SINK fires --
+    drive the attacker value IN AT THE UNTRUSTED ENTRY and let it flow down the real chain, so the PATH
+    (attacker-reachability) is WITNESSED, not just inferred from the call graph. `reach` = (entry, path)."""
+    if not reach:
+        return ""
+    entry, path = reach
+    chain = " -> ".join(path) if path else entry
+    return (
+        f"\n\nREACHABILITY -- prove the WHOLE hypothesis, not just the sink. The untrusted entry that "
+        f"reaches this sink is `{entry}` (path: {chain}). Do NOT stop once the sink fires in isolation: "
+        f"reconstruct this chain and feed your attacker payload IN AT `{entry}`, letting it flow down to "
+        f"the sink -- that witnesses an attacker can actually reach it. If a link won't run standalone "
+        f"(needs a value/import from elsewhere), pull the real source it needs into your script until the "
+        f"chain runs. In your conclusion, STATE which you did: 'reach WITNESSED' (drove from `{entry}`) or "
+        f"'reach NOT witnessed' (only exercised the sink function directly).")
+
+
+def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
     fn = str(candidate.unit).split("(")[0].strip()
@@ -518,4 +536,4 @@ def _brief_for(candidate, target, reason, scaffold=None, mode="call"):
             f"Suspected {candidate.cwe} ({candidate.family}); sink: {candidate.sink}.\n"
             f"A quick automatic check was inconclusive ({reason}).\n\nCode around the sink:\n{code}\n\n"
             f"The whole repository is mounted at your working directory (/work). Prove or refute whether "
-            f"this is a REAL, exploitable {candidate.cwe} by running code.{extra}")
+            f"this is a REAL, exploitable {candidate.cwe} by running code.{extra}{_reach_block(reach)}")

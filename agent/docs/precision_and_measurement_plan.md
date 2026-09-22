@@ -71,8 +71,9 @@ longer manufacture a false confirm, because a tool now proves the path.
   tool-grounded Half B — it **overrides the static Half-B gate** (taint/reachability/confidence/intrinsic),
   while still respecting the execution/module CONTEXT gates and the local-vs-remote nature of the driven
   entry (a witnessed reach from a CLI entry proves only LOCAL exploitability). A non-witnessed proof falls
-  back to Shift 1 (no regression: rung1 canary confirms are unaffected). *Honest limit:* the witnessed
-  signal is parsed from the model's stated methodology; a structured conclude-field is the follow-up.
+  back to Shift 1 (no regression: rung1 canary confirms are unaffected). The witnessed signal is a
+  STRUCTURED conclude field (`reach_witnessed`, on the conclude tool + Verdict), with prose-parse only as
+  a fallback for older replies, and is ignored unless an entry path actually existed to drive from.
 - **Shift 2 — measurement.** A ground-truth harness already exists: `agent/bench/ghsa_bench.py` scores
   the current pipeline on 500 real CVEs vs ground-truth files; `bench.py` scores controlled targets.
   It is an instrument, not a decision-maker. Discipline gap: run it as a regression check after Shift A,

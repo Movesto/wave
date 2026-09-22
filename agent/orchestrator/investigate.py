@@ -33,7 +33,9 @@ _AGENT_SYS = (
     'file>"}  (author your OWN repro when the provided scaffold does not fit -- then run it)\n'
     '  finish:        {"action":"conclude","verdict":"confirmed|refuted|believed|blocked|anomalous_state",'
     '"cwe":"CWE-XX","why":"<why, citing what you OBSERVED>","evidence":"<the concrete observed effect>",'
-    '"methodology":"<the method you used + why it fits, and other vectors/methods you tried or considered>"}\n'
+    '"methodology":"<the method you used + why it fits, and other vectors/methods you tried or considered>",'
+    '"reach_witnessed":true|false}   (reach_witnessed=true ONLY if you drove the value from the untrusted '
+    "ENTRY to the sink, not just exercised the sink in isolation)\n"
     "  not a vuln:    a variant of conclude with verdict 'not_exploitable' -- use ONLY when you determined by "
     "READING the code that the flagged input CANNOT be attacker-controlled in the real threat model (it comes "
     "from a build-time env var / hardcoded constant / an internal trusted caller / an already-authenticated "
@@ -169,6 +171,10 @@ _CONCLUDE_TOOL = {"type": "function", "function": {
         "methodology": {"type": "string", "description": "your APPROACH like a pentester's notes: the method "
                         "you used to test/exploit this and WHY it fits this sink/class, plus other methods or "
                         "input vectors you tried or considered (and why they did/didn't work)"},
+        "reach_witnessed": {"type": "boolean", "description": "TRUE only if you drove the attacker value IN AT "
+                            "THE UNTRUSTED ENTRY and observed it reach the sink (the whole path ran), not just "
+                            "exercised the sink function in isolation. Leave false/absent if you only proved the "
+                            "sink itself."},
     }, "required": ["verdict", "why"]}}}
 
 
@@ -559,7 +565,8 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                     continue
                 print(f"[investigate:native] concluded: {verdict} after {ran} run(s)", flush=True)
                 return Verdict(verdict, why, evidence, str(args.get("cwe", "")), ran, trail,
-                               transcript=list(messages), methodology=str(args.get("methodology", "")))
+                               transcript=list(messages), methodology=str(args.get("methodology", "")),
+                               reach_witnessed=bool(args.get("reach_witnessed")))
             if name == "grep_output":
                 content = _grep(run_log, str(args.get("pattern", "")), int(args.get("lines") or 10))
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
@@ -648,6 +655,7 @@ class Verdict:
     trail: list = field(default_factory=list)   # [(command, result_summary)]
     transcript: list = field(default_factory=list)   # the FULL model conversation (for the trace-logger)
     methodology: str = ""              # the model's documented approach: method used, why, alternatives tried
+    reach_witnessed: bool = False      # the model drove from the untrusted ENTRY to the sink (Half B witnessed)
 
 
 def _parse_action(txt):
@@ -798,7 +806,8 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
                 continue
             print(f"[investigate] concluded: {verdict} after {ran} run(s)", flush=True)
             return Verdict(verdict, why, str(act.get("evidence", "")), str(act.get("cwe", "")), ran, trail,
-                           methodology=str(act.get("methodology", "")))
+                           methodology=str(act.get("methodology", "")),
+                           reach_witnessed=bool(act.get("reach_witnessed")))
         else:
             trail.append((f"(unknown action {kind!r})", "expected run or conclude"))
     verdict = "blocked" if (saw_prov and not saw_real) or ran == 0 else "believed"

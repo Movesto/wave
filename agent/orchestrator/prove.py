@@ -197,9 +197,14 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     verdict = v.verdict
     # Half-B honesty (A1): did the model witness the reach path, or only exercise the sink? Read its own
     # stated conclusion; default to 'inferred' (a path exists but was not driven) / 'none' (no entry path).
+    # Half-B witnessed signal: PREFER the structured conclude field (reach_witnessed); fall back to parsing
+    # the model's stated methodology only when the field is absent (older/native replies).
     meth = ((getattr(v, "methodology", "") or "") + " " + (v.why or "")).lower()
-    said_witnessed = (("reach witnessed" in meth or "drove from" in meth)
+    text_witnessed = (("reach witnessed" in meth or "drove from" in meth)
                       and "not witnessed" not in meth and "not drive" not in meth)
+    said_witnessed = bool(getattr(v, "reach_witnessed", False)) or text_witnessed
+    # never trust a 'witnessed' claim when there was no entry path to drive from (nothing to witness)
+    said_witnessed = said_witnessed and reach is not None
     reach_proof = "witnessed" if said_witnessed else ("inferred" if reach else "none")
     driven_trust = reachability.entry_trust(entry_fn) if (said_witnessed and entry_fn is not None) else None
     # DIFFERENTIAL (IDOR/access-control): a witnessed boundary crossing is a business-logic JUDGMENT anchored

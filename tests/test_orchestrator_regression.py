@@ -549,9 +549,19 @@ def test_brief_instructs_drive_from_entry_half_b(tmp_path):
     reach = prove._reach_for_brief(cmap, c)
     assert reach and reach[0] == "run_route"                      # the route handler is the untrusted entry
     brief = briefs._brief_for(c, str(tmp_path), "inconclusive", reach=reach)
-    assert "REACHABILITY" in brief and "run_route" in brief and "reach WITNESSED" in brief
+    assert "REACHABILITY" in brief and "run_route" in brief and "reach_witnessed" in brief
     # no reach info -> no Half-B block (never a false/empty instruction)
     assert "REACHABILITY -- prove" not in briefs._brief_for(c, str(tmp_path), "x")
+
+
+def test_reach_witnessed_is_a_structured_conclude_field(tmp_path):
+    # hardening: the witnessed signal is a STRUCTURED field (conclude tool + Verdict), not just prose parsing.
+    from agent.orchestrator import investigate as inv
+    props = inv._CONCLUDE_TOOL["function"]["parameters"]["properties"]
+    assert props["reach_witnessed"]["type"] == "boolean"
+    v = inv.Verdict("confirmed", "why", reach_witnessed=True)
+    assert v.reach_witnessed is True
+    assert inv.Verdict("confirmed", "why").reach_witnessed is False   # defaults false (not witnessed)
 
 
 def test_repro_entry_mode_scaffolds_the_entry_not_the_sink(tmp_path):

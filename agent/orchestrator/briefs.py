@@ -398,8 +398,8 @@ def _reach_block(reach):
         f"reconstruct this chain and feed your attacker payload IN AT `{entry}`, letting it flow down to "
         f"the sink -- that witnesses an attacker can actually reach it. If a link won't run standalone "
         f"(needs a value/import from elsewhere), pull the real source it needs into your script until the "
-        f"chain runs. In your conclusion, STATE which you did: 'reach WITNESSED' (drove from `{entry}`) or "
-        f"'reach NOT witnessed' (only exercised the sink function directly).")
+        f"chain runs. When you conclude, set `reach_witnessed: true` ONLY if you drove from `{entry}` and saw "
+        f"the value reach the sink (leave it false if you only exercised the sink function in isolation).")
 
 
 def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None):

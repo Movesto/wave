@@ -491,8 +491,8 @@ def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None
                 "`ls -l /work/wave_HIT`. CONFIRMED if the file EXISTS (the payload executed on deserialize). "
                 "REFUTED if the load raises / rejects it and no file appears.")
         else:
-            extra = (f"\nA reproduction scaffold is ready at {cont} -- it loads this module and calls "
-                     f"{fn}(ARG), printing WAVE_RESULT + WAVE_CALL_ERROR. The ARG is parsed as JSON if it can "
+            extra = (f"\nA reproduction scaffold is ready at {cont} -- it loads the target and calls it with "
+                     f"ARG (run it with the command below), printing WAVE_RESULT + WAVE_CALL_ERROR. The ARG is parsed as JSON if it can "
                      f"be, so the taint can flow through a PROPERTY -- match the function's signature:\n"
                      f"  - takes a string:  {run_hint.replace('<payload>', '; id')}\n"
                      f"  - takes an object: {run_hint.replace('<payload>', chr(39) + '{{\"path\": \"; id\"}}' + chr(39))}\n"

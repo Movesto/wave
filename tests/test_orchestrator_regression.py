@@ -554,6 +554,22 @@ def test_brief_instructs_drive_from_entry_half_b(tmp_path):
     assert "REACHABILITY -- prove" not in briefs._brief_for(c, str(tmp_path), "x")
 
 
+def test_repro_entry_mode_scaffolds_the_entry_not_the_sink(tmp_path):
+    # A2: given an untrusted entry distinct from the sink, the scaffold loads+calls the ENTRY, so running it
+    # drives the real chain down to the sink (Half B witnessed), instead of poking the sink in isolation.
+    from agent.orchestrator import repro
+    _write(tmp_path, "r.py", _REACH_SRC)                          # run_route (entry) -> do_it (sink)
+    c = _cand(file=str(tmp_path / "r.py"), unit="do_it(name)", line=11, cwe="CWE-78")
+    cont, hint = repro.build(c, str(tmp_path), mode="call", entry=("run_route", str(tmp_path / "r.py")))
+    body = (tmp_path / ".wave_repro.py").read_text(encoding="utf-8")
+    assert "'run_route'" in body and "'do_it'" not in body      # scaffold targets the ENTRY function
+    repro.remove(str(tmp_path))
+    # sink-mode (no entry) still targets the sink -- unchanged default
+    repro.build(c, str(tmp_path), mode="call")
+    assert "'do_it'" in (tmp_path / ".wave_repro.py").read_text(encoding="utf-8")
+    repro.remove(str(tmp_path))
+
+
 # ============================ 7. repomap pins (class detection + frontend suppression) ============================
 
 def _pin(lang, line):

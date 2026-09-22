@@ -142,15 +142,24 @@ def _sfx(tag):
     return f"_{tag}" if tag else ""
 
 
-def build(candidate, target, mode="call", workdir="/work", tag=""):
+def build(candidate, target, mode="call", workdir="/work", tag="", entry=None):
     """Write a reproduction scaffold next to the mounted repo (host side); return (container_path,
     run_hint) the model can invoke, or None if we can't scaffold this candidate. Caller must remove()
     it afterwards. `tag` gives each PARALLEL proof its own scaffold file so concurrent jobs on the same
-    target don't clobber each other's `.wave_repro`."""
+    target don't clobber each other's `.wave_repro`.
+
+    `entry` = (name, file): scaffold the UNTRUSTED ENTRY instead of the sink function (Half B) -- calling
+    the entry with the payload drives the real chain down to the sink, so the reach is WITNESSED, not just
+    the sink's mechanism. The sink then fires downstream (proven by a marker side-effect). Used for generic
+    injection classes; when the entry needs framework args the model widens the mirror per the brief."""
     func = (getattr(candidate, "unit", "") or "").split("(")[0].strip()
     if not func:
         return None
     path = getattr(candidate, "file", "") or ""
+    if entry:                                                # drive from the untrusted entry, not the sink
+        ename, efile = entry
+        if ename and efile:
+            func, path = ename, efile
     rel = _rel(path, target)
     mod_c = f"{workdir}/{rel}"
     is_js = path.lower().endswith((".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"))

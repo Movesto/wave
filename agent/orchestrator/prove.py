@@ -113,20 +113,29 @@ def _subj(c):
     return f"{c.cwe or c.family} {c.loc()}"
 
 
-def _reach_for_brief(cmap, c):
-    """The untrusted entry + path to this sink (for the brief's Half-B instruction). None if unknown."""
+def _reach_of(cmap, c):
+    """The untrusted entry Func + path to this sink, or (None, None). The entry's name+file let us
+    scaffold the ENTRY (Half B); the path drives the brief's instruction."""
     if cmap is None:
-        return None
+        return None, None
     name = (getattr(c, "unit", "") or "").split("(")[0].strip()
     if not name:
-        return None
+        return None, None
     try:
         entry, path, _trust = reachability.reaches_untrusted_entry_bound(cmap, name, getattr(c, "file", None))
     except Exception:
-        return None
+        return None, None
     if entry is None or not path:
+        return None, None
+    return entry, path
+
+
+def _reach_for_brief(cmap, c):
+    """(entry_name, path) for the brief's Half-B instruction, or None."""
+    entry, path = _reach_of(cmap, c)
+    if entry is None:
         return None
-    return (getattr(entry, "name", name), path)
+    return (getattr(entry, "name", ""), path)
 
 
 def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", cmap=None):
@@ -154,8 +163,17 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     if tnote:                                                # resolve the slice for the model (structure, its job)
         reason = f"{reason} | value-taint: {tstatus} -- {tnote}"
     mode = briefs._proof_mode(c)                             # sanitizer/ssti/protopoll/deser/render/call
-    reach = _reach_for_brief(cmap, c)                        # entry + path -> brief tells the model to prove Half B
-    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag)
+    entry_fn, rpath = _reach_of(cmap, c)                     # untrusted entry + path (Half B)
+    reach = (getattr(entry_fn, "name", ""), rpath) if entry_fn is not None else None
+    # A2: for a generic injection (call mode) with a DISTINCT entry, scaffold the ENTRY so calling it drives
+    # the real chain to the sink -> reach WITNESSED. Specialized modes feed the sink fn directly, so not there.
+    sink_fn = (c.unit or "").split("(")[0].strip()
+    build_entry = None
+    if mode == "call" and entry_fn is not None:
+        en, ef = getattr(entry_fn, "name", ""), getattr(entry_fn, "file", "")
+        if en and ef and en != sink_fn:
+            build_entry = (en, ef)
+    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag, entry=build_entry)
     img = briefs._image_for(c.file)
     if briefs._is_js(c.file):                                # JS/TS need tsx + the repo's node_modules;
         from . import js_env                                 # DOM render ALSO needs a real browser --

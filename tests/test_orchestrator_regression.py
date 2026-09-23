@@ -554,6 +554,25 @@ def test_brief_instructs_drive_from_entry_half_b(tmp_path):
     assert "REACHABILITY -- prove" not in briefs._brief_for(c, str(tmp_path), "x")
 
 
+def test_taint_chained_sink_not_marked_unrelated(tmp_path):
+    # #3: a chained sink `subprocess.run(<tainted>).decode('utf-8')` must read 'flows', not 'unrelated' --
+    # the OUTER .decode's args are constants, but the inner run() carries the taint (the pyvuln cmd bug that
+    # falsely downgraded a witnessed command injection via the value-taint gate).
+    from agent.orchestrator import taint
+    f = tmp_path / "app.py"
+    f.write_text("import subprocess\n"
+                 "def ping():\n"
+                 "    host = request.args.get('host', '127.0.0.1')\n"
+                 "    return subprocess.run('echo ' + host, shell=True).stdout.decode('utf-8', 'replace')\n",
+                 encoding="utf-8")
+    status, _ = taint.analyze(_cand(file=str(f), unit="ping()", line=4, cwe="CWE-78"))
+    assert status == "flows", status
+    # a genuinely constant sink still reads 'unrelated' (no false 'flows')
+    g = tmp_path / "safe.py"
+    g.write_text("def f():\n    return open('/etc/hosts').read()\n", encoding="utf-8")
+    assert taint.analyze(_cand(file=str(g), unit="f()", line=2, cwe="CWE-22"))[0] == "unrelated"
+
+
 def test_notebook_retries_blank_note_on_a_pinned_file(tmp_path):
     # RECALL: a pin-rich file that comes back BLANK (unparsed model call) must be retried, not committed empty
     # and skipped forever -- the pyvuln whiff (app.py had 15 sink-pins yet an empty note).

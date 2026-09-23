@@ -232,13 +232,14 @@ def _assign_sides(n, cfg):
     return left, right
 
 
-def _call_at_line(fn, line, src, cfg):
+def _calls_at_line(fn, line, cfg):
+    """EVERY call node covering `line` (outermost first). A chained sink like
+    `subprocess.run(<tainted>).decode('utf-8')` is TWO calls on one line -- taint must consider both, not
+    only the outermost (whose args here are constants), or the real sink's tainted args are missed."""
     cands = [n for n in _walk(fn)
              if n.type in cfg["call"] and n.start_point[0] + 1 <= line <= n.end_point[0] + 1]
-    if not cands:
-        return None
-    cands.sort(key=lambda n: (n.start_byte, -n.end_byte))   # outermost call covering the line = the sink
-    return cands[0]
+    cands.sort(key=lambda n: (n.start_byte, -n.end_byte))
+    return cands
 
 
 def analyze(candidate):
@@ -288,18 +289,27 @@ def analyze(candidate):
                 const.add(tgt)
             # opaque -> in no set (unknown provenance)
 
-    sink = _call_at_line(fn, line, src, cfg)
-    if sink is None:
+    calls = _calls_at_line(fn, line, cfg)
+    if not calls:
         return "unknown", ""
-    args = sink.child_by_field_name(cfg["call_args"]) or sink
-    t = _taint_in_expr(args, src, tainted, cfg)
-    if t == "raw":
+    # Aggregate taint across EVERY call covering the line: a chained sink `subprocess.run(<tainted>).decode(
+    # 'utf-8')` must not read 'unrelated' just because the OUTER call's args are constants -- the inner
+    # (real) sink's args carry the taint. raw on ANY call -> flows; else clean -> sanitized; else the union
+    # of all args decides const/opaque.
+    agg_raw = agg_clean = False
+    sink_ids = set()
+    for call in calls:
+        args = call.child_by_field_name(cfg["call_args"]) or call
+        tt = _taint_in_expr(args, src, tainted, cfg)
+        if tt == "raw":
+            agg_raw = True
+        elif tt == "clean":
+            agg_clean = True
+        sink_ids |= _idents(args, src)
+    if agg_raw:
         return "flows", "an untrusted value reaches the sink unsanitized (this function)"
-    if t == "clean":
+    if agg_clean or (sink_ids & clean):
         return "sanitized", "the untrusted value is wrapped in a cast/sanitizer before the sink"
-    sink_ids = _idents(args, src)
-    if sink_ids & clean:
-        return "sanitized", "the value reaching the sink was sanitized/reassigned upstream"
     if not sink_ids or sink_ids <= const:                   # literals / local constants only
         return "unrelated", "the sink arguments are constants/literals, not untrusted input (this function)"
     return "unknown", ""                                    # opaque local (maybe cross-function) -> don't gate

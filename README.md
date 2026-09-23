@@ -75,21 +75,32 @@ TARGET REPO
    ▼  STAGE 1  EYES        tree-sitter whole-repo map + call graph + security pins;
    │                       a model "notebook" reads the pinned files into per-file notes
    ▼  STAGE 2  DETECTOR    clean-room asymmetric falsification: a fresh model instance,
-   │                       shown only the slice, tries to DISPROVE each believed finding
-   ▼  STAGE 3  PROOF LOOP  the model drives a sandbox to make the exploit happen; a tool
+   │                       shown only the slice, tries to DISPROVE each candidate. Candidates
+   │                       come from the notebook AND the map's sink-pins, so a missed note
+   │                       can't blank a file (a blank note on a pinned file is retried once)
+   ▼  STAGE 3  PROOF LOOP  the model drives a sandbox to make the exploit happen; the HARNESS
    │                       WITNESSES the effect (marker in a sink, ASan report, state delta)
    ▼  STAGE 4  PATCH       the model writes a fix; the SAME proof re-runs; certified `fixed`
                            only if the exploit demonstrably no longer fires
 ```
 
-Between the stages sit **honesty gates** that keep verdicts trustworthy:
+Between the stages sit **honesty gates** that keep verdicts trustworthy — a `confirmed` requires **both** that
+the dangerous effect was *witnessed* **and** that an attacker can *reach* it:
 
-- **Reachability gate** — a proven sink with no path from an untrusted-facing entry → human-review, not a
-  false confirm (and it flags *ambiguous* name-based call edges as low-confidence).
+- **Reachability — witnessed, not guessed** — wave doesn't just check a *path exists* on the call graph. For a
+  web route it drives the **real HTTP route** through the framework's in-process test client (Flask/FastAPI,
+  Express, NestJS, Spring, ASP.NET, Go, Rails, Laravel, Rust…), so the attacker value is *seen* reaching the
+  sink. Each confirm records `reach_proof: witnessed | inferred`. A sink reachable only via a local/CLI entry,
+  or only through an ambiguous name-based call edge, is human-review — not a false confirm.
 - **Context gate** — a browser/frontend file can't host a server-side vuln (a client `fetch` is not SSRF).
 - **Value-taint** — does the *specific* untrusted value actually reach the sink, or a sanitized copy?
-- **Evidence audit** — every `confirmed` is re-checked by a fresh clean-room skeptic + an independent second
-  proof; it upholds only what it can ground.
+- **Tool-grounded witness** — the **harness itself** reads its planted markers from the sandbox output
+  (`wave_HIT`, the instrumented-sink markers, the headless-browser canary) and grades the class, so a confirm
+  rests on the *tape*, not the model's account. Classes with no deterministic marker (IDOR / business logic)
+  stay human-review by design.
+- **Evidence audit** — a `confirmed` with **no** harness marker is re-checked by a fresh clean-room skeptic;
+  set `WAVE_AUDIT_MODEL` to a **different** model (e.g. GLM auditing deepseek) for a *decorrelated* second
+  opinion. It upholds only what it can ground — and it's never even called on a harness-witnessed confirm.
 
 ---
 
@@ -148,6 +159,16 @@ wave config set key   "<your OpenRouter key>"
 ```
 
 `wave config show` prints the current settings.
+
+**Optional — a decorrelated second opinion (recommended for cloud runs):** set a **different** model as the
+evidence auditor via `WAVE_AUDIT_MODEL`. It judges only the `confirmed` findings that lack a deterministic
+harness marker (the judgment calls — IDOR, business logic, or an observed-but-un-marked effect), so two
+*independent* models must agree before such a finding stands. It costs **nothing** on the marker-witnessed
+confirms (the harness tape settles those with no model call), and falls back to the primary model when unset.
+
+```bash
+export WAVE_AUDIT_MODEL="z-ai/glm-5.3-flash"   # GLM audits the primary (e.g. deepseek) on the no-marker confirms
+```
 
 ### 3. Run the whole pipeline
 

@@ -554,6 +554,46 @@ def test_brief_instructs_drive_from_entry_half_b(tmp_path):
     assert "REACHABILITY -- prove" not in briefs._brief_for(c, str(tmp_path), "x")
 
 
+def test_notebook_retries_blank_note_on_a_pinned_file(tmp_path):
+    # RECALL: a pin-rich file that comes back BLANK (unparsed model call) must be retried, not committed empty
+    # and skipped forever -- the pyvuln whiff (app.py had 15 sink-pins yet an empty note).
+    from agent.orchestrator import notebook
+    f = tmp_path / "app.py"
+    f.write_text("def search(q):\n    return db.execute('SELECT '+q)\n", encoding="utf-8")
+    calls = {"n": 0}
+
+    class FakeModel:
+        def generate(self, sys, user, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return "not json at all -- a failed call"
+            return ('{"purpose":"search handler","untrusted_inputs":"q","findings":[{"line":2,"class":"sqli",'
+                    '"sink":"db.execute","input":"q","why":"concat","confidence":"high"}],'
+                    '"classes_to_try_first":["sqli"],"cross_file":""}')
+
+    per = ([], [(2, "SQLi", "db.execute('SELECT '+q)")], [])   # one sink pin -> focus non-empty
+    note = notebook.read_note(FakeModel(), str(tmp_path), str(f), per)
+    assert note["findings"] and note["findings"][0]["class"] == "sqli"
+    assert calls["n"] >= 2                                      # retried after the blank first pass
+
+
+def test_notebook_does_not_retry_a_pinless_file(tmp_path):
+    # a file with NO pins that returns blank is not retried (don't burn calls on genuinely low-value files).
+    from agent.orchestrator import notebook
+    f = tmp_path / "util.py"
+    f.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    calls = {"n": 0}
+
+    class FakeModel:
+        def generate(self, sys, user, **k):
+            calls["n"] += 1
+            return "not json"
+
+    note = notebook.read_note(FakeModel(), str(tmp_path), str(f), ([], [], []))   # no pins -> focus empty
+    assert note["findings"] == []
+    assert calls["n"] == 1                                      # single pass, no retry
+
+
 def test_detect_seeds_from_codemap_pins_when_notebook_is_empty(tmp_path):
     # RECALL FLOOR: a notebook that whiffed (empty findings) must NOT blank the pipeline -- the codemap's
     # deterministic sink-pins still flow to detect. (The pyvuln failure: notebook returned an empty note for
@@ -1690,10 +1730,11 @@ def test_methodology_is_captured_from_conclude(monkeypatch):
 
 from agent.orchestrator import notebook as nb
 
-def test_notebook_reads_are_deterministic_temp0():
+def test_notebook_primary_read_temp0_blank_retry_bumps():
     import inspect
     src = inspect.getsource(nb.read_note) + inspect.getsource(nb.select_targets)
-    assert "temperature=0.2" not in src and src.count("temperature=0.0") >= 2   # both reads pinned to temp 0
+    assert "_one_pass(0.0)" in src and "temperature=0.0" in src   # PRIMARY read + selection pinned to temp 0
+    assert "_one_pass(0.4)" in src                                # only a BLANK pin-rich note retries, at a bump
 
 def test_notebook_prompt_flags_panic_dos():
     s = nb._NOTE_SYS.lower()

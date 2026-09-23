@@ -235,27 +235,40 @@ def read_note(model, root, path, per_file_entry):
     focus = [ln for ln, _, _ in routes] + [ln for ln, _, _ in sinks] + [ln for ln, _, _ in dyn]
     hints = _hint_block(per_file_entry)
     rel = _rel(root, path)
-    note = {"file": rel, "purpose": "", "untrusted_inputs": "", "findings": [],
-            "classes_to_try_first": [], "cross_file": ""}
     wins = _windows_for(src, focus)
-    for start, body in wins:
-        span = f" (lines {start}-{start + _WINDOW - 1})" if len(wins) > 1 else ""
-        user = (f"FILE {rel}{span}\nMAP HINTS (confirm or dismiss against the code):\n{hints}\n\n"
-                f"SOURCE:\n{body}")
-        txt = model.generate(_NOTE_SYS, user, max_new_tokens=_TOKENS, temperature=0.0, think=False,
-                             json_mode=True)
-        d = _parse_note(txt)
-        if not d:
-            continue
-        note["purpose"] = note["purpose"] or str(d.get("purpose") or "")
-        note["untrusted_inputs"] = note["untrusted_inputs"] or str(d.get("untrusted_inputs") or "")
-        note["cross_file"] = note["cross_file"] or str(d.get("cross_file") or "")
-        for f in (d.get("findings") or []):
-            if isinstance(f, dict):
-                note["findings"].append(f)
-        for c in (d.get("classes_to_try_first") or []):
-            if c and c not in note["classes_to_try_first"]:
-                note["classes_to_try_first"].append(c)
+
+    def _one_pass(temperature):
+        nt = {"file": rel, "purpose": "", "untrusted_inputs": "", "findings": [],
+              "classes_to_try_first": [], "cross_file": ""}
+        for start, body in wins:
+            span = f" (lines {start}-{start + _WINDOW - 1})" if len(wins) > 1 else ""
+            user = (f"FILE {rel}{span}\nMAP HINTS (confirm or dismiss against the code):\n{hints}\n\n"
+                    f"SOURCE:\n{body}")
+            txt = model.generate(_NOTE_SYS, user, max_new_tokens=_TOKENS, temperature=temperature,
+                                 think=False, json_mode=True)
+            d = _parse_note(txt)
+            if not d:
+                continue
+            nt["purpose"] = nt["purpose"] or str(d.get("purpose") or "")
+            nt["untrusted_inputs"] = nt["untrusted_inputs"] or str(d.get("untrusted_inputs") or "")
+            nt["cross_file"] = nt["cross_file"] or str(d.get("cross_file") or "")
+            for f in (d.get("findings") or []):
+                if isinstance(f, dict):
+                    nt["findings"].append(f)
+            for c in (d.get("classes_to_try_first") or []):
+                if c and c not in nt["classes_to_try_first"]:
+                    nt["classes_to_try_first"].append(c)
+        return nt
+
+    note = _one_pass(0.0)
+    # RECALL: a pin-rich file that came back BLANK (no purpose AND no findings) is almost always a failed /
+    # unparsed model call, not a genuinely clean file -- so we'd permanently lose its model-only findings
+    # (authz/IDOR/crash the sink-pin floor can't recover). This was the pyvuln whiff: app.py had 15 sink-pins
+    # yet an empty note -> 0 notebook candidates. Retry ONCE, with a temperature bump so the pass differs.
+    if focus and not note["purpose"] and not note["findings"]:
+        retry = _one_pass(0.4)
+        if retry["purpose"] or retry["findings"]:
+            note = retry
     # Ground the hint: keep only classes that an actual finding carries (drops the "dumped the whole
     # taxonomy on a clean file" glitch). If findings exist but none matched, fall back to their classes.
     fclasses = []

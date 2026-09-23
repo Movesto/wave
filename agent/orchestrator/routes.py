@@ -306,10 +306,83 @@ def _laravel_routes(target):
     return routes
 
 
+# ---- FILE-BASED routing (Next.js / SvelteKit / Nuxt): the route PATH comes from the FILE PATH, not a
+# decorator. pages/api/users/[id].ts -> /api/users/{id}; app/api/x/route.ts (export GET) -> GET /x; a
+# SvelteKit +server.ts / a Nuxt server/api file the same way. This is the modern JS-app attack surface. ----
+_FILE_ROUTE_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs")
+_HTTP_EXPORT = re.compile(r"export\s+(?:async\s+)?(?:function|const)\s+(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b")
+_DEFAULT_FN = re.compile(r"export\s+default\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)")
+
+
+def _seg_route(segs, drop_last_file):
+    """Turn path segments into a URL: drop the extension (or the whole filename for route.ts/+server.ts),
+    skip `index`/route-groups `(x)`, and map dynamic segments [id]/[...slug]/$id -> {id}/{slug}."""
+    segs = list(segs)
+    if drop_last_file:
+        segs = segs[:-1]
+    elif segs:
+        for e in _FILE_ROUTE_EXTS:
+            if segs[-1].endswith(e):
+                segs[-1] = segs[-1][:-len(e)]
+                break
+    out = []
+    for s in segs:
+        if s in ("index", "") or (s.startswith("(") and s.endswith(")")):   # index / route group -> not in URL
+            continue
+        s = re.sub(r"\[\.\.\.([^\]]+)\]", r"{\1}", s)       # [...slug] catch-all
+        s = re.sub(r"\[([^\]]+)\]", r"{\1}", s)             # [id] -> {id}
+        s = re.sub(r"\$(\w+)", r"{\1}", s)                  # remix-style $id -> {id}
+        out.append(s)
+    return "/" + "/".join(out)
+
+
+def _filebased_routes(target):
+    """Next.js (pages + app router), SvelteKit, and Nuxt file-based routes. Each Route carries its own
+    framework tag (extract_routes keeps it, since this extractor spans several)."""
+    routes = []
+    for f in _iter(target, set(_FILE_ROUTE_EXTS)):
+        parts = [p for p in str(f).replace("\\", "/").split("/") if p]
+        if not parts:
+            continue
+        name, low = parts[-1], [p.lower() for p in parts]
+        stem = name.split(".")[0].lower()
+        text = None
+
+        def content():
+            nonlocal text
+            if text is None:
+                try:
+                    text = f.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    text = ""
+            return text
+
+        if stem == "route" and "app" in low:               # Next.js APP router: app/.../route.ts
+            path = _seg_route(parts[low.index("app") + 1:], drop_last_file=True)
+            for m in (_HTTP_EXPORT.findall(content()) or ["ANY"]):
+                routes.append(Route(m.upper(), path, str(f), (m if m != "ANY" else ""), "nextjs"))
+        elif "pages" in low and low.index("pages") + 1 < len(parts) \
+                and parts[low.index("pages") + 1].lower() == "api":     # Next.js PAGES router: pages/api/...
+            path = _seg_route(parts[low.index("pages") + 1:], drop_last_file=False)
+            m = _DEFAULT_FN.search(content())
+            routes.append(Route("ANY", path, str(f), (m.group(1) if m else ""), "nextjs"))
+        elif stem == "+server" and "routes" in low:        # SvelteKit: src/routes/.../+server.ts
+            path = _seg_route(parts[low.index("routes") + 1:], drop_last_file=True)
+            for m in (_HTTP_EXPORT.findall(content()) or ["ANY"]):
+                routes.append(Route(m.upper(), path, str(f), (m if m != "ANY" else ""), "sveltekit"))
+        elif "server" in low and low.index("server") + 1 < len(parts) \
+                and parts[low.index("server") + 1].lower() in ("api", "routes"):   # Nuxt: server/api/...
+            path = _seg_route(parts[low.index("server") + 1:], drop_last_file=False)
+            routes.append(Route("ANY", path, str(f), "", "nuxt"))
+    return routes
+
+
 _EXTRACTORS = [(_openapi_routes, "openapi"), (_express_routes, "express"), (_nest_routes, "nestjs"),
                (_flask_routes, "flask"), (_rust_routes, "rust"), (_spring_routes, "spring"),
                (_csharp_routes, "aspnet"), (_go_routes, "go"), (_rails_routes, "rails"),
-               (_laravel_routes, "laravel")]
+               (_laravel_routes, "laravel"), (_filebased_routes, None)]   # None = keep each route's own framework
+# frameworks emitted by the multi-framework file-based extractor (for the drive-recipe coverage check).
+_FILE_FRAMEWORKS = ("nextjs", "sveltekit", "nuxt")
 
 
 def extract_routes(target, profile=None):
@@ -318,7 +391,7 @@ def extract_routes(target, profile=None):
     routes = []
     for fn, name in _EXTRACTORS:
         try:
-            routes += [replace(r, framework=name) for r in fn(target)]
+            routes += [(r if name is None else replace(r, framework=name)) for r in fn(target)]
         except Exception:
             continue
     seen, out = set(), []
@@ -364,6 +437,18 @@ DRIVE_RECIPES = {
     "rust": ("Rust actix: `let req = test::TestRequest::{m}().uri(\"{path}?<param>=<payload>\").to_request(); "
              "let resp = test::call_service(&app, req).await;` -- Rocket: "
              "`let client = Client::tracked(rocket()).unwrap(); client.{m}(\"{path}?<param>=<payload>\").dispatch()`."),
+    "nextjs": ("Next.js API route ({M} {path}). PAGES router (export default handler): mock req/res -- "
+               "`const {{createMocks}}=require('node-mocks-http'); const h=require('<this file>').default; "
+               "const {{req,res}}=createMocks({{method:'{M}', query:{{'<param>':'<payload>'}}, body:{{}}}}); "
+               "await h(req,res); console.log(res._getStatusCode(), res._getData());`  APP router (export "
+               "{M}): call it with a Request -- `const {{{M}}}=require('<this file>'); const r=await {M}(new "
+               "Request('http://x{path}?<param>=<payload>')); console.log(r.status, await r.text());`"),
+    "sveltekit": ("SvelteKit +server.ts (export {M}): import the handler and call it with a mock RequestEvent -- "
+                  "`const {{{M}}}=require('<this file>'); const r=await {M}({{ url:new URL('http://x{path}?"
+                  "<param>=<payload>'), request:new Request('http://x{path}'), params:{{}} }}); "
+                  "console.log(r.status, await r.text());`"),
+    "nuxt": ("Nuxt server route ({path}, defineEventHandler): import the handler and call it with a mock H3 "
+             "event carrying the query/body, then read the returned value -- adapt to the handler's signature."),
 }
 
 
@@ -376,8 +461,13 @@ def drive_recipe(route):
 
 
 def find_route(routes, file, function):
-    """The Route object reaching a sink at (file, function) -- function-name match first (handler sinks),
-    then same-file. Returns the Route (carrying method/path/framework) or None. Companion to route_for."""
+    """The Route object reaching a sink at (file, function). EXACT file path first (file-based routing: the
+    route IS the file, and basenames like `route.ts`/`index.ts` collide across dirs), then function-name
+    (decorated handlers), then basename. Returns the Route (method/path/framework) or None."""
+    nf = str(file or "").replace("\\", "/")
+    exact = [r for r in routes if str(r.file or "").replace("\\", "/") == nf]
+    if exact:
+        return exact[0]
     if function:
         hit = [r for r in routes if r.function == function]
         if hit:

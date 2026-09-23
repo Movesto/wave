@@ -742,8 +742,36 @@ def test_every_extracted_framework_has_a_drive_recipe():
     # universal coverage: every framework routes.py can extract must have a drive recipe (no silent gap).
     from agent.orchestrator import routes
     for _fn, name in routes._EXTRACTORS:
+        if name is None:                        # the file-based extractor spans several frameworks
+            continue
         assert name in routes.DRIVE_RECIPES, name
         assert routes.DRIVE_RECIPES[name].format(m="get", M="GET", path="/x")   # template is well-formed
+    for name in routes._FILE_FRAMEWORKS:        # nextjs / sveltekit / nuxt
+        assert name in routes.DRIVE_RECIPES, name
+        assert routes.DRIVE_RECIPES[name].format(m="get", M="GET", path="/x")
+
+
+def test_filebased_routing_nextjs_sveltekit_nuxt(tmp_path):
+    # file-based routing: the route PATH comes from the FILE PATH (Next.js pages+app, SvelteKit, Nuxt).
+    from agent.orchestrator import routes
+    _write(tmp_path, "apps/web/pages/api/users/[id].ts",
+           "export default function handler(req,res){ res.end(require('fs').readFileSync(req.query.id)); }\n")
+    _write(tmp_path, "apps/web/app/api/things/route.ts",
+           "export async function GET(req){ return new Response('ok'); }\n"
+           "export async function POST(req){ return new Response('ok'); }\n")
+    _write(tmp_path, "src/routes/blog/[slug]/+server.ts",
+           "export function GET({params}){ return new Response(params.slug); }\n")
+    _write(tmp_path, "server/api/hello.ts", "export default defineEventHandler((e)=>'hi')\n")
+    rl = routes.extract_routes(str(tmp_path))
+    got = {(r.method, r.path, r.framework) for r in rl}
+    assert ("ANY", "/api/users/{id}", "nextjs") in got
+    assert ("GET", "/api/things", "nextjs") in got and ("POST", "/api/things", "nextjs") in got
+    assert ("GET", "/blog/{slug}", "sveltekit") in got
+    assert ("ANY", "/api/hello", "nuxt") in got
+    # find_route resolves a sink by EXACT file path (basenames like route.ts collide across dirs)
+    r = routes.find_route(rl, str(tmp_path / "apps/web/pages/api/users/[id].ts"), "handler")
+    assert r is not None and r.path == "/api/users/{id}" and r.framework == "nextjs"
+    assert "node-mocks-http" in routes.drive_recipe(r)
 
 
 def test_repro_entry_mode_scaffolds_the_entry_not_the_sink(tmp_path):

@@ -18,6 +18,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 
+from . import oracle
 from .execute import _DEPS_MOUNT, execute, install_packages
 
 _AGENT_SYS = (
@@ -509,6 +510,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
     inst_state = {"installs": 0, "budget": install_budget, "done": set()}
     trail, ran = [], 0
     run_log = ""                                            # the LAST run's full output (grep/tail read it)
+    witnessed = set()                                       # harness-planted markers seen across ALL runs (oracle)
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
     seen_cmds = set()                                       # to nudge a model re-running the same command
     believed_nudged = False                                 # one-time: a belief must cite evidence
@@ -566,7 +568,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 print(f"[investigate:native] concluded: {verdict} after {ran} run(s)", flush=True)
                 return Verdict(verdict, why, evidence, str(args.get("cwe", "")), ran, trail,
                                transcript=list(messages), methodology=str(args.get("methodology", "")),
-                               reach_witnessed=bool(args.get("reach_witnessed")))
+                               reach_witnessed=bool(args.get("reach_witnessed")), witness=sorted(witnessed))
             if name == "grep_output":
                 content = _grep(run_log, str(args.get("pattern", "")), int(args.get("lines") or 10))
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
@@ -604,6 +606,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
             else:
                 recon_streak += 1                            # consecutive read-only (cat/sed/grep) commands
             run_log = _combined(res)                         # full output stays here, not in the prompt
+            witnessed |= oracle.scan(run_log)                # HARNESS reads its own markers (not the model's word)
             prov = _provision_signal(run_log)
             saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(run_log)
             print(f"[investigate:native] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
@@ -656,6 +659,7 @@ class Verdict:
     transcript: list = field(default_factory=list)   # the FULL model conversation (for the trace-logger)
     methodology: str = ""              # the model's documented approach: method used, why, alternatives tried
     reach_witnessed: bool = False      # the model drove from the untrusted ENTRY to the sink (Half B witnessed)
+    witness: list = field(default_factory=list)   # harness-planted markers the HARNESS saw in the sandbox output
 
 
 def _parse_action(txt):
@@ -727,6 +731,7 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
     inst_state = {"installs": 0, "budget": install_budget, "done": set()}
     trail = []
     ran = 0
+    witnessed = set()                                       # harness-planted markers seen across ALL runs (oracle)
     repro_attempted = repro_forced = False                  # force a repro before 'believed' on a provable finding
     method_nudged = False                                    # tried a method but couldn't prove -> try a DIFFERENT one
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
@@ -760,8 +765,10 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
             ran += 1
             if _is_repro_attempt(cmd):
                 repro_attempted = True
-            prov = _provision_signal(_combined(res))
-            saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(_combined(res))
+            _out = _combined(res)
+            witnessed |= oracle.scan(_out)                   # HARNESS reads its own markers (not the model's word)
+            prov = _provision_signal(_out)
+            saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(_out)
             print(f"[investigate] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
                   + (" TIMEOUT" if res.timed_out else "") + (" [prov-fail]" if prov else ""), flush=True)
             summ = _digest(res, tools=False)               # head/tail digest, not a blind truncation
@@ -807,7 +814,7 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
             print(f"[investigate] concluded: {verdict} after {ran} run(s)", flush=True)
             return Verdict(verdict, why, str(act.get("evidence", "")), str(act.get("cwe", "")), ran, trail,
                            methodology=str(act.get("methodology", "")),
-                           reach_witnessed=bool(act.get("reach_witnessed")))
+                           reach_witnessed=bool(act.get("reach_witnessed")), witness=sorted(witnessed))
         else:
             trail.append((f"(unknown action {kind!r})", "expected run or conclude"))
     verdict = "blocked" if (saw_prov and not saw_real) or ran == 0 else "believed"

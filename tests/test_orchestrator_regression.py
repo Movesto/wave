@@ -615,6 +615,67 @@ def test_detect_seeds_from_codemap_pins_when_notebook_is_empty(tmp_path):
     assert hits and hits[0]["why"] == "codemap sink-pin"
 
 
+def test_oracle_grades_evidence_by_class_tier():
+    from agent.orchestrator import oracle
+    # TIER 1: a harness-planted wave_HIT marker witnesses code/command execution
+    w, m, t = oracle.graded("cmd", {"wave_HIT"})
+    assert w and t == "marker" and m == "wave_HIT"
+    # TIER 2: xss requires the browser canary to have FIRED (value 1) -- mere presence is NOT enough
+    assert oracle.graded("xss", {"WAVE_RENDER_CANARY"})[0] is False
+    assert oracle.graded("xss", {"WAVE_RENDER_CANARY:1"})[0] is True
+    # TIER 3: authz/business have NO deterministic marker -> judgment (goes to the 2nd-model audit)
+    assert oracle.graded("authz", {"wave_HIT"})[2] == "judgment"
+    # a markerable class with NO marker present -> not witnessed, but still the 'marker' tier
+    assert oracle.graded("sqli", set()) == (False, "", "marker")
+    # cwe fallback when the class name is unknown
+    assert oracle.graded("", {"WAVE-SINK-SSRF"}, cwe="CWE-918")[0] is True
+
+
+def test_oracle_scan_detects_markers_and_fired_canary():
+    from agent.orchestrator import oracle
+    got = oracle.scan("log line\nWAVE-SINK-SHELL:: exec echo\nWAVE_RENDER_CANARY: 1\n")
+    assert "WAVE-SINK-SHELL" in got and "WAVE_RENDER_CANARY:1" in got
+    assert oracle.scan("WAVE_RENDER_CANARY: none") == set()     # canary present but did NOT fire
+
+
+def test_audit_confirm_harness_marker_is_tape_grade_no_model(monkeypatch):
+    # a deterministic harness marker settles a confirm -- NO second-model call is made (save the spend).
+    from agent.orchestrator import prove
+    import agent.orchestrator.audit as auditmod
+    calls = {"n": 0}
+    monkeypatch.setattr(auditmod, "audit", lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or ("confirmed", "x"))
+    rec = {"verdict": "confirmed", "harness_witnessed": True, "harness_marker": "wave_HIT"}
+    prove._audit_confirm(rec, mock.Mock(), None)
+    assert rec["verdict"] == "confirmed" and "[harness]" in rec["audit"] and calls["n"] == 0
+
+
+def test_audit_confirm_no_marker_routes_to_second_model(monkeypatch):
+    # no marker (TIER 3 / unwitnessed claim) -> the DECORRELATED second model audits; downgrade -> review.
+    from agent.orchestrator import prove
+    import agent.orchestrator.audit as auditmod
+    seen = {"model": None}
+
+    def fake_audit(model, c, rec):
+        seen["model"] = model
+        return "anomalous_state", "[audit] could not confirm exploitability"
+
+    monkeypatch.setattr(auditmod, "audit", fake_audit)
+    rec = {"verdict": "confirmed", "harness_witnessed": False, "why": "the model claims it worked"}
+    sentinel = object()
+    prove._audit_confirm(rec, mock.Mock(), sentinel)
+    assert rec["verdict"] == "anomalous_state" and seen["model"] is sentinel   # the SECOND model was used
+
+
+def test_auditor_model_falls_back_to_primary(monkeypatch):
+    from agent.orchestrator import prove
+    primary = mock.Mock(model_id="deepseek/deepseek-v4-flash-0731",
+                        api_base="https://openrouter.ai/api/v1", api_key="k")
+    monkeypatch.delenv("WAVE_AUDIT_MODEL", raising=False)
+    assert prove._auditor_model(primary) is primary            # unset -> primary (current behaviour)
+    monkeypatch.setenv("WAVE_AUDIT_MODEL", "deepseek/deepseek-v4-flash-0731")
+    assert prove._auditor_model(primary) is primary            # same id as primary -> primary
+
+
 def test_said_witnessed_recognizes_route_drive_language():
     # the model often DRIVES the real route (proving Half B) but forgets to set reach_witnessed=true -- the
     # static value-taint gate then falsely downgrades it (pyvuln cmd/sqli/path). Recognize the drive from its

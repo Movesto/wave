@@ -78,6 +78,16 @@ longer manufacture a false confirm, because a tool now proves the path.
   the current pipeline on 500 real CVEs vs ground-truth files; `bench.py` scores controlled targets.
   It is an instrument, not a decision-maker. Discipline gap: run it as a regression check after Shift A,
   not eyeball real repos.
+- **Tool-grounded witness + decorrelated 2nd-model audit (#2)** *(BUILT).* The HARNESS now reads its own
+  planted markers from the sandbox output (`oracle.py` — a class→evidence dispatch), instead of trusting the
+  model's prose. Three tiers: TIER 1 log marker (cmd/eval/deser/sqli/nosqli/ssrf/path/ssti → `WAVE-SINK-*` /
+  `wave_HIT`), TIER 2 different channel (xss → the browser canary FIRED, value 1), TIER 3 judgment
+  (authz/idor/business → no marker, stays human-review). `investigate` accumulates the markers it sees across
+  all runs onto `Verdict.witness`; `prove` grades via `oracle.graded()` and stamps `harness_witnessed`. Audit
+  routing: a deterministic marker is tape-grade → confirmed with NO model call; no marker → a DECORRELATED
+  second model (`WAVE_AUDIT_MODEL`, e.g. GLM auditing deepseek) judges the evidence, conservative on a
+  downgrade. Same OpenRouter endpoint, different model_id; falls back to the primary when unset.
+- **Notebook whiff retry (#1a)** *(BUILT, ce81c8b).* A blank note on a pin-rich file is retried once.
 - **Recall floor (detect seeds from codemap sink-pins)** *(BUILT).* Root cause found via the pyvuln/GHSA/HA
   runs: detect read ONLY the notebook's findings, so an empty/failed model note on a vulnerable file blanked
   the whole pipeline (pyvuln: notebook returned `findings:[]` for the one vulnerable file -> 0 candidates ->

@@ -20,10 +20,11 @@ Output: `wave_findings.jsonl` (per-candidate verdict, resumable) + `casefile.jso
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
-from . import briefs, codemap, reachability, recorder, repro, routes, rung1, taint
+from . import briefs, codemap, oracle, reachability, recorder, repro, routes, rung1, taint
 from . import investigate as invmod
 from .models import Candidate
 
@@ -237,10 +238,18 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     # to an observed state change -- always human-review, never a tool-witnessed `confirmed` (design + §10.7).
     if mode == "differential" and verdict == "confirmed":
         verdict = "anomalous_state"
+    # HARNESS-SIDE ORACLE (#2): the harness -- not the model -- reads its own planted markers from the sandbox
+    # output and grades the class. A TIER 1/2 marker (wave_HIT / WAVE-SINK-* / browser canary) is tape-grade
+    # proof the sink fired; TIER 3 (authz/business) has no marker -> stays a judgment for the 2nd-model audit.
+    markers = set(getattr(v, "witness", []) or [])
+    cls_name = (getattr(c, "family", "") or "").split()[0]
+    hw, hmarker, htier = oracle.graded(cls_name, markers, cwe=getattr(c, "cwe", ""))
     return {"verdict": verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
             "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
             "reach_proof": reach_proof,                       # witnessed | inferred | none (Half-B honesty)
             "driven_trust": driven_trust,                     # trust tier of the entry the model DROVE from
+            "witness": sorted(markers), "harness_witnessed": hw, "harness_marker": hmarker,
+            "oracle_tier": htier,                             # 'marker' (tape-gradable) | 'judgment' (2nd-model)
             "methodology": (getattr(v, "methodology", "") or "")[:400],   # the model's documented approach
             "_transcript": v.transcript, "_mode": mode}   # for the trace-logger (stripped before findings write)
 
@@ -420,6 +429,7 @@ def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=
     from . import trust as trustmod
     tm = trustmod.load(target) or trustmod.build(cmap, target)   # reuse the persisted trust boundary if present
     have_docker = shutil.which("docker") is not None
+    auditor = _auditor_model(model)                          # decorrelated 2nd model for the no-marker audit
     case = recorder.CaseFile(target)
     out_recs = []
     for surv in findings:
@@ -431,13 +441,7 @@ def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=
         if gate:
             rec = _apply_gate(rec, c, cmap, tm)
         rec = _desktop_authz(rec, c, target, tm)
-        if rec.get("verdict") == "confirmed":
-            from . import audit
-            av, anote = audit.audit(model, c, rec)
-            if av != "confirmed":
-                rec["verdict"] = av
-                rec["why"] = anote + " " + rec.get("why", "")
-            rec["audit"] = anote
+        _audit_confirm(rec, c, auditor)
         _record_outcome(case, hyp_id, c, rec)
         rec.pop("_transcript", None)
         rec.pop("_mode", "")
@@ -450,6 +454,39 @@ def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=
         except Exception:
             pass
     return out_recs
+
+
+def _auditor_model(primary):
+    """A DECORRELATED second model for the evidence audit (WAVE_AUDIT_MODEL) -- a different model is less
+    likely to repeat the primary's blind spot than the same model asked twice. Same OpenRouter endpoint,
+    different model_id. Falls back to the primary when unset/unavailable (current behaviour)."""
+    aid = os.environ.get("WAVE_AUDIT_MODEL")
+    if not aid or primary is None or getattr(primary, "model_id", None) == aid:
+        return primary
+    try:
+        from .model import Model
+        return Model(model_id=aid, api_base=getattr(primary, "api_base", None),
+                     api_key=getattr(primary, "api_key", None))
+    except Exception:
+        return primary
+
+
+def _audit_confirm(rec, c, auditor):
+    """Final grading of a `confirmed`: the HARNESS's deterministic marker beats everything (tape-grade, no
+    model call). Without a marker (TIER 3 judgment, or a claim with no witness) a DECORRELATED second model
+    audits it -- conservative: a downgrade verdict routes to human review. Mutates `rec` in place."""
+    if rec.get("verdict") != "confirmed":
+        return
+    if rec.get("harness_witnessed"):                        # the tape settled it -- no model needed
+        rec["audit"] = (f"[harness] deterministic witness '{rec.get('harness_marker')}' in the sandbox output "
+                        f"-- confirmed by the tool, not the model's account")
+        return
+    from . import audit                                     # no marker -> the second model judges the evidence
+    av, anote = audit.audit(auditor, c, rec)
+    if av != "confirmed":
+        rec["verdict"] = av
+        rec["why"] = anote + " " + rec.get("why", "")
+    rec["audit"] = anote
 
 
 def _is_cloud_model(model):
@@ -517,6 +554,10 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
         print("[prove] --jobs>1 needs a CLOUD model (local is single-GPU) -- running serial", flush=True)
         jobs = 1
 
+    auditor = _auditor_model(model)                          # decorrelated 2nd model for the no-marker audit
+    if auditor is not model and auditor is not None:
+        print(f"[prove] evidence audit uses a 2nd model: {getattr(auditor, 'model_id', '?')}", flush=True)
+
     # COMPUTE (parallel-safe: model API + docker, each with its own tag; no shared writes) -> a finished rec.
     def _compute(surv, tag):
         c = _to_candidate(surv, rel_index, target)
@@ -525,13 +566,7 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
         if gate:                                            # untrusted-reachability gate on confirmations
             rec = _apply_gate(rec, c, cmap, tm)
         rec = _desktop_authz(rec, c, target, tm)            # single-user desktop app: authz/IDOR is moot
-        if rec.get("verdict") == "confirmed":               # final EVIDENCE AUDIT (only high-stakes confirms)
-            from . import audit
-            av, anote = audit.audit(model, c, rec)
-            if av != "confirmed":
-                rec["verdict"] = av
-                rec["why"] = anote + " " + rec.get("why", "")
-            rec["audit"] = anote
+        _audit_confirm(rec, c, auditor)                     # harness marker settles it, else 2nd-model audit
         return c, rec
 
     # COMMIT (MAIN THREAD ONLY -- serializes all shared state: CaseFile, findings log, prior, traces).

@@ -59,3 +59,22 @@ eval/newsome.txt
 
 # archived pre-pivot legacy (moved out of root; recoverable in git history)
 _legacy/
+
+# ---- wave run artifacts (regenerable per-run output; never commit) ----
+WAVE_REPORT.md
+wave_findings.jsonl
+wave_candidates.jsonl
+wave_detect.jsonl
+wave_notebook.jsonl
+wave_notebook.md
+wave_reconcile.jsonl
+wave_map.md
+wave_trust.json
+wave_HIT
+wave_results/
+.wave_repro*
+.wave_written*
+casefile.json
+ghsa_artifacts/
+ghsa_bench_results.json
+traces/

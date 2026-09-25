@@ -15,25 +15,29 @@ no dependence on a frontier cloud model for the parts that matter.
 ## Quickstart
 
 ```bash
-# 1. install (Docker must also be running -- proofs run in throwaway containers)
-pip install -r requirements.txt
+# 1. install as a CLI (Docker must also be running -- proofs run in throwaway containers)
+pip install -e .                     # gives you the `wave` command
 
-# 2. point at a model -- LOCAL via ollama (private, the design intent):
-export WAVE_API_BASE="http://localhost:11434/v1"
-export WAVE_MODEL="hf.co/<your-gguf>:<tag>"
+# 2. point at a model ONCE (saved to ~/.wave/config -- no need to re-set it each run)
+wave config set base  "http://localhost:11434/v1"        # LOCAL via ollama (private, the design intent)
+wave config set model "hf.co/<your-gguf>:<tag>"
 #    ...or a CLOUD OpenAI-compatible endpoint (stronger, off-box -- sends code out):
-# export WAVE_API_BASE="https://openrouter.ai/api/v1"
-# export WAVE_MODEL="deepseek/deepseek-v4-flash-0731"
-# export WAVE_API_KEY="<your key>"
+# wave config set base  "https://openrouter.ai/api/v1"
+# wave config set model "deepseek/deepseek-v4-flash-0731"
+# wave config set key   "<your key>"
 
 # 3. run the whole pipeline on a repo (find -> prove -> patch)
-python -m agent.orchestrator.run all /path/to/target-repo --patch
+wave all /path/to/target-repo --patch
 ```
 
-Read the verdicts in `target-repo/wave_findings.jsonl` (and the full report in `casefile.json`). A
-`confirmed` was witnessed by a tool; `anomalous_state` needs human review; `believed`/`blocked` are unproven
-leads. It's resumable — re-run to continue. On Windows PowerShell, use `$env:WAVE_API_BASE="..."` instead of
-`export`. First run pulls a couple of Docker images (and, for XSS, a chromium image — a one-time download).
+Then read **`target-repo/wave_results/wave_report.md`** — a human-readable report of what the model found:
+what it **proved** (with the cited evidence), what **needs review**, what it **cleared as safe**, and any
+**fixes**. A `confirmed` was witnessed by a tool; `anomalous_state` needs human judgment; `believed`/`blocked`
+are unproven leads. (`wave report <repo>` regenerates it; the raw machine artifacts are `wave_findings.jsonl`
++ `casefile.json`.)
+
+It's resumable — re-run to continue. The first run pulls a couple of Docker images (and, for XSS, a chromium
+image — a one-time download).
 
 <details><summary>No model yet? Fastest path with ollama</summary>
 
@@ -71,21 +75,32 @@ TARGET REPO
    ▼  STAGE 1  EYES        tree-sitter whole-repo map + call graph + security pins;
    │                       a model "notebook" reads the pinned files into per-file notes
    ▼  STAGE 2  DETECTOR    clean-room asymmetric falsification: a fresh model instance,
-   │                       shown only the slice, tries to DISPROVE each believed finding
-   ▼  STAGE 3  PROOF LOOP  the model drives a sandbox to make the exploit happen; a tool
+   │                       shown only the slice, tries to DISPROVE each candidate. Candidates
+   │                       come from the notebook AND the map's sink-pins, so a missed note
+   │                       can't blank a file (a blank note on a pinned file is retried once)
+   ▼  STAGE 3  PROOF LOOP  the model drives a sandbox to make the exploit happen; the HARNESS
    │                       WITNESSES the effect (marker in a sink, ASan report, state delta)
    ▼  STAGE 4  PATCH       the model writes a fix; the SAME proof re-runs; certified `fixed`
                            only if the exploit demonstrably no longer fires
 ```
 
-Between the stages sit **honesty gates** that keep verdicts trustworthy:
+Between the stages sit **honesty gates** that keep verdicts trustworthy — a `confirmed` requires **both** that
+the dangerous effect was *witnessed* **and** that an attacker can *reach* it:
 
-- **Reachability gate** — a proven sink with no path from an untrusted-facing entry → human-review, not a
-  false confirm (and it flags *ambiguous* name-based call edges as low-confidence).
+- **Reachability — witnessed, not guessed** — wave doesn't just check a *path exists* on the call graph. For a
+  web route it drives the **real HTTP route** through the framework's in-process test client (Flask/FastAPI,
+  Express, NestJS, Spring, ASP.NET, Go, Rails, Laravel, Rust…), so the attacker value is *seen* reaching the
+  sink. Each confirm records `reach_proof: witnessed | inferred`. A sink reachable only via a local/CLI entry,
+  or only through an ambiguous name-based call edge, is human-review — not a false confirm.
 - **Context gate** — a browser/frontend file can't host a server-side vuln (a client `fetch` is not SSRF).
 - **Value-taint** — does the *specific* untrusted value actually reach the sink, or a sanitized copy?
-- **Evidence audit** — every `confirmed` is re-checked by a fresh clean-room skeptic + an independent second
-  proof; it upholds only what it can ground.
+- **Tool-grounded witness** — the **harness itself** reads its planted markers from the sandbox output
+  (`wave_HIT`, the instrumented-sink markers, the headless-browser canary) and grades the class, so a confirm
+  rests on the *tape*, not the model's account. Classes with no deterministic marker (IDOR / business logic)
+  stay human-review by design.
+- **Evidence audit** — a `confirmed` with **no** harness marker is re-checked by a fresh clean-room skeptic;
+  set `WAVE_AUDIT_MODEL` to a **different** model (e.g. GLM auditing deepseek) for a *decorrelated* second
+  opinion. It upholds only what it can ground — and it's never even called on a harness-witnessed confirm.
 
 ---
 
@@ -117,51 +132,97 @@ Classes it can't yet witness (missing deps, business logic beyond IDOR, gadget c
 
 ### 1. Prerequisites
 
-- **Python** 3.11+ and the repo's deps (`pip install -r requirements.txt`), including `tree-sitter-language-pack`.
+- **Python** 3.11+; install the CLI with `pip install -e .` (pulls `tree-sitter-language-pack`, `requests`,
+  `PyYAML`). This gives you the `wave` command.
 - **Docker** running (the proof loop executes everything in throwaway containers — never on your host).
 - **A model** (pick one, next section).
 
-### 2. Point it at a model
+### 2. Point it at a model (once)
+
+`wave config set` saves to `~/.wave/config`, so you set it a single time and never pass env again. (An
+existing `WAVE_*` env var or `.env` still wins if present.)
 
 **Local (default, private — the design intent):** an ollama server serving a capable local model.
 
-```powershell
-$env:WAVE_API_BASE = "http://localhost:11434/v1"
-$env:WAVE_MODEL    = "hf.co/<your-gguf>:<tag>"     # e.g. a Qwen3-family 27B
+```bash
+wave config set base  "http://localhost:11434/v1"
+wave config set model "hf.co/<your-gguf>:<tag>"     # e.g. a Qwen3-family 27B
 ```
 
 **Cloud (stronger reasoning, off-box — for testing / hard targets):** any OpenAI-compatible endpoint, e.g.
-OpenRouter. Note this sends code off-box; use it deliberately.
+OpenRouter. This sends code off-box; use it deliberately.
 
-```powershell
-$env:WAVE_API_BASE = "https://openrouter.ai/api/v1"
-$env:WAVE_MODEL    = "deepseek/deepseek-v4-flash-0731"
-$env:WAVE_API_KEY  = "<your OpenRouter key>"
+```bash
+wave config set base  "https://openrouter.ai/api/v1"
+wave config set model "deepseek/deepseek-v4-flash-0731"
+wave config set key   "<your OpenRouter key>"
+```
+
+`wave config show` prints the current settings.
+
+**Optional — a decorrelated second opinion (recommended for cloud runs):** set a **different** model as the
+evidence auditor via `WAVE_AUDIT_MODEL`. It judges only the `confirmed` findings that lack a deterministic
+harness marker (the judgment calls — IDOR, business logic, or an observed-but-un-marked effect), so two
+*independent* models must agree before such a finding stands. It costs **nothing** on the marker-witnessed
+confirms (the harness tape settles those with no model call), and falls back to the primary model when unset.
+
+```bash
+export WAVE_AUDIT_MODEL="z-ai/glm-5.3-flash"   # GLM audits the primary (e.g. deepseek) on the no-marker confirms
 ```
 
 ### 3. Run the whole pipeline
 
-```powershell
-python -m agent.orchestrator.run all C:\path\to\target-repo --patch
+```bash
+wave all /path/to/target-repo --patch
 ```
 
-Useful flags: `--online` (give the model opt-in `web_search`/`web_read` for unfamiliar APIs), `--patch`
-(run Stage 4 — dry-run by default; add `--write` to keep a patch that passed both gates), `--notes-budget N`
-/ `--detect-budget N` / `--prove-budget N` (bound each stage; the model *selects* which files to deep-read on
-large repos).
+Useful flags:
+- `--all-files` — deep-read **every** parsed source file, not just the ones with a recognized sink pin.
+  Pinning becomes a priority *order* rather than a filter, so a vuln in a file with no matched sink pattern is
+  still read. Best for small/medium repos; cost scales with repo size (this is the "scan everything" mode).
+- `--interactive` — before deep-reading, wave proposes the file set and lets you **prune or extend** it
+  (`drop N,M` / `add <substr>` / `list` / `quit`); tree-sitter effectively proposes the file list and you
+  curate it. Without it, wave auto-proceeds.
+- `--notes-budget N` / `--detect-budget N` / `--prove-budget N` — bound each stage. For the notebook: **at or
+  below N, ALL pinned files are read** (full coverage, default 40); only when pinned files *exceed* N does the
+  model select the N worth deep-reading. Lower it on a monorepo, raise it for full small-repo coverage.
+- `--online` — give the model opt-in `web_search`/`web_read` (network egress) for unfamiliar APIs; off by
+  default (the box stays local).
+- `--jobs N` — run **N model tasks at the same time** across every model-heavy stage — the **notebook**
+  (Stage 1b, the slow one on big repos), **detect**, **prove**, **patch**, and deep-reconcile (default **1** =
+  serial). You must give a **number** — there is no "use all cores" mode; `N` is the max concurrency.
+  - **Cloud model only.** Parallelism runs N model calls + N docker sandboxes at once. That's fine for a cloud
+    model (deepseek/OpenRouter), so it's enabled there. A **local** single-GPU model can't generate in
+    parallel, so wave **auto-falls back to `--jobs 1`** and prints a note.
+  - **Sizing (per box, not cores):** each proof uses a light container (~0.5 GB) but a *compiled build*
+    (cargo/gradle/npm) can spike ~2 GB + 2 CPUs. On a **32 GB / 6-core** box, **`--jobs 4`** is the sweet spot;
+    drop to `2` for repos full of compiled-language builds, go up to `6` for light Python/JS. **Dependency
+    installs** (`pip install <bigpkg>` / `npm install`) are serialized across jobs by default (they're
+    memory-heavy — 4 at once can OOM the box); raise with `WAVE_INSTALL_JOBS=2` if you have RAM to spare.
+  - It's a **speed** knob only (turns the ~45-min serial runs / timeouts into ~4× faster) — it does **not**
+    change *which* findings you get. Distinct from the `--*-budget` flags below, which set *how many* items each
+    stage looks at.
+- `--patch` — run Stage 4 (dry-run by default; add `--write` to keep a patch that passed both gates).
+- `--no-reach-gate` — disable the reachability gate (use on libraries with public-API entry points, no routes).
 
-Outputs land in the target repo: `wave_map.md`, `wave_notebook.md/.jsonl`, `wave_candidates.jsonl`,
-`wave_findings.jsonl` (the verdicts), and `casefile.json` (the full investigation report). Every stage is
-**resumable** — re-run to continue; a terminal verdict is skipped, a `believed`/`blocked` lead is retried.
+Read **`<repo>/wave_results/wave_report.md`** — the human-readable findings (regenerate anytime with
+`wave report <repo>`). The machine artifacts also land in the repo: `wave_findings.jsonl` (verdicts) and
+`casefile.json` (full investigation report). Every stage is **resumable** — re-run to continue; a terminal
+verdict is skipped, a `believed`/`blocked` lead is retried.
 
 ### 4. Or run a single stage
 
-```powershell
-python -m agent.orchestrator.run eyes   <repo> [--notes]   # map + deterministic index; --notes runs the notebook
-python -m agent.orchestrator.run detect <repo>             # clean-room falsify the notebook's findings
-python -m agent.orchestrator.run prove  <repo> [--online]  # the confirmation ladder
-python -m agent.orchestrator.run patch  <repo> [--write]   # patch + reverify the confirmed findings
+```bash
+wave eyes   <repo> [--notes] [--all-files] [--interactive]  # map + index; --notes runs the notebook
+wave detect <repo>                                          # clean-room falsify the notebook's findings
+wave prove  <repo> [--online]                               # the confirmation ladder
+wave patch  <repo> [--write]                                # patch + reverify the confirmed findings
+wave report <repo>                                          # (re)generate the readable report
 ```
+
+`wave eyes <repo>` with no flags is instant (deterministic map + attack-surface index, no model). Add
+`--notes` to run the model's per-file notebook; combine with `--all-files` to read the whole repo or
+`--interactive` to curate the file set first. Model/endpoint settings live under `wave config set`/`wave config show`.
 
 ---
 

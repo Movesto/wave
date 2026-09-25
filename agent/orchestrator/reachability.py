@@ -20,8 +20,12 @@ from collections import deque
 # proven in frontend code is a mislabel, not a vuln (the client/server analogue of the reachability gate). ---
 
 # server-side classes that make no sense in the browser (xss + redirect DO occur client-side, so not here)
-SERVER_ONLY_CLASSES = {"ssrf", "sqli", "nosqli", "cmd", "path", "deser"}
-SERVER_ONLY_CWE = {"CWE-918", "CWE-89", "CWE-943", "CWE-78", "CWE-22", "CWE-502", "CWE-95"}
+# authorization is enforced SERVER-side: a browser/React click-handler that forwards an id is not where the
+# authz check lives (the backend command is), so authz/IDOR in a frontend file is misplaced -- treat it like
+# the other server-only classes (MemWhale flagged approveLesson/deleteLesson in App.tsx this way).
+SERVER_ONLY_CLASSES = {"ssrf", "sqli", "nosqli", "cmd", "path", "deser", "authz", "idor", "access", "bola"}
+SERVER_ONLY_CWE = {"CWE-918", "CWE-89", "CWE-943", "CWE-78", "CWE-22", "CWE-502", "CWE-95",
+                   "CWE-639", "CWE-284", "CWE-862", "CWE-863", "CWE-566"}
 
 # browser-only globals -- their presence in the source is a reliable "this runs in a browser" signal (Node
 # has no window/document/localStorage), and catches a plain .js util that no path/suffix rule would.
@@ -48,30 +52,80 @@ def is_frontend(path, source="", imports=()):
         return True
     return bool(source and _BROWSER_SIGNAL.search(source))
 
-# decorator / name signals that a function receives external, attacker-controllable input DIRECTLY
-_ROUTE_HINTS = ("route", ".get(", ".post(", ".put(", ".delete(", ".patch(", "app.", "router.", "blueprint",
-                "@get", "@post", "@put", "@delete", "@patch", "endpoint", "api_route", "websocket", "on_event")
-_ENTRY_NAMES = {"main", "handler", "handle", "lambda_handler", "handle_request", "on_message", "on_request"}
+# decorator / attribute-macro / annotation signals that a function receives external input DIRECTLY.
+# Matched (lowercased) against a function's captured decorators -- codemap now captures Rust #[get], Java
+# @GetMapping, C#/PHP [Http*]/#[Route] as decorators too, so these cover the non-py/js web frameworks.
+# CLI-command decorators (Typer/Click/etc.) look like a route but are a LOCAL entry -- a command run from a
+# shell, whose args are dev/CI-supplied, not remote input. Checked BEFORE _ROUTE_HINTS so `@app.command()`
+# (which contains "app.") is not mistaken for a web route (the fastapi scripts/docs.py false-confirm).
+_CLI_ENTRY_DECOS = ("command(", "@command", ".callback(", "click.", "@click", "@group", "@cli.", "add_command",
+                    "typer", "argh", "@arg(", "console_script")
+_ROUTE_HINTS = ("route", ".get(", ".post(", ".put(", ".delete(", ".patch(", "blueprint",
+                "@get", "@post", "@put", "@delete", "@patch", "endpoint", "api_route", "websocket", "on_event",
+                "#[get", "#[post", "#[put", "#[delete", "#[patch", "#[head", "#[options", "#[route",  # rust
+                "@getmapping", "@postmapping", "@putmapping", "@deletemapping", "@patchmapping",       # spring
+                "@requestmapping",
+                "[httpget", "[httppost", "[httpput", "[httpdelete", "[httppatch", "[route(", "#[route",  # c#/symfony
+                # --- other front doors: RPC / GraphQL / messaging / realtime / serverless / IPC (all carry
+                # external input). Distinctive annotation strings -> near-zero false-positive risk. ---
+                "@messagepattern", "@eventpattern", "@subscribemessage", "@websocketgateway", "@grpcmethod",  # nestjs
+                "@query", "@mutation", "@subscription", "@resolver", "@fieldresolver", "@resolvefield",       # graphql
+                "@kafkalistener", "@rabbitlistener", "@jmslistener", "@sqslistener", "@streamlistener",        # jvm msg
+                "@messagemapping", "@subscribemapping", "@rabbithandler",                                      # spring ws
+                "@task", "shared_task", "@periodic_task", "@celery", "@app.task",                              # celery
+                "functions_framework", "@functionname", "queue_trigger", "topic_trigger", "servicebus",        # gcp/azure
+                "blob_trigger", "event_grid_trigger", "timer_trigger", "cosmos_trigger", "eventhub_trigger",    # azure fns
+                "tauri::command", "#[command",                                                                  # tauri IPC
+                "wave:event-handler")                        # synthetic tag: a fn registered as an emitter/socket handler
+# Entry TRUST TIERS (Shift 3, docs/trust_boundary_plan.md). 'remote' = a network/route/event handler that
+# carries ATTACKER input. 'local' = a process/CLI entry -- a script's main() run from a shell, whose input is
+# argv/local and whose operator is a developer/CI, NOT a remote attacker. A `confirmed` needs a REMOTE path;
+# a merely-LOCAL reach means remote exploitability is NOT established -> human review (fail-safe default).
+# realtime/messaging handler NAMES (socket.io/ws/consumer conventions) -- distinctive enough to be low-FP.
+_REMOTE_ENTRY_NAMES = {"handler", "handle", "lambda_handler", "handle_request", "on_message", "on_request",
+                       "onmessage", "on_data", "handle_message", "message_handler", "handle_event",
+                       "resolver", "resolve_reference"}
+_LOCAL_ENTRY_NAMES = {"main"}                               # a CLI/process main() is NOT a remote attack surface
+
+
+def entry_trust(func):
+    """The trust level of an entry point: 'remote' (route decorator or a network/event handler name),
+    'local' (a CLI command decorator, or a bare process main()), or None (not an entry). CLI-command
+    decorators are checked FIRST so a Typer/Click `@app.command()` is a LOCAL entry, not a web route."""
+    decs = " ".join(getattr(func, "decorators", None) or []).lower()
+    if any(h in decs for h in _CLI_ENTRY_DECOS):            # Typer/Click CLI command = local (argv, not remote)
+        return "local"
+    if any(h in decs for h in _ROUTE_HINTS):
+        return "remote"
+    name = (getattr(func, "name", "") or "").lower()
+    if name in _REMOTE_ENTRY_NAMES:
+        return "remote"
+    if name in _LOCAL_ENTRY_NAMES:
+        return "local"
+    return None
 
 
 def is_untrusted_entry(func):
     """True if `func` takes external/attacker input directly: a decorated HTTP route, or a
     main/handler/consumer entry. (Merely being `exported` is NOT enough -- a library's public API is called
-    by trusted code; that is exactly the eval-runner false positive.)"""
-    decs = " ".join(getattr(func, "decorators", None) or []).lower()
-    if any(h in decs for h in _ROUTE_HINTS):
-        return True
-    return (getattr(func, "name", "") or "").lower() in _ENTRY_NAMES
+    by trusted code; that is exactly the eval-runner false positive.) See entry_trust for the tier."""
+    return entry_trust(func) is not None
 
 
 def reaches_untrusted_entry(cmap, sink_name, max_hops=12):
-    """BFS BACKWARD over the call graph from `sink_name` to an untrusted-facing entry.
-    Returns (entry_func, path) where path is [entry, ..., sink] names; or (None, None) if none is reached."""
+    """BFS BACKWARD over the call graph from `sink_name` to an untrusted-facing entry. PREFERS a REMOTE entry:
+    a LOCAL/CLI entry is remembered as a fallback but the search continues, so a sink reachable from BOTH a
+    route and a main() is reported REMOTE. Returns (entry_func, path, trust) with trust in {'remote','local'},
+    or (None, None, None) if no entry is reached."""
     if not sink_name:
-        return None, None
+        return None, None, None
+    fallback = None                                         # a local entry found -> keep looking for a remote one
     for f in cmap.funcs.get(sink_name, []):                 # the sink function is itself an entry?
-        if is_untrusted_entry(f):
-            return f, [sink_name]
+        t = entry_trust(f)
+        if t == "remote":
+            return f, [sink_name], "remote"
+        if t == "local" and fallback is None:
+            fallback = (f, [sink_name], "local")
     seen = {sink_name}
     q = deque([[sink_name]])
     while q:
@@ -83,10 +137,13 @@ def reaches_untrusted_entry(cmap, sink_name, max_hops=12):
                 continue
             seen.add(caller)
             for f in cmap.funcs.get(caller, []):
-                if is_untrusted_entry(f):
-                    return f, [caller] + path
+                t = entry_trust(f)
+                if t == "remote":
+                    return f, [caller] + path, "remote"
+                if t == "local" and fallback is None:
+                    fallback = (f, [caller] + path, "local")
             q.append([caller] + path)
-    return None, None
+    return fallback if fallback else (None, None, None)
 
 
 def _ambiguous_names(cmap, path):
@@ -96,19 +153,183 @@ def _ambiguous_names(cmap, path):
     return [n for n in path if len(cmap.funcs.get(n, [])) > 1]
 
 
-def gate(cmap, sink_func_name):
-    """Classify a proven sink by reachability. Returns (reachable: bool, confidence: str, note: str).
-    confidence 'high' = a clean chain with no ambiguous (common-name) edges; 'low' = the ONLY path relies on
-    an ambiguous name-based edge (likely a false chain -- caller of the intrinsic-sink bar in prove)."""
-    entry, path = reaches_untrusted_entry(cmap, (sink_func_name or "").split("(")[0].strip())
+# --- Binding-aware reachability (fixes the §10.1 name-collision false chains) -----------------------------
+# The name-based graph links `execSync`-in-file-A to callers of `execSync`-in-file-B, and links a library
+# member call `childProcess.execSync(...)` to a same-named user function. File-anchor the walk instead: a
+# backward edge binds to OUR definition (name in file F) only when the call plausibly targets it.
+
+def _norm(p):
+    return str(p or "").replace("\\", "/")
+
+
+def _bind(cmap):
+    """(def_files, funcat) indexes, memoized on the cmap. def_files: name -> {files defining it} (functions
+    AND class methods). funcat: (name, file) -> Func, for entry_trust at a specific definition."""
+    b = getattr(cmap, "_bind_cache", None)
+    if b is not None:
+        return b
+    from collections import defaultdict
+    def_files, funcat = defaultdict(set), {}
+    for name, fs in cmap.funcs.items():
+        for f in fs:
+            fp = _norm(getattr(f, "file", ""))
+            if fp:
+                def_files[name].add(fp)
+                funcat[(name, fp)] = f
+    for cl in cmap.classes.values():
+        for c in cl:
+            for m in getattr(c, "methods", []):
+                nm, fp = getattr(m, "name", ""), _norm(getattr(m, "file", ""))
+                if nm and fp:
+                    def_files[nm].add(fp)
+                    funcat[(nm, fp)] = m
+    b = (def_files, funcat)
+    try:
+        cmap._bind_cache = b
+    except Exception:
+        pass
+    return b
+
+
+def reaches_untrusted_entry_bound(cmap, sink_name, sink_file, max_hops=12):
+    """Binding-aware backward BFS over (name, file) nodes. An edge caller(cfile)->name binds to OUR def (name
+    in tfile) only if: a NON-self member call (`obj.name()`) came from the SAME file (else it's a different
+    object's / library's method); a bare/self call resolves when the name is defined in ONE file OR cfile==tfile
+    (same-file). Prefers a REMOTE entry, falls back to LOCAL. Returns (entry_func, path_names, trust)."""
+    from collections import deque
+    def_files, funcat = _bind(cmap)
+    sink_file = _norm(sink_file)
+
+    def binds(cfile, recv, name, tfile):
+        cfile = _norm(cfile)
+        if recv == "other":                                 # obj.name()/Module.name() -> only a same-file def
+            return cfile == tfile
+        return len(def_files.get(name, ())) <= 1 or cfile == tfile   # bare/self: unique name or same-file
+
+    start = (sink_name, sink_file)
+    f0 = funcat.get(start)
+    if f0 is not None and entry_trust(f0) == "remote":
+        return f0, [sink_name], "remote"
+    fallback = (f0, [sink_name], "local") if (f0 is not None and entry_trust(f0) == "local") else None
+    seen, q = {start}, deque([[start]])
+    while q:
+        path = q.popleft()
+        if len(path) > max_hops:
+            continue
+        cname, cfile_cur = path[0]
+        for (caller, cfile, recv) in cmap.call_sites.get(cname, []):
+            if not binds(cfile, recv, cname, cfile_cur):    # this call targets a DIFFERENT def -> skip
+                continue
+            node = (caller, _norm(cfile))
+            if node in seen:
+                continue
+            seen.add(node)
+            cf = funcat.get(node)
+            t = entry_trust(cf) if cf else None
+            names = [n for n, _f in ([node] + path)]
+            if t == "remote":
+                return cf, names, "remote"
+            if t == "local" and fallback is None:
+                fallback = (cf, names, "local")
+            q.append([node] + path)
+    return fallback if fallback else (None, None, None)
+
+
+def gate(cmap, sink_func_name, sink_file=None):
+    """Classify a proven sink by reachability. Returns (reachable, confidence, note, trust). With `sink_file`
+    the walk is BINDING-AWARE (file-anchored -- a name-collision in another file can't manufacture a chain);
+    without it, the legacy name-based walk. trust = the reached entry's tier ('remote'|'local'): a 'local'
+    (CLI/process) reach means remote exploitability is NOT established -> prove downgrades to review."""
+    name = (sink_func_name or "").split("(")[0].strip()
+    if sink_file is not None:
+        entry, path, trust = reaches_untrusted_entry_bound(cmap, name, sink_file)
+    else:
+        entry, path, trust = reaches_untrusted_entry(cmap, name)
     if entry is None:
         return False, "high", (
-            "sink PROVEN to fire, but no path from an untrusted-facing entry (route / CLI / handler) reaches "
-            "it -- may be internal/intended; needs human review (function-level, name-based)")
+            "sink PROVEN to fire, but no path from an untrusted-facing entry (route / handler) reaches it -- "
+            "may be internal/intended; needs human review (function-level, name-based)"), None
     ambig = _ambiguous_names(cmap, path)
     conf = "low" if ambig else "high"
-    note = f"reachable from untrusted entry {entry.name} via {'->'.join(path)}"
+    note = f"reachable from {trust} entry {entry.name} via {'->'.join(path)}"
     if conf == "low":
         note += (f"  [LOW confidence: {sorted(set(ambig))} is defined in multiple places -- this name-based "
                  f"call edge may be false (open Q 10.1)]")
-    return True, conf, note
+    return True, conf, note, trust
+
+
+# --- Desktop-app context: a Tauri/Electron app is single-user + local, so there is NO multi-tenant
+# authorization boundary -- an IDOR/authz "finding" there is usually moot (the user owns their own data).
+# Injection classes still matter (untrusted files, a synced/remote backend), so only authz is downgraded.
+import functools
+from pathlib import Path as _Path
+
+_DESKTOP_SKIP = {"node_modules", ".git", "target", "dist", "build", "vendor", ".venv", "venv"}
+_MODULE_MANIFESTS = ("build.gradle", "build.gradle.kts", "pom.xml", "package.json", "Cargo.toml",
+                     "pyproject.toml", "go.mod", "composer.json", "Gemfile")
+
+# a file that IS a server/web endpoint -- a real multi-tenant boundary where authz matters, even in a repo
+# that ALSO ships a desktop build (the Stirling app/saas case). Overrides the desktop-authz downgrade.
+_SERVER_ENDPOINT = re.compile(
+    r"@RestController|@Controller\b|@(Get|Post|Put|Delete|Patch|Request)Mapping|@PathVariable|"
+    r"HttpServletRequest|@app\.(route|get|post|put|delete|patch)|@router\.|@blueprint|APIRouter\(|"
+    r"FastAPI\(|Flask\(|express\(\)|\brouter\.(get|post|put|delete)\(|app\.(get|post|put|delete)\(", re.I)
+
+
+def is_server_endpoint(path, source=""):
+    """True when the file exposes an HTTP/server endpoint (route decorator / servlet / framework router). Such
+    a file is a real multi-tenant boundary -- authz applies there regardless of any sibling desktop build."""
+    if not source:
+        try:
+            source = _Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+    return bool(_SERVER_ENDPOINT.search(source))
+
+
+def _module_root(file, repo_root):
+    """The nearest ancestor dir (within repo_root) that has a build manifest -- the finding's MODULE root; else
+    repo_root. Lets desktop-ness be judged per-module so a web module isn't tagged desktop by a sibling build."""
+    root = _Path(repo_root).resolve()
+    try:
+        cur = _Path(file).resolve()
+        cur = cur.parent if cur.suffix else cur
+    except Exception:
+        return root
+    while True:
+        if any((cur / m).exists() for m in _MODULE_MANIFESTS):
+            return cur
+        if cur == root or root not in cur.parents:
+            return root
+        cur = cur.parent
+
+
+@functools.lru_cache(maxsize=128)
+def _detect_desktop(root):
+    """Tauri/Electron markers anywhere under `root` (a repo or a single module). Cached per path."""
+    root = _Path(root)
+    try:
+        if (root / "src-tauri").is_dir():                    # Tauri's conventional backend dir
+            return True
+        for ct in list(root.rglob("Cargo.toml"))[:30]:       # `tauri` as a dependency
+            if any(s in ct.parts for s in _DESKTOP_SKIP):
+                continue
+            if re.search(r'(?im)^\s*tauri\s*=', ct.read_text(encoding="utf-8", errors="replace")):
+                return True
+        for pj in list(root.rglob("package.json"))[:30]:     # electron / @tauri-apps in package.json
+            if any(s in pj.parts for s in _DESKTOP_SKIP):
+                continue
+            t = pj.read_text(encoding="utf-8", errors="replace").lower()
+            if '"electron"' in t or "@tauri-apps" in t:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def is_desktop_app(target, file=None):
+    """Desktop (single-user Tauri/Electron) context. With `file`, judged for the MODULE containing that file
+    (so a web module in a repo that ALSO ships a desktop build is NOT mislabeled desktop). Without `file`,
+    whole-repo (legacy). Deterministic; cached."""
+    root = _module_root(file, target) if file else _Path(target)
+    return _detect_desktop(str(root))

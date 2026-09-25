@@ -6,8 +6,10 @@ More stages (provision, auth, exploit, oracle, remediate) land as the loop is bu
 """
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
 # The model can emit non-cp1252 Unicode (e.g. a non-breaking hyphen U+2011); a bare print() of it to a
 # Windows cp1252 console raises UnicodeEncodeError and kills the whole run. Force UTF-8 (replace on any
@@ -142,22 +144,31 @@ def cmd_eyes(args):
     out_dir = str(__import__("pathlib").Path(args.out).parent) if args.out else None
     pinned, per_file, budget = res["pinned"], res["per_file"], args.notes_budget
 
-    targets = None                                         # None -> read all pinned (density order)
-    if len(pinned) > budget:                               # large repo: let the model pick what to deep-read
+    pinset = set(pinned)
+    all_src = pinned + [p for p in per_file if p not in pinset]   # pinned-first, then the rest
+    if args.all_files:                                     # completeness: read EVERY source file
+        targets = all_src
+        print(f"\nALL-FILES: reading every source file ({len(targets)}); pinning is priority order only")
+    elif len(pinned) > budget:                             # large repo: let the model pick what to deep-read
         print(f"\nSELECTION: {len(pinned)} pinned files > budget {budget} — model picks the "
               f"{budget} worth deep-reading ...")
         picks = notebook.select_targets(model, args.target, per_file, pinned, budget, index=idx)
-        print(f"\nProposed ({len(picks)} of {len(pinned)} pinned):")
+        targets = [pk["path"] for pk in picks]
+    else:
+        targets = pinned                                   # read every pinned file (budget covers it)
+    if args.interactive:                                   # propose the read set; user prunes/extends
+        from .repomap import _rel
+        picks = [{"file": _rel(args.target, p), "path": p,
+                  "reason": ("pinned" if p in pinset else "unpinned")} for p in targets]
+        print(f"\nProposed read set ({len(picks)} files):")
         for n, pk in enumerate(picks, 1):
-            print(f"  {n:>2} {pk['file']}  — {pk['reason'][:80]}")
-        if args.interactive:
-            picks = _steer(picks, pinned, args.target)
+            print(f"  {n:>2} {pk['file']}  ({pk['reason']})")
+        picks = _steer(picks, all_src, args.target)        # add-pool = ALL files
         targets = [pk["path"] for pk in picks]
 
-    n_read = len(targets) if targets is not None else min(len(pinned), budget)
-    print(f"\nNOTEBOOK: reading {n_read} files (persisted + resumable)")
+    print(f"\nNOTEBOOK: reading {len(targets)} files (persisted + resumable)")
     notes, paths = notebook.read_notes(model, args.target, per_file, pinned, budget=budget,
-                                       out_dir=out_dir, targets=targets)
+                                       out_dir=out_dir, targets=targets, jobs=getattr(args, "jobs", 1))
     total = sum(len(n["findings"]) for n in notes)
     print(f"\nnotebook -> {paths['md']}  ({len(notes)} files noted, {total} findings)")
 
@@ -170,7 +181,7 @@ def cmd_detect(args):
     out_dir = str(Path(args.notebook).parent) if args.notebook else args.target
     model = Model()
     survivors, refuted, paths = detector.run(model, args.target, notebook_path=args.notebook,
-                                             budget=args.budget, out_dir=out_dir)
+                                             budget=args.budget, out_dir=out_dir, jobs=getattr(args, "jobs", 1))
     print(f"\nDETECTOR (clean-room falsification): {len(survivors)} survived, {len(refuted)} refuted")
     print(f"\nSURVIVORS -> {paths['candidates']}  (Stage 3 worklist, most-severe first):")
     for r in survivors:
@@ -189,7 +200,8 @@ def cmd_prove(args):
     out_dir = str(Path(args.candidates).parent) if args.candidates else args.target
     model = Model()
     by, paths = prove.run(model, args.target, candidates_path=args.candidates, budget=args.budget,
-                          out_dir=out_dir, gate=not args.no_reach_gate, online=args.online)
+                          out_dir=out_dir, gate=not args.no_reach_gate, online=args.online,
+                          jobs=getattr(args, "jobs", 1))
     conf, anom, refu = by["confirmed"], by["anomalous_state"], by["refuted"]
     blk, bel = by["blocked"], by["believed"]
     print(f"\nPROOF LOOP: {len(conf)} confirmed, {len(anom)} anomalous-state, {len(refu)} refuted, "
@@ -212,7 +224,7 @@ def cmd_patch(args):
     out_dir = str(Path(args.findings).parent) if args.findings else args.target
     model = Model()
     results, paths = patchmod.run(model, args.target, findings_path=args.findings, budget=args.budget,
-                                  out_dir=out_dir, write=args.write)
+                                  out_dir=out_dir, write=args.write, jobs=getattr(args, "jobs", 1))
     fixed = [r for r in results if r["status"] == "fixed"]
     unver = [r for r in results if r["status"] == "patch-unverified"]
     rej = [r for r in results if r["status"] not in ("fixed", "patch-unverified")]
@@ -226,6 +238,50 @@ def cmd_patch(args):
         if r.get("gate_a"):
             print(f"      Gate A (exploit re-fired): {r['gate_a']}  -- {r.get('gate_a_note', '')[:80]}")
             print(f"      Gate B (still loads):      {r['gate_b']}  -- {r.get('gate_b_note', '')[:60]}")
+
+
+def cmd_reconcile(args):
+    from . import reconcile as reconcilemod
+    model = None
+    if getattr(args, "deep", False):                        # Phase 2/3: model reconcile + look-alike re-prove
+        from .model import Model
+        model = Model()
+    reconciled, log = reconcilemod.run(args.target, findings_path=args.findings, model=model,
+                                       online=getattr(args, "online", False), jobs=getattr(args, "jobs", 1))
+    contradictions = [e for e in log if e["action"] == "contradiction"]
+    reproved = [e for e in log if e["action"] == "reinvestigated"]
+    print(f"\nREVIEW & RECONCILE: {len(reconciled)} findings; "
+          f"{len(contradictions)} contradiction(s) resolved"
+          + (f", {len(reproved)} re-investigated" if model is not None else ""))
+    for e in contradictions:
+        print(f"  [contradiction] {e['file']}:{e['where']}  {e['verdicts']} -> kept '{e['kept']}'")
+    for e in reproved:
+        print(f"  [re-investigated] {e['ref']}  {e['from']} -> {e['to']}")
+    # regenerate the readable report off the reconciled set
+    from . import report as _report
+    _report.generate(args.target)
+
+
+def cmd_trust(args):
+    from . import codemap, trust as trustmod
+    cmap = codemap.build(args.target)
+    tm = trustmod.build(cmap, args.target)
+    if getattr(args, "deep", False):                        # Shift 2: model refines web modules (safe-direction)
+        from .model import Model
+        tm = trustmod.enrich(Model(), tm, cmap)
+    trustmod.save(tm, args.target)
+    print(trustmod.summary(tm))
+    if tm.refined:
+        print("\nModel-refined (web -> more trusted):")
+        for mod, why in tm.refined.items():
+            print(f"  {mod}: {why}")
+    print("\nModules (deployment context):")
+    for mod, ctx in sorted(tm.modules.items(), key=lambda kv: kv[0]):
+        print(f"  [{ctx:8}] {mod}")
+    print(f"\nUntrusted entry points ({len(tm.entries)}):")
+    for name, e in sorted(tm.entries.items(), key=lambda kv: (kv[1]['trust'] != 'remote', kv[0]))[:60]:
+        print(f"  [{e['trust']:6} {e['kind']:8}] {name}")
+    print("\nwrote wave_trust.json")
 
 
 def _banner(n, title, detail=""):
@@ -253,25 +309,39 @@ def cmd_all(args):
     print(f"[all] map done: {s['files']} files, {s['pinned_files']} pinned, {s['sink_pins']} sink-pins", flush=True)
     idx = notebook.ledger_index(res["cmap"], t, res["per_file"], res["pinned"])
     pinned, per_file = res["pinned"], res["per_file"]
-    targets = None
-    if len(pinned) > args.notes_budget:
+    pinset = set(pinned)
+    all_src = pinned + [p for p in per_file if p not in pinset]   # pinned-first, then the rest
+    if args.all_files:                                       # completeness: read EVERY source file
+        targets = all_src
+        print(f"[all] ALL-FILES: reading every source file ({len(targets)}); pinning is priority order only",
+              flush=True)
+    elif len(pinned) > args.notes_budget:
         print(f"[all] {len(pinned)} pinned > budget {args.notes_budget} -- MODEL is selecting which files to "
               f"deep-read (one model call) ...", flush=True)
         picks = notebook.select_targets(model, t, per_file, pinned, args.notes_budget, index=idx)
-        if args.interactive:
-            picks = _steer(picks, pinned, t)
         targets = [pk["path"] for pk in picks]
         print(f"[all] selected {len(targets)} of {len(pinned)} pinned files to deep-read", flush=True)
+    else:
+        targets = pinned                                     # read every pinned file (budget covers it)
+    if args.interactive:                                     # propose the read set; user prunes/extends
+        from .repomap import _rel
+        picks = [{"file": _rel(t, p), "path": p,
+                  "reason": ("pinned" if p in pinset else "unpinned")} for p in targets]
+        for n, pk in enumerate(picks, 1):
+            print(f"  {n:>2} {pk['file']}  ({pk['reason']})")
+        picks = _steer(picks, all_src, t)                    # add-pool = ALL files
+        targets = [pk["path"] for pk in picks]
     print(f"[all] notebook: the model now READS each selected file into notes (one model call each -- "
           f"watch [notebook] i/N below) ...", flush=True)
-    notes, npaths = notebook.read_notes(model, t, per_file, pinned, budget=args.notes_budget, targets=targets)
+    notes, npaths = notebook.read_notes(model, t, per_file, pinned, budget=args.notes_budget, targets=targets,
+                                        jobs=getattr(args, "jobs", 1))
     total = sum(len(n["findings"]) for n in notes)
     print(f"[all] notebook DONE: {len(notes)} files noted, {total} findings -> {npaths['md']}", flush=True)
 
     # Stage 2 -- clean-room falsification -> survivors
     _banner(2, "DETECTOR: clean-room falsify each finding",
             f"one fresh model call per finding (up to {args.detect_budget}) -- watch [detect] i/N below ...")
-    survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget)
+    survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget, jobs=getattr(args, "jobs", 1))
     print(f"[all] detect DONE: {len(survivors)} survived, {len(refuted)} refuted -> {dpaths['candidates']}",
           flush=True)
     if not survivors:
@@ -282,9 +352,23 @@ def cmd_all(args):
     _banner(3, "PROOF LOOP: prove the survivors",
             f"canary + model investigation per survivor (up to {args.prove_budget}) -- watch [prove]/"
             f"[investigate] below; first XSS builds the browser image once ...")
-    by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online)
+    by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online,
+                        enrich_trust=getattr(args, "deep_reconcile", False), jobs=getattr(args, "jobs", 1))
     print(f"[all] prove DONE: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
           f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
+
+    # Stage 5 -- Review & Reconcile: dedup by location + resolve contradictions (before patch/report so patch
+    # acts on the reconciled set). Deterministic; never overturns a witnessed verdict. Runs after prove.
+    if not getattr(args, "no_reconcile", False):
+        print("\n" + "=" * 66 + "\n== REVIEW & RECONCILE  — dedup findings + resolve contradictions\n" + "=" * 66,
+              flush=True)
+        from . import reconcile as _reconcile
+        rc_model = model if getattr(args, "deep_reconcile", False) else None   # Phase 2/3 opt-in (adds model cost)
+        reconciled, _rlog = _reconcile.run(t, model=rc_model, online=args.online, jobs=getattr(args, "jobs", 1))
+        by = {v: [] for v in ("confirmed", "anomalous_state", "refuted", "blocked", "believed",
+                              "not_exploitable")}
+        for f in reconciled:                                 # re-derive verdict groups so patch + summary reflect it
+            by.setdefault(f.get("verdict", "believed"), []).append(f)
 
     # Stage 4 -- patch + reverify (optional)
     fixed = []
@@ -293,10 +377,14 @@ def cmd_all(args):
                 f"the model writes a fix for each confirmed finding, then the SAME proof re-runs "
                 f"({'writing' if args.write else 'dry-run, source restored'}) ...")
         from . import patch as patchmod
-        pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write)
+        pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write,
+                                 jobs=getattr(args, "jobs", 1))
         fixed = [r for r in pres if r["status"] == "fixed"]
         print(f"[all] patch: {len(fixed)} fixed of {len(pres)} confirmed "
               f"({'wrote' if args.write else 'dry-run'})", flush=True)
+
+    from . import report as _report                        # the readable, human-facing findings report
+    rp = _report.generate(t, model=getattr(model, "model_id", ""))
 
     print(f"\n=== PIPELINE on {t} ===")
     print(f"  findings={total}  survivors={len(survivors)}  CONFIRMED={len(by['confirmed'])}  "
@@ -306,10 +394,81 @@ def cmd_all(args):
               f"-- {(d.get('evidence') or '')[:70]}")
     for d in by["anomalous_state"]:
         print(f"  [ANOMALOUS {d.get('cwe')}] {d['file']}:{d['line']}  -- {d.get('why', '')[:70]}")
+    # DAST escalation: which unproven findings a live-app run could still witness (execution TBD -- --dynamic)
+    from . import dast
+    unproven = by.get("believed", []) + by.get("blocked", [])
+    esc = dast.plan(unproven, target=t)
+    if esc:
+        print(f"\n\U0001f310 DAST would help: {dast.summarize(esc)}  "
+              f"({len(esc)} of {len(unproven)} unproven findings)")
+        for e in esc[:6]:
+            print(f"   [{e['mode']}] {e['cwe'] or e['class']} {e['file']}:{e['line']}")
+        print("   -> run a live-app DAST pass on these when docker is free")
+    print(f"\n\U0001f4c4 readable report -> {rp}")
+
+
+def cmd_report(args):
+    """(Re)generate the human-readable report from an already-run repo's artifacts."""
+    from . import report as _report
+    rp = _report.generate(args.target, model=os.environ.get("WAVE_MODEL", ""))
+    print(f"report -> {rp}")
+
+
+# ---- CLI config: set the model/endpoint ONCE (~/.wave/config), so `wave` runs need no env each time -------
+def _config_path():
+    return Path(os.path.expanduser("~")) / ".wave" / "config"
+
+
+def _load_config():
+    """Load ~/.wave/config then ./.env into the environment (without overriding vars already set), so the
+    CLI behaves like a configured tool -- set the model once, then just `wave all <repo>`."""
+    for path in (_config_path(), Path(".env")):
+        try:
+            if not path.is_file():
+                continue
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+        except OSError:
+            pass
+
+
+def cmd_config(args):
+    """`wave config set <key> <value>` / `wave config show`. Keys: model, base, key (aliases for
+    WAVE_MODEL / WAVE_API_BASE / WAVE_API_KEY) or any WAVE_* name."""
+    alias = {"model": "WAVE_MODEL", "base": "WAVE_API_BASE", "url": "WAVE_API_BASE",
+             "key": "WAVE_API_KEY", "trace": "WAVE_TRACE"}
+    cfg = _config_path()
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if cfg.is_file():
+        for line in cfg.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.strip().startswith("#"):
+                k, v = line.split("=", 1)
+                existing[k.strip()] = v.strip()
+    if args.action == "show":
+        if not existing:
+            print(f"(no config at {cfg})")
+        for k, v in existing.items():
+            print(f"{k}={'***' if 'KEY' in k else v}")
+        return
+    key = alias.get((args.key or "").lower(), (args.key or "").upper())
+    if not key.startswith("WAVE_"):
+        raise SystemExit(f"unknown config key {args.key!r} (use: model | base | key | trace | a WAVE_* name)")
+    existing[key] = args.value or ""
+    cfg.write_text("\n".join(f"{k}={v}" for k, v in existing.items()) + "\n", encoding="utf-8")
+    print(f"set {key} -> {cfg}")
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="orchestrator")
+    _load_config()                                          # set env once via `wave config`; then just run
+    ap = argparse.ArgumentParser(prog="wave",
+                                 description="wave — a local, autonomous vulnerability-discovery & repair agent")
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("discover", help="SAST front-end: static candidate discovery")
     d.add_argument("target")
@@ -357,12 +516,18 @@ def main():
     e.add_argument("--notes", action="store_true",
                    help="the local model reads each pinned file into a persistent notebook "
                         "(wave_notebook.jsonl/.md) -- resumable; loads the model")
-    e.add_argument("--notes-budget", type=int, default=20, metavar="N",
-                   help="how many files the notebook reads (default 20); when pinned files exceed this, "
-                        "the model SELECTS the N worth deep-reading instead of taking the densest N")
+    e.add_argument("--notes-budget", type=int, default=40, metavar="N",
+                   help="how many files the notebook reads (default 40); at or below this, ALL pinned files "
+                        "are read (full coverage); only when pinned EXCEEDS this does the model SELECT the N "
+                        "worth deep-reading")
+    e.add_argument("--all-files", action="store_true",
+                   help="deep-read EVERY parsed source file, not just pinned ones (full coverage; pinning "
+                        "becomes priority order). Best for small/medium repos; costs scale with repo size")
     e.add_argument("--interactive", action="store_true",
                    help="when the model selects targets on a large repo, pause to let you steer the list "
                         "(drop/add) before deep-reading; without it, auto-proceeds")
+    e.add_argument("--jobs", type=int, default=1, metavar="N",
+                   help="read notebook files in PARALLEL (cloud model only; ~4 fits a 32GB/6-core box)")
     e.set_defaults(func=cmd_eyes)
 
     dt = sub.add_parser("detect", help="Stage 2: clean-room falsify the notebook's findings -> candidates")
@@ -371,6 +536,7 @@ def main():
                     help="path to wave_notebook.jsonl (default <target>/wave_notebook.jsonl)")
     dt.add_argument("--budget", type=int, default=40, metavar="N",
                     help="max findings to falsify this run (severity+confidence order; resumable)")
+    dt.add_argument("--jobs", type=int, default=1, metavar="N", help="falsify in PARALLEL (cloud model only)")
     dt.set_defaults(func=cmd_detect)
 
     pr = sub.add_parser("prove", help="Stage 3: run the detector's survivors through the confirmation ladder")
@@ -385,6 +551,9 @@ def main():
     pr.add_argument("--online", action="store_true",
                     help="give the model opt-in web_search / web_read tools (the box is otherwise fully "
                          "local; sends queries off-box only when the model is unsure about an API/service)")
+    pr.add_argument("--jobs", type=int, default=1, metavar="N",
+                    help="prove N survivors in PARALLEL (cloud model only; local single-GPU stays serial). "
+                         "~4 fits a 32GB/6-core box; lower for heavy compiled builds")
     pr.set_defaults(func=cmd_prove)
 
     pt = sub.add_parser("patch", help="Stage 4: patch each confirmed finding + reverify with the same proof")
@@ -395,12 +564,25 @@ def main():
                     help="max confirmed findings to patch this run")
     pt.add_argument("--write", action="store_true",
                     help="KEEP a patch that passed both gates (default: dry-run, restore the source)")
+    pt.add_argument("--jobs", type=int, default=1, metavar="N",
+                    help="patch confirmed findings in PARALLEL (cloud model only; per-file serialized)")
     pt.set_defaults(func=cmd_patch)
+
+    rc = sub.add_parser("reconcile", help="Stage 5: dedup + resolve contradictions (+ --deep: cross-file reconcile)")
+    rc.add_argument("target")
+    rc.add_argument("--findings", default=None,
+                    help="path to wave_findings.jsonl (default <target>/wave_findings.jsonl)")
+    rc.add_argument("--deep", action="store_true",
+                    help="Phase 2/3: load the model to reconcile cross-file look-alikes + re-investigate flags")
+    rc.add_argument("--online", action="store_true", help="allow web_search/web_read during re-investigation")
+    rc.add_argument("--jobs", type=int, default=1, metavar="N", help="reconcile clusters in PARALLEL (cloud model, with --deep)")
+    rc.set_defaults(func=cmd_reconcile)
 
     al = sub.add_parser("all", help="one-shot pipeline: eyes(notebook) -> detect -> prove [-> patch]")
     al.add_argument("target")
-    al.add_argument("--notes-budget", type=int, default=20, metavar="N",
-                    help="files the notebook deep-reads (model selects when pinned exceeds this)")
+    al.add_argument("--notes-budget", type=int, default=40, metavar="N",
+                    help="files the notebook deep-reads; at/below this ALL pinned are read, above it the "
+                         "model selects N (default 40)")
     al.add_argument("--detect-budget", type=int, default=60, metavar="N", help="findings to falsify")
     al.add_argument("--prove-budget", type=int, default=12, metavar="N", help="survivors to prove")
     al.add_argument("--patch", action="store_true", help="also run Stage 4 (patch + reverify) on confirmations")
@@ -408,8 +590,32 @@ def main():
     al.add_argument("--write", action="store_true", help="keep patches that pass both gates (with --patch)")
     al.add_argument("--no-reach-gate", action="store_true", help="disable the reachability gate in prove")
     al.add_argument("--online", action="store_true", help="give the model opt-in web_search/web_read (egress)")
-    al.add_argument("--interactive", action="store_true", help="steer the notebook's target selection")
+    al.add_argument("--all-files", action="store_true",
+                    help="deep-read EVERY parsed source file, not just pinned (full coverage)")
+    al.add_argument("--interactive", action="store_true", help="propose the read set; prune/extend it before reading")
+    al.add_argument("--no-reconcile", action="store_true",
+                    help="skip Stage 5 (dedup + contradiction resolution) before patch/report")
+    al.add_argument("--deep-reconcile", action="store_true",
+                    help="Stage 5 Phase 2/3: also run the model cross-file reconcile + re-investigate (adds cost)")
+    al.add_argument("--jobs", type=int, default=1, metavar="N",
+                    help="prove N survivors in PARALLEL (cloud model only; ~4 fits a 32GB/6-core box)")
     al.set_defaults(func=cmd_all)
+
+    rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")
+    rpt.add_argument("target")
+    rpt.set_defaults(func=cmd_report)
+
+    tr = sub.add_parser("trust", help="build + show the trust boundary (untrusted entries + module contexts)")
+    tr.add_argument("target")
+    tr.add_argument("--deep", action="store_true",
+                    help="Shift 2: let the model refine 'web' modules that are not remote-facing (safe-direction)")
+    tr.set_defaults(func=cmd_trust)
+
+    cf = sub.add_parser("config", help="set the model/endpoint once (~/.wave/config), so runs need no env")
+    cf.add_argument("action", choices=["set", "show"])
+    cf.add_argument("key", nargs="?", help="model | base | key | trace | a WAVE_* name")
+    cf.add_argument("value", nargs="?", help="the value to set")
+    cf.set_defaults(func=cmd_config)
 
     args = ap.parse_args()
     args.func(args)

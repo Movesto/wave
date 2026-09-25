@@ -4,9 +4,11 @@ The box is otherwise fully local. This is the one place it reaches out, and only
 (an unfamiliar API/library/framework, or a third-party service like AWS whose behaviour it must understand
 to judge a flow). Two tools:
   web_search(query) -> FIND: DuckDuckGo's keyless HTML endpoint -> ranked title/snippet/URL lines.
-  web_read(url)     -> READ ONE page DEEPLY: crawl4ai renders + cleans it to LLM-ready markdown (it already
-                       ships the browser wave uses for XSS); a lightweight requests+strip fallback covers the
-                       case where crawl4ai/its browser isn't installed.
+  web_read(url)     -> READ ONE page DEEPLY, a tiered chain that degrades gracefully:
+                       (1) Jina Reader (r.jina.ai) -- keyless, renders JS + returns clean markdown, zero
+                           install (the reliable default);
+                       (2) crawl4ai -- richer, if it (and its browser) happen to be installed locally;
+                       (3) a lightweight requests+strip fallback -- last resort, no deps beyond requests.
 ANY failure (no network, blocked, parse miss, missing dep) degrades to '' so the loop just proceeds on what
 the model already knows. Nothing here decides a verdict; it only supplies context -- the proof still comes
 from the deterministic oracle / observed effect, never from a web result.
@@ -59,6 +61,31 @@ def web_search(query, max_results=4, timeout=10):
     return "\n".join(out)
 
 
+_JINA = "https://r.jina.ai/"
+# markers of a bot-wall / captcha page Jina sometimes returns instead of the content -> treat as a miss
+_BOT_WALL = ("just a moment", "cf-browser-verification", "enable javascript and cookies",
+             "attention required! | cloudflare", "captcha-delivery")
+
+
+def _read_jina(url, timeout):
+    """Deep-read via Jina Reader -> clean markdown. Keyless, no local browser. '' on any failure/bot-wall."""
+    try:
+        import requests
+    except ImportError:
+        return ""
+    try:
+        r = requests.get(_JINA + url, headers={"User-Agent": "Mozilla/5.0 (wave-auditor)",
+                                               "Accept": "text/markdown, text/plain, */*"},
+                         timeout=timeout)
+        r.raise_for_status()
+    except Exception:
+        return ""
+    text = (r.text or "")[:5_000_000]                        # cap before any processing
+    if any(m in text.lower() for m in _BOT_WALL):
+        return ""
+    return text
+
+
 def _read_crawl4ai(url, timeout):
     """Deep-read via crawl4ai -> clean markdown. Returns '' if crawl4ai / its browser isn't available."""
     import asyncio
@@ -94,11 +121,13 @@ def _read_fallback(url, timeout):
 
 
 def web_read(url, max_chars=6000, timeout=25):
-    """Read ONE page deeply -> clean text/markdown (crawl4ai, else a requests+strip fallback), truncated to
-    max_chars. '' on any failure. For understanding an unfamiliar API / third-party service (AWS, a lib) the
-    model must reason about -- richer than a search snippet."""
+    """Read ONE page deeply -> clean text/markdown, truncated to max_chars. Tries Jina Reader (keyless,
+    default), then crawl4ai (if installed), then a requests+strip fallback; '' on any failure. For
+    understanding an unfamiliar API / third-party service (AWS, a lib) the model must reason about --
+    richer than a search snippet."""
     if not url or not url.strip().lower().startswith(("http://", "https://")):
         return ""
-    text = _read_crawl4ai(url.strip(), timeout) or _read_fallback(url.strip(), timeout)
+    u = url.strip()
+    text = _read_jina(u, timeout) or _read_crawl4ai(u, timeout) or _read_fallback(u, timeout)
     text = re.sub(r"\n{3,}", "\n\n", text or "").strip()
     return text[:max_chars]

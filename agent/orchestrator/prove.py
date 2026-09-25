@@ -20,10 +20,11 @@ Output: `wave_findings.jsonl` (per-candidate verdict, resumable) + `casefile.jso
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
-from . import briefs, codemap, reachability, recorder, repro, rung1, taint
+from . import briefs, codemap, oracle, reachability, recorder, repro, routes, rung1, taint
 from . import investigate as invmod
 from .models import Candidate
 
@@ -44,9 +45,9 @@ _SEV = {"cmd": 9, "eval": 9, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nos
 # not attacker-control -> a `confirmed` here needs HIGH-confidence reachability (else -> anomalous_state).
 _INTRINSIC_CWE = {"CWE-502", "CWE-95", "CWE-1336"}          # deserialization / eval-exec / SSTI
 
-_VERDICT_ORDER = ["confirmed", "anomalous_state", "refuted", "blocked", "believed"]
+_VERDICT_ORDER = ["confirmed", "anomalous_state", "believed", "blocked", "not_exploitable", "refuted"]
 # only these are DONE on resume; blocked (under-provisioned / transient 500) + believed are re-tried
-_TERMINAL = {"confirmed", "refuted", "anomalous_state"}
+_TERMINAL = {"confirmed", "refuted", "anomalous_state", "not_exploitable"}
 
 
 def _rel(root, path):
@@ -113,9 +114,56 @@ def _subj(c):
     return f"{c.cwe or c.family} {c.loc()}"
 
 
-def _prove_one(model, target, c, have_docker, max_steps, online=False):
-    """Run ONE candidate through the ladder -> a verdict record dict."""
-    tstatus, tnote = taint.analyze(c)                        # intra-function value taint (Python; else unknown)
+# the model's own account of driving the untrusted entry / real route -> the reach was WITNESSED (a safety net
+# over the structured reach_witnessed flag, which the model sometimes forgets after clearly driving the route).
+_DRIVE_PHRASES = ("reach witnessed", "drove from", "drove the", "driving the", "i drove", "drove a real",
+                  "test_client", "test client", "testclient", "supertest", "mockmvc", "serveHTTP".lower(),
+                  "issued a get", "issued a post", "issued a real", "sent a get", "sent a post",
+                  "via the route", "through the route", "call_service")
+_NOT_DRIVE = ("not witnessed", "not drive", "could not drive", "couldn't drive", "unable to drive",
+              "did not drive", "didn't drive", "failed to drive")
+
+
+def _said_witnessed(text):
+    """True when the model's methodology/why says it DROVE the untrusted entry / real route and observed the
+    value reach the sink (Half B witnessed). Guarded against negations ('could not drive')."""
+    t = (text or "").lower()
+    if any(n in t for n in _NOT_DRIVE):
+        return False
+    return any(p in t for p in _DRIVE_PHRASES)
+
+
+def _reach_of(cmap, c):
+    """The untrusted entry Func + path to this sink, or (None, None). The entry's name+file let us
+    scaffold the ENTRY (Half B); the path drives the brief's instruction."""
+    if cmap is None:
+        return None, None
+    name = (getattr(c, "unit", "") or "").split("(")[0].strip()
+    if not name:
+        return None, None
+    try:
+        entry, path, _trust = reachability.reaches_untrusted_entry_bound(cmap, name, getattr(c, "file", None))
+    except Exception:
+        return None, None
+    if entry is None or not path:
+        return None, None
+    return entry, path
+
+
+def _reach_for_brief(cmap, c):
+    """(entry_name, path) for the brief's Half-B instruction, or None."""
+    entry, path = _reach_of(cmap, c)
+    if entry is None:
+        return None
+    return (getattr(entry, "name", ""), path)
+
+
+def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", cmap=None, route_list=None):
+    """Run ONE candidate through the ladder -> a verdict record dict. `tag` isolates this job's scaffold +
+    write-manifest so PARALLEL proofs on the same target don't clobber each other's files. `cmap` (when
+    given) lets the brief instruct the model to drive from the untrusted ENTRY and WITNESS the reach path
+    (Half B), not just prove the sink fires (Half A) -- precision_and_measurement_plan.md."""
+    tstatus, tnote = taint.analyze(c)                        # intra-function value taint (Python + JS/TS; else unknown)
     reason = "not a canary-provable Python handler"
     if c.provable:
         mr = rung1.micro_exec(c, rt=None)                    # cheap in-process canary (no boot, no model)
@@ -135,7 +183,27 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False):
     if tnote:                                                # resolve the slice for the model (structure, its job)
         reason = f"{reason} | value-taint: {tstatus} -- {tnote}"
     mode = briefs._proof_mode(c)                             # sanitizer/ssti/protopoll/deser/render/call
-    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"))
+    entry_fn, rpath = _reach_of(cmap, c)                     # untrusted entry + path (Half B)
+    reach = (getattr(entry_fn, "name", ""), rpath) if entry_fn is not None else None
+    # A2: for a generic injection (call mode) with a DISTINCT entry, scaffold the ENTRY so calling it drives
+    # the real chain to the sink -> reach WITNESSED. Specialized modes feed the sink fn directly, so not there.
+    sink_fn = (c.unit or "").split("(")[0].strip()
+    # A2b: if the sink is reached from a real HTTP route, the model should DRIVE THE ROUTE via the framework's
+    # test client (handlers read the request object, not positional args). Framework-aware, covers every
+    # framework routes.py extracts. When a route is found, skip the positional entry-scaffold (it TypeErrors
+    # on a route handler -- the pyvuln Flask misfire) and let the route-drive brief block lead.
+    route = None
+    if route_list:
+        en = getattr(entry_fn, "name", "") if entry_fn is not None else ""
+        r = routes.find_route(route_list, getattr(c, "file", ""), en or sink_fn)
+        if r is not None:
+            route = (r.method, r.path, r.framework, routes.drive_recipe(r))
+    build_entry = None
+    if route is None and mode == "call" and entry_fn is not None:
+        en, ef = getattr(entry_fn, "name", ""), getattr(entry_fn, "file", "")
+        if en and ef and en != sink_fn:
+            build_entry = (en, ef)
+    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag, entry=build_entry)
     img = briefs._image_for(c.file)
     if briefs._is_js(c.file):                                # JS/TS need tsx + the repo's node_modules;
         from . import js_env                                 # DOM render ALSO needs a real browser --
@@ -144,22 +212,45 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False):
             img = js_env.ensure_browser_runner() or js_env.prepare(target) or img
         else:
             img = js_env.prepare(target) or img
-    step_to = 120 if mode in ("render", "asan") else (90 if briefs._is_js(c.file) else 45)  # asan compiles
+    step_to = (300 if mode in briefs.COMPILED_MODES               # build/fetch a standalone repro
+               else (120 if mode in ("render", "asan")
+                     else (90 if briefs._is_js(c.file) else 45)))
     try:
         # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
         # controlled egress point when online, not blanket container network access.
-        v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode),
+        v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode,
+                                                        reach=reach, route=route),
                                image=img, mount=target, network="none", max_steps=max_steps,
-                               step_timeout=step_to, online=online)
+                               step_timeout=step_to, online=online, write_tag=tag)
     finally:
-        repro.remove(target)
+        repro.remove(target, tag)
     verdict = v.verdict
+    # Half-B honesty (A1): did the model witness the reach path, or only exercise the sink? Read its own
+    # stated conclusion; default to 'inferred' (a path exists but was not driven) / 'none' (no entry path).
+    # Half-B witnessed signal: PREFER the structured conclude field (reach_witnessed); fall back to the
+    # model's own account of DRIVING THE ROUTE (it often proves the reach but forgets the boolean -- pyvuln
+    # cmd/sqli/path did exactly this and got falsely downgraded by the static value-taint gate).
+    meth = (getattr(v, "methodology", "") or "") + " " + (v.why or "")
+    said_witnessed = (bool(getattr(v, "reach_witnessed", False)) or _said_witnessed(meth)) and reach is not None
+    reach_proof = "witnessed" if said_witnessed else ("inferred" if reach else "none")
+    driven_trust = reachability.entry_trust(entry_fn) if (said_witnessed and entry_fn is not None) else None
     # DIFFERENTIAL (IDOR/access-control): a witnessed boundary crossing is a business-logic JUDGMENT anchored
     # to an observed state change -- always human-review, never a tool-witnessed `confirmed` (design + §10.7).
     if mode == "differential" and verdict == "confirmed":
         verdict = "anomalous_state"
+    # HARNESS-SIDE ORACLE (#2): the harness -- not the model -- reads its own planted markers from the sandbox
+    # output and grades the class. A TIER 1/2 marker (wave_HIT / WAVE-SINK-* / browser canary) is tape-grade
+    # proof the sink fired; TIER 3 (authz/business) has no marker -> stays a judgment for the 2nd-model audit.
+    markers = set(getattr(v, "witness", []) or [])
+    cls_name = (getattr(c, "family", "") or "").split()[0]
+    hw, hmarker, htier = oracle.graded(cls_name, markers, cwe=getattr(c, "cwe", ""))
     return {"verdict": verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
             "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
+            "reach_proof": reach_proof,                       # witnessed | inferred | none (Half-B honesty)
+            "driven_trust": driven_trust,                     # trust tier of the entry the model DROVE from
+            "witness": sorted(markers), "harness_witnessed": hw, "harness_marker": hmarker,
+            "oracle_tier": htier,                             # 'marker' (tape-gradable) | 'judgment' (2nd-model)
+            "methodology": (getattr(v, "methodology", "") or "")[:400],   # the model's documented approach
             "_transcript": v.transcript, "_mode": mode}   # for the trace-logger (stripped before findings write)
 
 
@@ -177,6 +268,8 @@ def _record_outcome(case, hyp_id, c, rec):
                     evidence=rec.get("evidence", ""), oracle=rec.get("oracle", ""))
     elif v == "refuted":
         case.supersede(hyp_id, status="refuted", note=rec.get("why", ""))
+    elif v == "not_exploitable":                             # reasoned SAFE-leaning judgment (still shown, not hidden)
+        case.supersede(hyp_id, status="not_exploitable", note=rec.get("why", ""))
     elif v == "blocked":
         case.supersede(hyp_id, status="blocked", note=rec.get("why", ""))
     else:                                                    # believed -- a lead, never a finding
@@ -184,14 +277,35 @@ def _record_outcome(case, hyp_id, c, rec):
                     note=rec.get("why", ""))
 
 
-def _apply_gate(rec, c, cmap):
+def _apply_gate(rec, c, cmap, tm=None):
     """Context + reachability gates on a `confirmed` sink (never drops -- only re-categorizes to
     `anomalous_state`/human-review):
+      (0) MODULE CONTEXT (trust model): a sink in a TEST-HARNESS module is not a production runtime surface.
       (1) CONTEXT: a server-side class proven in FRONTEND/browser code is a mislabel (a browser fetch is not
           server-side SSRF; the browser has no SQL/fs/shell).
       (2) REACHABILITY: no path from an untrusted-facing entry reaches the sink -> may be internal/intended."""
     if rec.get("verdict") != "confirmed":
         return rec
+    if tm is not None:                                       # (0) trust-model module context
+        mctx = tm.module_context(getattr(c, "file", ""))
+        if mctx == "test":
+            rec["verdict"] = "anomalous_state"
+            rec["why"] = ("[test-module] this sink is in TEST-HARNESS code (cucumber/behave/unit/e2e), not a "
+                          "production runtime surface -- exploitable only if the tests run on untrusted input; "
+                          "human review. " + rec.get("why", ""))
+            return rec
+        if mctx == "cli":                                    # CLI/build tooling module (scripts/, packaging/, ...)
+            rec["verdict"] = "anomalous_state"
+            rec["why"] = ("[cli-module] this sink is in CLI / build tooling (scripts/, packaging/, ...), run by "
+                          "a developer or CI with local args -- not a remote runtime surface; real only if run "
+                          "on untrusted input (e.g. CI on an untrusted PR). Human review. " + rec.get("why", ""))
+            return rec
+        if mctx == "internal":                               # Shift 2: model marked this module non-remote-facing
+            rec["verdict"] = "anomalous_state"
+            rec["why"] = ("[internal-module] this module was assessed as INTERNAL / not remote/internet-facing "
+                          "(not a public attack surface) -- remote exploitability not established; human "
+                          "review. " + rec.get("why", ""))
+            return rec
     if c.cwe in reachability.SERVER_ONLY_CWE:                # (1) execution-context gate
         try:
             src = Path(c.file).read_text(encoding="utf-8", errors="replace")
@@ -204,6 +318,19 @@ def _apply_gate(rec, c, cmap):
                           f"(the browser makes this call); review as a client-side concern if any. "
                           + rec.get("why", ""))
             return rec
+    # (1.5) WITNESSED-REACH OVERRIDE (Shift A / A3): the model DROVE the attacker value from the untrusted
+    # entry down to the sink -- a TOOL-grounded proof of Half B. That beats every STATIC Half-B heuristic
+    # below (taint / reachability / confidence / intrinsic-bar), which only INFER the path and caused this
+    # session's false down/upgrades. We still respect the execution/module CONTEXT gates above (a witnessed
+    # reach inside test/CLI/browser code is still not a production surface) and the LOCAL-vs-remote nature of
+    # the entry we drove from (a witnessed reach from a CLI main() proves only LOCAL exploitability).
+    if rec.get("reach_proof") == "witnessed":
+        rec["reachability"] = "reach WITNESSED: attacker value driven from the untrusted entry to the sink"
+        if rec.get("driven_trust") == "local":               # witnessed, but only via a LOCAL/CLI entry
+            rec["verdict"] = "anomalous_state"
+            rec["why"] = ("[local-entry] the reach was witnessed but only from a LOCAL/CLI entry (not a remote "
+                          "route) -- remote attacker-control NOT established; human review. " + rec.get("why", ""))
+        return rec
     # (2) value-taint gate: a MODEL-confirmed sink whose args don't derive from untrusted input in this
     # function is likely a mislabel (the eval-runner shape). Conservative: only 'unrelated' (never the
     # cross-function 'unknown'), and NEVER override a canary -- that dynamically WITNESSED the value at the
@@ -213,11 +340,24 @@ def _apply_gate(rec, c, cmap):
         rec["why"] = ("[value-taint] the sink arguments do not derive from untrusted input in this function "
                       "-- likely a mislabel; human review. " + rec.get("why", ""))
         return rec
-    reachable, conf, note = reachability.gate(cmap, c.unit)  # (3) reachability gate (+ confidence)
+    reachable, conf, note, trust = reachability.gate(cmap, c.unit, sink_file=getattr(c, "file", None))  # (3) reachability (binding-aware)
     rec["reachability"] = note
+    rec["reach_conf"] = conf                                 # stamp the grounding on the record: a KEPT confirm
+    rec["reach_trust"] = trust                               # now carries "how grounded is the reachability half"
     if not reachable:
         rec["verdict"] = "anomalous_state"
         rec["why"] = f"[reachability] {note}. " + rec.get("why", "")
+        return rec
+    # (3b) FAIL-SAFE tier gate (Shift 3): the sink is reachable only via a LOCAL/CLI entry (a script's main()
+    # run from a shell), NOT a remote/network route -- so remote attacker-control is NOT established. The
+    # mechanism is proven, but exploitability in a remote threat model is a judgment -> human review. This
+    # catches CLI/build/cron tooling generally, by the ENTRY's trust nature, without a path-based heuristic.
+    if trust == "local":
+        rec["verdict"] = "anomalous_state"
+        rec["why"] = ("[local-entry] reachable only via a LOCAL/CLI entry (e.g. a script's main() run from a "
+                      "shell), not a remote route -- remote attacker-control NOT established. Real only if this "
+                      "program is run on untrusted input (e.g. CI on an untrusted PR). Human review. "
+                      + rec.get("why", ""))
         return rec
     # (4) intrinsic-sink bar: deser/eval/ssti sinks are dangerous BY NATURE -- running them with a handed-in
     # payload proves the MECHANISM (trivially true), not that an ATTACKER controls the input. So a `confirmed`
@@ -228,13 +368,140 @@ def _apply_gate(rec, c, cmap):
         rec["why"] = (f"[intrinsic-sink] {c.cwe} executes arbitrary input (mechanism proven), but "
                       f"attacker-control of that input is NOT established -- reachability is {conf}-confidence "
                       f"({note}). Verify the caller/input source. " + rec.get("why", ""))
+        return rec
+    # (5) GROUNDED-CONFIRM BAR (Shift 1, precision_and_measurement_plan.md): a `confirmed` = witnessed effect
+    # AND a GROUNDED reachability half. We ground the EFFECT dynamically but only INFER reachability. When the
+    # only path to the untrusted entry leans on an ambiguous name-based edge (conf != "high"), attacker-
+    # reachability is a GUESS, not grounded -- so the finding is a review lead, not a `confirmed`. Generalizes
+    # the intrinsic-sink bar above to ALL classes (the false-confirm class this session was shaky-chain reaches
+    # wearing a confirmed badge). Never touches a high-confidence remote reach -> genuine confirms stand.
+    if conf != "high":
+        rec["verdict"] = "anomalous_state"
+        rec["why"] = ("[low-confidence-reach] the sink FIRED (effect witnessed) but the only path to an "
+                      f"untrusted entry is {conf}-confidence -- it leans on an ambiguous name-based edge "
+                      f"({note}); attacker-reachability is INFERRED, not grounded. Human review. "
+                      + rec.get("why", ""))
     return rec
 
 
+_AUTHZ_CWE = {"CWE-639", "CWE-284", "CWE-862", "CWE-863", "CWE-566"}
+
+
+def _desktop_authz(rec, c, target, tm=None):
+    """On a single-user Tauri/Electron DESKTOP app there is no multi-tenant boundary, so an authz/IDOR finding
+    is usually moot (the user owns their own data). Downgrade + note -- never touches injection classes, which
+    stay real (a desktop app can still process untrusted files / hit a shared backend). Desktop-ness is judged
+    PER-MODULE (the finding's file), and a SERVER-ENDPOINT file is never downgraded (a web route is a real
+    multi-tenant boundary even in a repo that also ships a desktop build -- the Stirling app/saas case)."""
+    fam = (getattr(c, "family", "") or "").lower()
+    if not (getattr(c, "cwe", "") in _AUTHZ_CWE or any(k in fam for k in
+                                                       ("authz", "idor", "authoriz", "access control", "bola"))):
+        return rec
+    if reachability.is_server_endpoint(getattr(c, "file", "")):   # a real web boundary -> authz applies
+        return rec
+    is_desktop = (tm.module_context(getattr(c, "file", "")) == "desktop" if tm is not None
+                  else reachability.is_desktop_app(target, getattr(c, "file", "")))
+    if not is_desktop:
+        return rec
+    rec["desktop_context"] = True
+    rec["confidence"] = "low"
+    if rec.get("verdict") == "anomalous_state":              # not a real boundary crossing on a single-user app
+        rec["verdict"] = "believed"
+    rec["why"] = ("[desktop app] single-user Tauri/Electron app -- no multi-tenant authorization boundary, so "
+                  "this authz/IDOR is likely moot; only real if a multi-user / remote / shared-backend threat "
+                  "model applies. " + rec.get("why", ""))
+    return rec
+
+
+def reprove(model, target, findings, gate=True, online=False, max_steps=8, cmap=None):
+    """Re-run the proof ladder on SPECIFIC findings (Stage 5 re-investigation). Returns updated finding
+    records (same shape as run's output); does NOT write files -- the caller merges. A tool re-run is the ONLY
+    thing allowed to change a witnessed verdict (the reconcile guardrail). Reuses run()'s exact machinery."""
+    if not findings:
+        return []
+    target = str(target)
+    cmap = cmap or codemap.build(target)
+    rel_index = {_rel(target, p): fi for p, fi in cmap.files.items()}
+    try:
+        route_list = routes.extract_routes(target)
+    except Exception:
+        route_list = []
+    from . import trust as trustmod
+    tm = trustmod.load(target) or trustmod.build(cmap, target)   # reuse the persisted trust boundary if present
+    have_docker = shutil.which("docker") is not None
+    auditor = _auditor_model(model)                          # decorrelated 2nd model for the no-marker audit
+    case = recorder.CaseFile(target)
+    out_recs = []
+    for surv in findings:
+        c = _to_candidate(surv, rel_index, target)
+        hyp_id = case.record("hypothesis", _subj(c), "seed", "believed", provenance=c.loc(),
+                             cwe=c.cwe, family=c.family).id
+        rec = _prove_one(model, target, c, have_docker, max_steps, online=online, cmap=cmap,
+                         route_list=route_list)
+        if gate:
+            rec = _apply_gate(rec, c, cmap, tm)
+        rec = _desktop_authz(rec, c, target, tm)
+        _audit_confirm(rec, c, auditor)
+        _record_outcome(case, hyp_id, c, rec)
+        rec.pop("_transcript", None)
+        rec.pop("_mode", "")
+        out_recs.append({"file": surv.get("file", ""), "line": int(surv.get("line") or 0),
+                         "class": str(surv.get("class") or "other").lower(), "cwe": c.cwe, "unit": c.unit,
+                         "sink": surv.get("sink", ""), "confidence": surv.get("confidence", ""), **rec})
+    if model is not None:
+        try:
+            model.unload()
+        except Exception:
+            pass
+    return out_recs
+
+
+def _auditor_model(primary):
+    """A DECORRELATED second model for the evidence audit (WAVE_AUDIT_MODEL) -- a different model is less
+    likely to repeat the primary's blind spot than the same model asked twice. Same OpenRouter endpoint,
+    different model_id. Falls back to the primary when unset/unavailable (current behaviour)."""
+    aid = os.environ.get("WAVE_AUDIT_MODEL")
+    if not aid or primary is None or getattr(primary, "model_id", None) == aid:
+        return primary
+    try:
+        from .model import Model
+        return Model(model_id=aid, api_base=getattr(primary, "api_base", None),
+                     api_key=getattr(primary, "api_key", None))
+    except Exception:
+        return primary
+
+
+def _audit_confirm(rec, c, auditor):
+    """Final grading of a `confirmed`: the HARNESS's deterministic marker beats everything (tape-grade, no
+    model call). Without a marker (TIER 3 judgment, or a claim with no witness) a DECORRELATED second model
+    audits it -- conservative: a downgrade verdict routes to human review. Mutates `rec` in place."""
+    if rec.get("verdict") != "confirmed":
+        return
+    if rec.get("harness_witnessed"):                        # the tape settled it -- no model needed
+        rec["audit"] = (f"[harness] deterministic witness '{rec.get('harness_marker')}' in the sandbox output "
+                        f"-- confirmed by the tool, not the model's account")
+        return
+    from . import audit                                     # no marker -> the second model judges the evidence
+    av, anote = audit.audit(auditor, c, rec)
+    if av != "confirmed":
+        rec["verdict"] = av
+        rec["why"] = anote + " " + rec.get("why", "")
+    rec["audit"] = anote
+
+
+def _is_cloud_model(model):
+    """A remote API model (OpenRouter/GLM) -- safe to call concurrently. A LOCAL model (ollama or in-process
+    transformers) is single-GPU and must stay serial."""
+    if model is None:
+        return False
+    return bool(getattr(model, "api_base", None)) and not getattr(model, "_is_local_api", True)
+
+
 def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=True, max_steps=8, gate=True,
-        online=False):
+        online=False, enrich_trust=False, jobs=1):
     """Prove the detector's survivors (severity order, up to `budget`). Writes per-candidate verdicts to
-    wave_findings.jsonl (resumable) + casefile.json. Returns (by_verdict, paths)."""
+    wave_findings.jsonl (resumable) + casefile.json. Returns (by_verdict, paths). `jobs` > 1 proves multiple
+    survivors CONCURRENTLY (only with a CLOUD model -- a local single-GPU model stays serial)."""
     target = str(target)
     out_dir = Path(out_dir or target)
     candidates_path = candidates_path or (out_dir / "wave_candidates.jsonl")
@@ -245,6 +512,16 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
 
     cmap = codemap.build(target)
     rel_index = {_rel(target, p): fi for p, fi in cmap.files.items()}
+    try:                                                    # HTTP routes (all frameworks) -> drive-the-route brief
+        route_list = routes.extract_routes(target)
+    except Exception:
+        route_list = []
+    from . import trust as trustmod                          # Shift 1: build+persist the trust boundary once
+    tm = trustmod.build(cmap, target)
+    if enrich_trust and model is not None:                   # Shift 2 (opt-in): model refines it, safe-direction
+        tm = trustmod.enrich(model, tm, cmap)
+    trustmod.save(tm, out_dir)
+    print(f"[prove] {trustmod.summary(tm)}", flush=True)
 
     case = recorder.CaseFile(target)
     findings_log = out_dir / "wave_findings.jsonl"
@@ -263,50 +540,86 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
     have_docker = shutil.which("docker") is not None
     if not have_docker:
         print("[prove] docker not available -- canary-only; unsettled candidates stay 'believed'", flush=True)
-    n_todo = min(budget, sum(1 for s in survs if _key(s) not in skip))
-    worked = 0
-    with findings_log.open("a", encoding="utf-8") as fh:
-        for surv in survs:
-            k = _key(surv)
-            if k in skip:
-                continue
-            if worked >= budget:
-                break
-            worked += 1
+
+    worklist = []
+    for surv in survs:
+        if _key(surv) in skip:
+            continue
+        if len(worklist) >= budget:
+            break
+        worklist.append(surv)
+    n_todo = len(worklist)
+
+    if jobs > 1 and not _is_cloud_model(model):              # single-GPU local model can't run in parallel
+        print("[prove] --jobs>1 needs a CLOUD model (local is single-GPU) -- running serial", flush=True)
+        jobs = 1
+
+    auditor = _auditor_model(model)                          # decorrelated 2nd model for the no-marker audit
+    if auditor is not model and auditor is not None:
+        print(f"[prove] evidence audit uses a 2nd model: {getattr(auditor, 'model_id', '?')}", flush=True)
+
+    # COMPUTE (parallel-safe: model API + docker, each with its own tag; no shared writes) -> a finished rec.
+    def _compute(surv, tag):
+        c = _to_candidate(surv, rel_index, target)
+        rec = _prove_one(model, target, c, have_docker, max_steps, online=online, tag=tag, cmap=cmap,
+                         route_list=route_list)
+        if gate:                                            # untrusted-reachability gate on confirmations
+            rec = _apply_gate(rec, c, cmap, tm)
+        rec = _desktop_authz(rec, c, target, tm)            # single-user desktop app: authz/IDOR is moot
+        _audit_confirm(rec, c, auditor)                     # harness marker settles it, else 2nd-model audit
+        return c, rec
+
+    # COMMIT (MAIN THREAD ONLY -- serializes all shared state: CaseFile, findings log, prior, traces).
+    def _commit(surv, c, rec, fh, i):
+        hyp_id = case.record("hypothesis", _subj(c), "seed", "believed", provenance=c.loc(),
+                             cwe=c.cwe, family=c.family).id
+        transcript = rec.pop("_transcript", None)
+        trace_mode = rec.pop("_mode", "")
+        from . import traces
+        if traces.enabled() and transcript:
+            traces.save(target=target, file=surv.get("file", ""), line=int(surv.get("line") or 0),
+                        cls=str(surv.get("class") or "other").lower(), cwe=c.cwe, verdict=rec["verdict"],
+                        evidence=rec.get("evidence", ""), oracle=rec.get("oracle", ""),
+                        model=getattr(model, "model_id", ""), mode=trace_mode, ran=rec.get("ran", 0),
+                        transcript=transcript)
+        _record_outcome(case, hyp_id, c, rec)
+        out = {"file": surv.get("file", ""), "line": int(surv.get("line") or 0),
+               "class": str(surv.get("class") or "other").lower(), "cwe": c.cwe, "unit": c.unit,
+               "sink": surv.get("sink", ""), "confidence": surv.get("confidence", ""), **rec}
+        fh.write(json.dumps(out) + "\n")
+        fh.flush()
+        prior[_key(surv)] = out
+        print(f"[prove] {i}/{n_todo} {rec['verdict'].upper()} {c.cwe or surv.get('class')}@"
+              f"{surv.get('file')}:{surv.get('line')} -- {(rec.get('evidence') or rec.get('why', ''))[:90]}",
+              flush=True)
+
+    def _safe_compute(surv, tag):                           # never let one candidate's crash kill the pool
+        try:
+            return _compute(surv, tag)
+        except Exception as e:
             c = _to_candidate(surv, rel_index, target)
-            print(f"[prove] {worked}/{n_todo} {c.cwe or surv.get('class')}@{surv.get('file')}:"
-                  f"{surv.get('line')} ({c.unit or 'no-func'}) ...", flush=True)
-            hyp_id = case.record("hypothesis", _subj(c), "seed", "believed", provenance=c.loc(),
-                                 cwe=c.cwe, family=c.family).id
-            rec = _prove_one(model, target, c, have_docker, max_steps, online=online)
-            if gate:                                        # untrusted-reachability gate on confirmations
-                rec = _apply_gate(rec, c, cmap)
-            if rec.get("verdict") == "confirmed":           # final EVIDENCE AUDIT (only high-stakes confirms):
-                from . import audit                          # re-run the proof + a fresh clean-room skeptic
-                av, anote = audit.audit(model, c, rec)
-                if av != "confirmed":
-                    rec["verdict"] = av
-                    rec["why"] = anote + " " + rec.get("why", "")
-                rec["audit"] = anote
-                print(f"[prove]   audit -> {rec['verdict']}", flush=True)
-            _record_outcome(case, hyp_id, c, rec)
-            transcript = rec.pop("_transcript", None)       # trace-logger fields -- not for the findings file
-            trace_mode = rec.pop("_mode", "")
-            from . import traces                             # capture the FINAL (post-gate/audit) verdict's drive
-            if traces.enabled() and transcript:
-                traces.save(target=target, file=surv.get("file", ""), line=int(surv.get("line") or 0),
-                            cls=str(surv.get("class") or "other").lower(), cwe=c.cwe, verdict=rec["verdict"],
-                            evidence=rec.get("evidence", ""), oracle=rec.get("oracle", ""),
-                            model=getattr(model, "model_id", ""), mode=trace_mode, ran=rec.get("ran", 0),
-                            transcript=transcript)
-            out = {"file": surv.get("file", ""), "line": int(surv.get("line") or 0),
-                   "class": str(surv.get("class") or "other").lower(), "cwe": c.cwe, "unit": c.unit,
-                   "sink": surv.get("sink", ""), "confidence": surv.get("confidence", ""), **rec}
-            fh.write(json.dumps(out) + "\n")
-            fh.flush()
-            prior[k] = out
-            print(f"[prove]   -> {rec['verdict'].upper()}: "
-                  f"{(rec.get('evidence') or rec.get('why', ''))[:100]}", flush=True)
+            return c, {"verdict": "blocked", "evidence": "", "why": f"prove error: {type(e).__name__}: {e}",
+                       "ran": 0, "oracle": "", "taint": "unknown"}
+
+    with findings_log.open("a", encoding="utf-8") as fh:
+        if jobs <= 1 or n_todo <= 1:                        # serial (default / trivial)
+            for i, surv in enumerate(worklist, 1):
+                print(f"[prove] {i}/{n_todo} proving {surv.get('file')}:{surv.get('line')} ...", flush=True)
+                c, rec = _safe_compute(surv, "")
+                _commit(surv, c, rec, fh, i)
+        else:                                               # parallel: warm images on #1, then fan out
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            print(f"[prove] proving {n_todo} survivors with {jobs} parallel workers (cloud model) ...", flush=True)
+            c, rec = _safe_compute(worklist[0], "j0")       # warm docker images / js_env before fanning out
+            _commit(worklist[0], c, rec, fh, 1)
+            done = 1
+            with ThreadPoolExecutor(max_workers=jobs) as ex:
+                futs = {ex.submit(_safe_compute, s, f"j{i}"): s for i, s in enumerate(worklist[1:], 1)}
+                for fut in as_completed(futs):
+                    surv = futs[fut]
+                    c, rec = fut.result()
+                    done += 1
+                    _commit(surv, c, rec, fh, done)
 
     if model is not None:
         try:

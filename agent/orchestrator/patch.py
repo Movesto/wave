@@ -68,11 +68,20 @@ def _apply(file, slice_src, new_src):
     return code
 
 
-def gen_patch(model, c):
-    """Model rewrites the vulnerable function. Returns the fixed source (a fenced code block) or None."""
+def gen_patch(model, c, attempts=3):
+    """Model rewrites the vulnerable function. Returns the fixed source (a fenced code block) or None.
+    Retries a few times: a reasoning model occasionally spends its whole budget inside <think> and emits no
+    fenced block (the NO-PATCH flake) -- the same non-determinism craft() guards against with a retry. On a
+    retry we insist on code-only output so <think> can't crowd out the block."""
     user = (f"Vulnerability: {c.cwe} ({c.family}). Sink: {c.sink}. A probe reached the sink unsafely.\n\n"
             f"Fix this function (keep its signature):\n```\n{c.slice}\n```")
-    return code_block(model.generate(_SYSTEM, user, max_new_tokens=2800))
+    for i in range(attempts):
+        u = user if i == 0 else (user + "\n\nOutput ONLY the fixed function as ONE fenced ``` code block -- "
+                                 "no explanation, no reasoning text before or after the block.")
+        patch = code_block(model.generate(_SYSTEM, u, max_new_tokens=2800))
+        if patch:
+            return patch
+    return None
 
 
 def _gate_b(file):
@@ -96,7 +105,7 @@ def _gate_b(file):
     return True, "no parser for this language -- skipped"
 
 
-def _gate_a(model, target, c, rec, have_docker, max_steps):
+def _gate_a(model, target, c, rec, have_docker, max_steps, tag=""):
     """Re-run the SAME proof on the patched code. Returns (status, note), status in:
       'still'    -- the exploit RE-FIRED on the patched code (rung1 proven / investigate confirmed) -> the
                     patch FAILED.
@@ -117,7 +126,7 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
     if not have_docker:
         return "unproven", "cannot reverify the fix (docker unavailable) -- patch UNVERIFIED, not fixed"
     mode = briefs._proof_mode(c)                             # match prove's proof-shape routing
-    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"))
+    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag)
     img = briefs._image_for(c.file)
     if briefs._is_js(c.file):                                # tsx+node_modules; browser only for DOM render
         from . import js_env
@@ -130,20 +139,29 @@ def _gate_a(model, target, c, rec, have_docker, max_steps):
         v = invmod.investigate(model, briefs._brief_for(c, target, "reverify the patch", scaffold=scaffold,
                                                         mode=mode),
                                image=img, mount=target, network="none",
-                               max_steps=max_steps, step_timeout=(120 if mode == "render" else
-                                                                  (90 if briefs._is_js(c.file) else 45)))
+                               max_steps=max_steps,
+                               step_timeout=(300 if mode in briefs.COMPILED_MODES else
+                                             (120 if mode in ("render", "asan") else
+                                              (90 if briefs._is_js(c.file) else 45))),
+                               write_tag=tag)
     finally:
-        repro.remove(target)
+        repro.remove(target, tag)
     # confirmed = re-fired (still); refuted = the model RAN it and saw it is now safe (cleared);
     # believed/blocked/anomalous = could not re-witness -> UNPROVEN (never a fix).
     status = {"confirmed": "still", "refuted": "cleared"}.get(v.verdict, "unproven")
     return status, f"investigate -> {v.verdict}: {(v.why or '')[:100]}"
 
 
-def run(model, target, findings_path=None, budget=10, out_dir=None, write=False, max_steps=6):
+def run(model, target, findings_path=None, budget=10, out_dir=None, write=False, max_steps=8, jobs=1):
     """Patch each confirmed finding, reverify with the SAME oracle, restore (unless --write on a pass).
-    Returns (results, paths)."""
+    Returns (results, paths). max_steps matches prove's budget (8): the reverify is at least as hard as the
+    original proof -- the model must read the patch AND rebuild the repro -- so it must not be starved of steps.
+    `jobs`>1 patches confirmed findings CONCURRENTLY (cloud model only); a per-FILE lock serializes findings in
+    the same file (they edit the same source), so only findings in DIFFERENT files run in parallel."""
     import shutil
+    import threading
+    from collections import defaultdict
+    from .parallel import fan_out, is_cloud_model
 
     target = str(target)
     out_dir = Path(out_dir or target)
@@ -168,27 +186,38 @@ def run(model, target, findings_path=None, budget=10, out_dir=None, write=False,
     rel_index = {prove._rel(target, p): fi for p, fi in cmap.files.items()}
     have_docker = shutil.which("docker") is not None
 
-    results, worked = [], 0
+    worklist = confirmed[:budget]
+    if jobs > 1 and not is_cloud_model(model):
+        print("[patch] --jobs>1 needs a cloud model -- patching serially", flush=True)
+        jobs = 1
+    file_locks = defaultdict(threading.Lock)                 # findings in the SAME file must not patch at once
+
+    def _compute(surv, i):
+        c = prove._to_candidate(surv, rel_index, target)
+        fi = rel_index.get(surv.get("file", ""))
+        func = prove._enclosing(fi, c.line) if fi else None
+        if func:
+            try:
+                lines = Path(c.file).read_text(encoding="utf-8", errors="replace").splitlines()
+                c.slice = "\n".join(lines[func.line - 1:func.end or func.line])
+            except OSError:
+                pass
+        print(f"[patch] {i}/{len(worklist)} {c.cwe}@{surv['file']}:{surv['line']} ({c.unit or 'no-func'}) ...",
+              flush=True)
+        if not c.slice:
+            return c, {"status": "no-slice", "note": "could not locate the enclosing function to patch"}
+        try:
+            with file_locks[c.file]:                         # atomic apply->gate->restore per source file
+                rec = _patch_one(model, target, c, surv, have_docker, max_steps, write, tag=f"p{i}")
+        except Exception as e:
+            rec = {"status": "patch-error", "note": f"{type(e).__name__}: {e}"}
+        return c, rec
+
+    results = []
     patches_log = out_dir / "wave_patches.jsonl"
     with patches_log.open("a", encoding="utf-8") as fh:
-        for surv in confirmed:
-            if worked >= budget:
-                break
-            worked += 1
-            c = prove._to_candidate(surv, rel_index, target)
-            fi = rel_index.get(surv.get("file", ""))
-            func = prove._enclosing(fi, c.line) if fi else None
-            if func:
-                try:
-                    lines = Path(c.file).read_text(encoding="utf-8", errors="replace").splitlines()
-                    c.slice = "\n".join(lines[func.line - 1:func.end or func.line])
-                except OSError:
-                    pass
-            print(f"[patch] {c.cwe}@{surv['file']}:{surv['line']} ({c.unit or 'no-func'}) ...", flush=True)
-            if not c.slice:
-                rec = {"status": "no-slice", "note": "could not locate the enclosing function to patch"}
-            else:
-                rec = _patch_one(model, target, c, surv, have_docker, max_steps, write)
+        def _commit(surv, result, i):
+            c, rec = result
             out = {"file": surv["file"], "line": surv["line"], "class": surv["class"], "cwe": c.cwe,
                    "unit": c.unit, **rec}
             fh.write(json.dumps(out) + "\n")
@@ -196,6 +225,7 @@ def run(model, target, findings_path=None, budget=10, out_dir=None, write=False,
             results.append(out)
             print(f"[patch]   -> {rec['status'].upper()}  (gate_a={rec.get('gate_a', '-')}, "
                   f"gate_b={rec.get('gate_b', '-')})", flush=True)
+        fan_out(worklist, _compute, _commit, jobs)
 
     if model is not None:
         try:
@@ -205,7 +235,7 @@ def run(model, target, findings_path=None, budget=10, out_dir=None, write=False,
     return results, {"patches": str(patches_log)}
 
 
-def _patch_one(model, target, c, surv, have_docker, max_steps, write):
+def _patch_one(model, target, c, surv, have_docker, max_steps, write, tag=""):
     patch = gen_patch(model, c)
     if not patch:
         return {"status": "no-patch", "note": "model produced no code block"}
@@ -214,7 +244,7 @@ def _patch_one(model, target, c, surv, have_docker, max_steps, write):
         return {"status": "apply-failed", "patch": patch, "note": "function slice not found in file"}
     kept = False
     try:
-        a_status, a_note = _gate_a(model, target, c, surv, have_docker, max_steps)   # still|cleared|unproven
+        a_status, a_note = _gate_a(model, target, c, surv, have_docker, max_steps, tag)   # still|cleared|unproven
         ok_b, b_note = _gate_b(c.file)
         gate_a = {"still": "STILL-VULNERABLE", "cleared": "cleared", "unproven": "UNPROVEN"}[a_status]
         gate_b = "pass" if ok_b else "regressed"

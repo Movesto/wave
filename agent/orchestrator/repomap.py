@@ -23,6 +23,17 @@ _ROUTE = re.compile(
     r"|@(Get|Post|Put|Delete|Patch|All)\s*\("                                        # nestjs controllers
     r"|\b(app|router|r|api|route)\.(get|post|put|delete|patch|use|all|head)\s*\(\s*['\"]"  # express
     r"|\.add_(url_rule|route)\s*\(|\brouter\.(register|add)"                          # flask/connexion/etc
+    r"|#\[\s*(get|post|put|delete|patch|head|options|route)\s*\("                     # rust: rocket/actix macros
+    r"|@(Get|Post|Put|Delete|Patch|Request)Mapping\b"                                 # java: spring
+    r"|\[\s*Http(Get|Post|Put|Delete|Patch)\b|\[\s*Route\s*\("                        # c#: asp.net attrs
+    r"|\.Map(Get|Post|Put|Delete|Group)\s*\("                                         # c#: minimal-api
+    r"|\bRoute::\s*(get|post|put|patch|delete|any|match|resource|apiResource)\s*\("    # php: laravel
+    r"|#\[\s*Route\s*\("                                                              # php: symfony attr
+    r"|\b\w+\.(GET|POST|PUT|DELETE|PATCH|Handle|HandleFunc)\s*\(\s*[\"`]"              # go: gin/echo/chi/mux
+    r"|^\s*(get|post|put|patch|delete|match)\s+['\"]"                                  # ruby: rails routes.rb
+    r"|^\s*(resources?|namespace)\s+:"                                                 # ruby: rails resources
+    r"|\b(get|post|put|delete|patch|head|options)\s*\(\s*\"[^\"]*\"\s*\)\s*\{"          # kotlin: ktor DSL get(\"/x\"){
+    r"|\.route\s*\(\s*\"|\bweb::(get|post|put|delete|patch|resource|scope)\s*\("        # rust: actix .route/web::
 )
 
 # --- The 9 injection classes the detector tries FIRST (class label -> sink regex) ---------------------
@@ -118,7 +129,9 @@ _SINKS_RUST = [
     ("path",     re.compile(r"File::(open|create)\s*\(|fs::(read|write|remove_file|File)")),
     ("ssrf",     re.compile(r"reqwest::|hyper::|ureq::|Client::new")),
     ("SQLi",     re.compile(r"sqlx::query\s*\(|\.execute\s*\(\s*&?format!|diesel::sql_query|rusqlite")),
-    ("deser",    re.compile(r"bincode::deserialize|serde_yaml::from|serde_pickle")),
+    # NB: Rust `serde` deserialization (serde_yaml/serde_json/bincode/serde_pickle) is SAFE -- it parses into
+    # typed values with no code-execution gadgets (no pickle __reduce__ / Java readObject). It is NOT CWE-502,
+    # so there is deliberately no deser sink here (flagging it was a false positive on real repos, e.g. MemWhale).
 ]
 # C / C++: the signature classes are memory-safety (buffer/format) + command/path -- proving memory safety
 # needs a sanitizer we don't run, so those pin for RECALL but land needs-review downstream.
@@ -130,9 +143,68 @@ _SINKS_C = [
 ]
 
 
+# Swift (Vapor / iOS): its own small table. Kotlin/Scala run on the JVM -> reuse the Java sinks.
+_SINKS_SWIFT = [
+    ("cmd",      re.compile(r"Process\s*\(\)|\.launchPath|\.executableURL|/bin/sh|system\s*\(")),
+    ("path",     re.compile(r"FileManager\.|contentsOfFile:|String\(contentsOf|Data\(contentsOf|\.write\(to")),
+    ("ssrf",     re.compile(r"URLSession|URL\(string:|dataTask\(with|\.data\(from")),
+    ("SQLi",     re.compile(r"\.prepare\s*\(|\.run\s*\(\s*\"|sqlite3_exec|rawQuery")),
+    ("redirect", re.compile(r"\.redirect\s*\(")),
+]
+
+
+# Scala runs on the JVM (Java sinks apply) but its own idioms differ -- scala.sys.process for shell, string
+# interpolation for SQL. Kotlin's shell/JDBC APIs are the Java ones, so Kotlin reuses the Java table as-is.
+_SINKS_SCALA = _SINKS_JAVA + [
+    ("cmd",  re.compile(r"sys\.process\.|Process\s*\(\s*Seq|\bProcess\s*\(\s*[\"']|\.!!\B|\bStringBuilder")),
+    ("SQLi", re.compile(r"\bsql\"|\.run\s*\(\s*sql|Statement\s*\.\s*execute|\.executeQuery\s*\(")),
+]
+
+
+# --- niche / backend languages ------------------------------------------------------------------------
+_SINKS_ELIXIR = [
+    ("cmd",   re.compile(r"System\.cmd\s*\(|System\.shell\s*\(|:os\.cmd|Code\.eval_string|Code\.eval_quoted")),
+    ("path",  re.compile(r"File\.(read|write|open|stream|rm|cp|mkdir)|Path\.join")),
+    ("ssrf",  re.compile(r"HTTPoison\.|Finch\.|Tesla\.|:httpc\.|Req\.(get|post)|Mint\.")),
+    ("SQLi",  re.compile(r"Repo\.query\s*\(|Ecto\.Adapters\.SQL\.query|fragment\s*\(\s*\"")),
+]
+_SINKS_BASH = [
+    ("cmd",   re.compile(r"\beval\b|\$\(|`|\|\s*(ba)?sh\b|\bsh\b\s+-c|\bbash\b\s+-c|\bexec\b")),
+    ("path",  re.compile(r"\brm\s+-rf|\bcat\s+[\"']?\$|>\s*[\"']?\$|\bcp\b|\bmv\b")),
+    ("ssrf",  re.compile(r"\bcurl\b|\bwget\b")),
+]
+_SINKS_LUA = [
+    ("cmd",   re.compile(r"os\.execute\s*\(|io\.popen\s*\(")),
+    ("eval",  re.compile(r"\bload(string)?\s*\(|\bdofile\s*\(|\bloadfile\s*\(")),
+    ("path",  re.compile(r"io\.open\s*\(|io\.lines\s*\(")),
+    ("ssrf",  re.compile(r"http\.request|socket\.http|ngx\.location\.capture")),
+]
+_SINKS_HASKELL = [
+    ("cmd",   re.compile(r"\b(callCommand|callProcess|readProcess|readCreateProcess|spawnCommand|system|"
+                         r"rawSystem|runCommand|createProcess)\b")),
+    ("path",  re.compile(r"\b(readFile|writeFile|appendFile|openFile|removeFile)\b")),
+    ("ssrf",  re.compile(r"\b(httpLBS|httpBS|parseRequest|simpleHttp|getResponseBody)\b")),
+    ("SQLi",  re.compile(r"\b(rawQuery|execute_|query_)\b|\bsql\b\s*\$")),
+]
+_SINKS_DART = [
+    ("cmd",   re.compile(r"Process\.(run|start|runSync)\s*\(")),
+    ("path",  re.compile(r"\bFile\s*\(|\bDirectory\s*\(|\.readAsString|\.writeAsString")),
+    ("ssrf",  re.compile(r"HttpClient\s*\(|http\.(get|post|read)\s*\(|\.getUrl\s*\(|Uri\.parse\s*\(")),
+    ("SQLi",  re.compile(r"\.rawQuery\s*\(|\.execute\s*\(\s*[\"']|database\.query")),
+]
+_SINKS_PERL = [
+    ("cmd",   re.compile(r"\bsystem\s*\(|\bexec\s*\(|\bqx\s*[/({]|`|open\s*\([^)]*\|")),
+    ("eval",  re.compile(r"\beval\s*[\"'{]")),
+    ("path",  re.compile(r"\bopen\s*\(|\bunlink\s*\(|\bsysopen\b")),
+]
+
+
 def _lang_sinks(lang):
     return {"php": _SINKS_PHP, "ruby": _SINKS_RUBY, "go": _SINKS_GO, "java": _SINKS_JAVA,
-            "csharp": _SINKS_CSHARP, "rust": _SINKS_RUST, "c": _SINKS_C, "cpp": _SINKS_C}.get(
+            "csharp": _SINKS_CSHARP, "rust": _SINKS_RUST, "c": _SINKS_C, "cpp": _SINKS_C,
+            "kotlin": _SINKS_JAVA, "scala": _SINKS_SCALA, "swift": _SINKS_SWIFT,
+            "elixir": _SINKS_ELIXIR, "bash": _SINKS_BASH, "lua": _SINKS_LUA, "haskell": _SINKS_HASKELL,
+            "dart": _SINKS_DART, "perl": _SINKS_PERL}.get(
         lang, (_SINKS_PY if lang == "python" else _SINKS_JS) + _SINKS_COMMON)
 
 
@@ -298,6 +370,62 @@ def _is_import(line):
     return bool(_IMPORT_LINE.match(line))
 
 
+# --- no-sink BROKEN OBJECT AUTHORIZATION (IDOR) ------------------------------------------------------
+# IDOR has no injection sink -- it's a MISSING ownership check on a resource fetched by an attacker-supplied
+# id. Deterministic recall for the class the sink tables structurally cannot see.
+_ID_PARAM = re.compile(r"\b(id|pk|uuid|guid|slug|\w+_id|\w+Id)\b", re.I)          # an id-like parameter name
+_STORE_ACCESS = re.compile(r"\.(get|find|findOne|findById|query|fetch|select|first|filter|find_by|"
+                           r"get_object_or_404|load|retrieve|read)\s*\(|\bSELECT\b", re.I)  # fetches a resource
+_OWNERSHIP = re.compile(r"current_user|request\.user|req\.user|\.user_id|\bowner|is_admin|isadmin|authorize|"
+                        r"permission|\bcan_|login_required|ensure_owner|check_owner|belongs_to|\.scope|"
+                        r"@roles|hasrole|require_role|AdminToken|AdminUser|CurrentUser", re.I)
+
+
+# --- custom-named sinks (framework/app wrappers the per-language tables can't enumerate) --------------
+# High-signal danger tokens that rarely appear in a benign function name -> catch run_shell()/exec_sql()/
+# unsafe_render()-style wrappers the exact-name sink tables miss. Recall net; the class is inferred.
+_CUSTOM_SINK = re.compile(
+    r"\b\w*(shell|popen|spawn|subprocess|unpickle|deserial|unmarshal|unserialize|rawquery|raw_query|"
+    r"exec_sql|sql_exec|unsafe|render_template_string)\w*\s*\(\s*[^)\s]"
+    r"|\b(run|exec|eval|invoke)_(cmd|command|shell|sql|query|code|script|template)\s*\(", re.I)
+
+
+def _custom_sink_class(name):
+    n = name.lower()
+    if any(k in n for k in ("shell", "popen", "spawn", "subprocess", "cmd", "command")):
+        return "cmd"
+    if any(k in n for k in ("unpickle", "deserial", "unmarshal", "unserialize")):
+        return "deser"
+    if any(k in n for k in ("sql", "query")):
+        return "SQLi"
+    if any(k in n for k in ("render", "template", "unsafe")):
+        return "xss"
+    if any(k in n for k in ("eval", "code", "script")):
+        return "eval"
+    return "other"
+
+
+def _authz_pins(finfo, src_lines):
+    """No-sink IDOR / broken-object-authorization LEADS: a route HANDLER that fetches a resource by an
+    id-like param but shows no ownership/role check. A recall signal (the detector/model decide), scoped to
+    real untrusted entries so internal getters aren't all flagged."""
+    out = []
+    funcs = list(finfo.functions)
+    for c in finfo.classes:
+        funcs.extend(c.methods)
+    for f in funcs:
+        if not reachability.is_untrusted_entry(f):                   # only real endpoints, not helper getters
+            continue
+        if not _ID_PARAM.search(f.sig or ""):                        # takes an id-like parameter
+            continue
+        body = "\n".join(src_lines[max(0, f.line - 1):f.end or f.line])
+        if not _STORE_ACCESS.search(body) or _OWNERSHIP.search(body):  # fetches a resource AND no ownership check
+            continue
+        code = src_lines[f.line - 1].strip()[:160] if 0 < f.line <= len(src_lines) else f.name
+        out.append((f.line, "authz", code))
+    return out
+
+
 def scan_pins(finfo):
     """Scan one file's lines for routes, 9-class sinks, and dynamic blind spots. Returns three lists of
     (line, label, code). Sink pins are hints, not verdicts."""
@@ -322,6 +450,13 @@ def scan_pins(finfo):
                     sinks.append((i, label, code))
                 matched = True
                 break
+        if not matched:                                    # custom-named danger wrapper (run_shell/exec_sql/...)
+            cm = _CUSTOM_SINK.search(s)
+            if cm:
+                label = _custom_sink_class(cm.group(0))
+                if not (is_client and label in reachability.SERVER_ONLY_CLASSES):
+                    sinks.append((i, label, code))
+                matched = True
         if not matched:                                    # dynamic dispatch / reflection the call graph misses
             for rx, kind in eyes._DYNAMIC:
                 if kind == "route registration":
@@ -329,6 +464,8 @@ def scan_pins(finfo):
                 if rx.search(s):
                     dyn.append((i, kind, code))
                     break
+    if not is_client:                                      # server-side only -- no authz surface in the browser
+        sinks.extend(_authz_pins(finfo, src_lines))        # no-sink IDOR leads (deterministic recall)
     return routes, sinks, dyn
 
 

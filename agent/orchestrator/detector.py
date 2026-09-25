@@ -47,8 +47,37 @@ _FALSIFY_SYS = (
     "verdict that contradicts your own reason.")
 
 
-def _load_findings(notebook_path):
-    """Flatten the notebook's per-file findings into deduped candidate records."""
+def _codemap_pins(root):
+    """Deterministic candidates straight from the codemap's classified sink-pins (the same [SINK:<class>]
+    pins repomap renders into wave_map.md). This is the RECALL FLOOR: a notebook whiff -- an empty/failed
+    model note on a vulnerable file -- can no longer blank the pipeline, because the sinks codemap already
+    found still flow to detect. Same record shape as a notebook finding (confidence '' -> ranked below the
+    model's own high-confidence leads, so notebook findings still get budget priority)."""
+    from . import codemap, repomap
+    out = []
+    try:
+        cmap = codemap.build(str(root))
+    except Exception:
+        return out
+    rootp = Path(root)
+    for p, finfo in cmap.files.items():
+        try:
+            _routes, sinks, _dyn = repomap.scan_pins(finfo)
+        except Exception:
+            continue
+        try:
+            rel = str(Path(p).resolve().relative_to(rootp.resolve())).replace("\\", "/")
+        except Exception:
+            rel = Path(p).name
+        for (ln, label, code) in sinks:
+            out.append({"file": rel, "line": int(ln or 0), "class": str(label or "other").lower(),
+                        "sink": str(code or ""), "input": "", "why": "codemap sink-pin", "confidence": ""})
+    return out
+
+
+def _load_findings(notebook_path, root=None):
+    """Flatten the notebook's per-file findings into deduped candidate records, MERGED with the codemap's
+    deterministic sink-pins (when `root` is given) so detection never depends on the notebook alone."""
     out, seen = [], set()
     for line in Path(notebook_path).read_text(encoding="utf-8", errors="replace").splitlines():
         try:
@@ -70,6 +99,13 @@ def _load_findings(notebook_path):
             out.append({"file": note.get("file", ""), "line": ln, "class": cls,
                         "sink": str(f.get("sink") or ""), "input": str(f.get("input") or ""),
                         "why": str(f.get("why") or ""), "confidence": str(f.get("confidence") or "")})
+    if root is not None:                                    # recall floor: codemap sink-pins (deduped)
+        for f in _codemap_pins(root):
+            key = (f["file"], f["line"], f["class"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(f)
     return out
 
 
@@ -135,15 +171,17 @@ def falsify(model, root, finding):
     return {"verdict": v, "reason": str(d.get("reason") or "")}
 
 
-def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True):
+def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True, jobs=1):
     """Falsify the notebook's findings (highest severity+confidence first, up to budget). Writes the
     per-finding verdicts to wave_detect.jsonl (resumable) and the SURVIVORS (ranked) to
-    wave_candidates.jsonl -- the Stage 3 worklist. Returns (survivors, refuted)."""
+    wave_candidates.jsonl -- the Stage 3 worklist. `jobs`>1 falsifies CONCURRENTLY (cloud model only).
+    Returns (survivors, refuted)."""
+    from .parallel import fan_out, is_cloud_model
     out_dir = Path(out_dir or root)
     notebook_path = notebook_path or (out_dir / "wave_notebook.jsonl")
     if not Path(notebook_path).exists():
         raise SystemExit(f"no notebook at {notebook_path} -- run `eyes --notes` first")
-    findings = sorted(_load_findings(notebook_path), key=_rank_key, reverse=True)
+    findings = sorted(_load_findings(notebook_path, root=root), key=_rank_key, reverse=True)
 
     detect_log = out_dir / "wave_detect.jsonl"
     done = {}
@@ -155,24 +193,34 @@ def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True):
             except Exception:
                 pass
 
-    n_todo = min(budget, sum(1 for f in findings if (f["file"], f["line"], f["class"]) not in done))
-    worked = 0
+    todo = []
+    for f in findings:
+        if (f["file"], f["line"], f["class"]) in done:
+            continue
+        if len(todo) >= budget:
+            break
+        todo.append(f)
+    n_todo = len(todo)
+    if jobs > 1 and not is_cloud_model(model):
+        print("[detect] --jobs>1 needs a cloud model -- falsifying serially", flush=True)
+        jobs = 1
+
+    def _compute(f, i):
+        print(f"[detect] {i}/{n_todo} falsify {f['class']}@{f['file']}:{f['line']} ...", flush=True)
+        try:
+            return falsify(model, root, f)                  # falsify already fails SAFE (survives) on a glitch
+        except Exception as e:
+            return {"verdict": "survives", "reason": f"falsify error, kept as a lead: {type(e).__name__}: {e}"}
+
     with detect_log.open("a", encoding="utf-8") as fh:
-        for f in findings:
-            key = (f["file"], f["line"], f["class"])
-            if key in done:
-                continue
-            if worked >= budget:
-                break
-            worked += 1
-            print(f"[detect] {worked}/{n_todo} falsify {f['class']}@{f['file']}:{f['line']} ...", flush=True)
-            res = falsify(model, root, f)
+        def _commit(f, res, i):
             rec = {**f, **res}
             fh.write(json.dumps(rec) + "\n")
             fh.flush()
-            done[key] = rec
+            done[(f["file"], f["line"], f["class"])] = rec
             mark = "SURVIVES" if res["verdict"] == "survives" else "refuted"
-            print(f"[detect]   -> {mark}: {res['reason'][:90]}", flush=True)
+            print(f"[detect]   -> {mark} ({f['class']}@{f['file']}:{f['line']}): {res['reason'][:80]}", flush=True)
+        fan_out(todo, _compute, _commit, jobs)
 
     results = [done[(f["file"], f["line"], f["class"])] for f in findings
                if (f["file"], f["line"], f["class"]) in done]

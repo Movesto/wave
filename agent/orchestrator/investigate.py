@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 
-from .execute import execute
+from . import oracle
+from .execute import _DEPS_MOUNT, execute, install_packages
 
 _AGENT_SYS = (
     "You are a security investigator with a real SANDBOX you can run commands in. Investigate the "
@@ -25,8 +28,21 @@ _AGENT_SYS = (
     "nothing else:\n"
     '  run a command: {"action":"run","command":"<shell command>","image":"<optional docker image, '
     'e.g. python:3.12-slim or node:20-slim>","network":"<none|host>","why":"<what you expect to see>"}\n'
+    '  install deps:  {"action":"install","packages":["<pkg>",...],"why":"<why THIS test needs them>"}  '
+    "(use this on a ModuleNotFoundError -- it downloads them; ask only for what this test needs)\n"
+    '  write a file:  {"action":"write","path":"<relative path, e.g. app/.wave_repro.mjs>","content":"<full '
+    'file>"}  (author your OWN repro when the provided scaffold does not fit -- then run it)\n'
     '  finish:        {"action":"conclude","verdict":"confirmed|refuted|believed|blocked|anomalous_state",'
-    '"cwe":"CWE-XX","why":"<why, citing what you OBSERVED>","evidence":"<the concrete observed effect>"}\n'
+    '"cwe":"CWE-XX","why":"<why, citing what you OBSERVED>","evidence":"<the concrete observed effect>",'
+    '"methodology":"<the method you used + why it fits, and other vectors/methods you tried or considered>",'
+    '"reach_witnessed":true|false}   (reach_witnessed=true ONLY if you drove the value from the untrusted '
+    "ENTRY to the sink, not just exercised the sink in isolation)\n"
+    "  not a vuln:    a variant of conclude with verdict 'not_exploitable' -- use ONLY when you determined by "
+    "READING the code that the flagged input CANNOT be attacker-controlled in the real threat model (it comes "
+    "from a build-time env var / hardcoded constant / an internal trusted caller / an already-authenticated "
+    "ownership-scoped value / a framework that sanitizes it), and NAME that source in why. This is a reasoned "
+    "SAFE-leaning judgment, NOT a proof. If you are UNSURE it is attacker-reachable, use 'believed', not this; "
+    "and never use it merely because you could not run the code.\n"
     "RULES: (1) You may only CONFIRM after you have RUN something and OBSERVED the effect that proves it; "
     "reasoning alone is 'believed', never 'confirmed'. (2) 'refuted' means you ran it and saw it is safe. "
     "(3) 'blocked' means you could not run what you needed. (4) Keep commands self-contained; the target's "
@@ -41,6 +57,16 @@ _AGENT_SYS = (
     "file first in one command with a heredoc, e.g. \"cat > t.py <<'EOF'\\n...\\nEOF\\npython3 t.py\". "
     "If a command fails, READ the error and try a DIFFERENT approach -- never repeat the same failing "
     "command.\n"
+    "WORK LIKE A PENTESTER: don't tunnel-vision on the first method. If your test doesn't prove it, try a "
+    "DIFFERENT angle before settling (another input vector -- path/query/header/body/a nested property -- a "
+    "different payload, or a different way the input reaches the sink). When you conclude, fill `methodology`: "
+    "the method you used and WHY it fits this sink/class, and the other methods/vectors you tried or considered. "
+    "THE SCAFFOLD IS OPTIONAL: a fast-path repro may be provided in the task, but it is only a convenience. "
+    "If it does not fit the target -- a framework component that needs a real renderer (e.g. React "
+    "renderToStaticMarkup), a method that must be constructed first, a multi-file setup -- do NOT give up and "
+    "do NOT conclude 'unproven'/'refuted' just because the scaffold couldn't load it. WRITE YOUR OWN repro "
+    "(the `write` action), place it where its imports resolve, run it, and observe. A scaffold that fails to "
+    "load is a tooling limit, NEVER evidence the code is safe.\n"
     "READING THE PROOF: when you inject a command (e.g. `; id`, `; echo WAVE-PWNED`), the OUTPUT of that "
     "injected command IS the proof -- a `uid=...` line, your marker, a file listing means it executed. "
     "The moment you see it, CONCLUDE 'confirmed' and cite that exact output as the evidence; do not keep "
@@ -53,7 +79,17 @@ _AGENT_SYS = (
     "\"why\":\"the injected id ran\",\"evidence\":\"uid=0(root) gid=0(root)\"}"
 )
 
-_VERDICTS = {"confirmed", "refuted", "believed", "blocked", "anomalous_state"}
+_VERDICTS = {"confirmed", "refuted", "believed", "blocked", "anomalous_state", "not_exploitable"}
+
+# cues a REASONED not_exploitable must name -- the concrete reason the flagged input is not attacker-
+# controllable / the sink is not a runtime attack surface. A verdict that cites none of these is not a
+# judgment, it's a hand-wave -> downgraded to a visible 'believed' lead (safe direction).
+_NONEXPLOIT_CUES = (
+    "environment", "env var", "process.env", "$env", "build-time", "build time", "buildtime", "build script",
+    "packaging", "ci ", "hardcoded", "hard-coded", "constant", "literal", "compile-time", "compile time",
+    "authenticated", "ownership", "owner-scoped", "scoped to", "internal caller", "internal-only", "trusted",
+    "not attacker", "not user-control", "not remotely", "not user controlled", "not reachable", "unreachable",
+    "sanitiz", "framework", "signing identity", "developer", "keychain", "config value", "not exploitable")
 
 # --- Native tool-calling path (for a tool-tuned model behind an OpenAI-compatible API: ollama etc.) ---
 # The model returns structured tool_calls instead of our text JSON; the enum on `verdict` makes parroting
@@ -66,8 +102,9 @@ _NATIVE_SYS = (
     "done, call conclude. To run an exported function, require/import it (e.g. "
     "node -e \"require('/work/app').f('; id')\" or python3 -c \"import app; app.f('; id')\"). "
     "A run that fails with a MISSING dependency (ModuleNotFoundError / Cannot find module) or a refused "
-    "connection is an ENVIRONMENT problem, NOT evidence the code is safe -- fix it (install the package "
-    "with network 'host', e.g. `pip install <pkg>` / `npm i <pkg>`, or start the service) and re-run. "
+    "connection is an ENVIRONMENT problem, NOT evidence the code is safe -- fix it: call the `install` tool "
+    "with the missing package name(s) (it downloads them; your runs stay offline but can then import them), "
+    "asking ONLY for what this test needs -- then re-run. (Or start the service if that's what's missing.) "
     "If you still cannot run it AND web_search is available, do what a pentester does when they can't run the "
     "target: RESEARCH it -- web_search the dependency/API/service, web_read the docs, and reason about "
     "whether the flow is exploitable given how that library ACTUALLY behaves. Then conclude a reasoned "
@@ -77,6 +114,20 @@ _NATIVE_SYS = (
     "big output, use grep_output(pattern) / tail_output(lines) to inspect the last run. Use verdict "
     "'anomalous_state' (not 'confirmed') when you OBSERVED a business-logic / IDOR state change that is a "
     "judgment call rather than a tool-witnessed injection. "
+    "Use verdict 'not_exploitable' when you determined by READING the code that the flagged input CANNOT be "
+    "attacker-controlled in the real threat model (build-time env var / hardcoded constant / internal trusted "
+    "caller / already-authenticated ownership-scoped value / framework-sanitized) -- NAME that source in why. "
+    "It is a reasoned SAFE-leaning judgment, not a proof; if UNSURE it is attacker-reachable use 'believed', "
+    "and never use it just because you could not run the code. "
+    "WORK LIKE A PENTESTER: don't stop at the first method -- if a test doesn't prove it, try a DIFFERENT "
+    "vector/payload/entry before settling for 'believed'. In `methodology`, document the method you used, why "
+    "it fits, and the alternatives you tried or considered. "
+    "THE SCAFFOLD IS OPTIONAL: a fast-path repro may be provided, but it is only a convenience. If it does "
+    "not fit the target -- a framework component that needs a real renderer (e.g. React renderToStaticMarkup), "
+    "a method that must be constructed first, a multi-file setup -- call write_file to author YOUR OWN repro "
+    "(place it where its imports/node_modules resolve), then run_command it. A scaffold that fails to load is a "
+    "tooling limit, NEVER evidence the code is safe -- do NOT conclude 'refuted'/'unproven' from it; build your "
+    "own and observe. "
     "ACT, DON'T ORIENT: the relevant code is ALREADY in the task -- do NOT waste steps re-reading files "
     "with cat/sed/ls/head. Your budget is small. Your FIRST action should TEST the vulnerability (run the "
     "scaffold with a payload, or call the function with an injection) and OBSERVE the effect; then CONCLUDE. "
@@ -94,15 +145,37 @@ _RUN_TOOL = {"type": "function", "function": {
         "network": {"type": "string", "enum": ["none", "host"], "description": "network access (default none)"},
     }, "required": ["command"]}}}
 
+_INSTALL_TOOL = {"type": "function", "function": {
+    "name": "install",
+    "description": "Download the package(s) the sandbox is missing so you can import/run the target (e.g. "
+                   "after a ModuleNotFoundError / 'Cannot find module'). They are fetched WITH network and "
+                   "become importable in your later run_command calls, which still run OFFLINE. Ask ONLY for "
+                   "what THIS test needs -- not the whole project. pip names by default (python:...), npm "
+                   "names if the image is node:...",
+    "parameters": {"type": "object", "properties": {
+        "packages": {"type": "array", "items": {"type": "string"},
+                     "description": "package names, e.g. [\"fastapi\",\"python-jose[cryptography]\"]"},
+        "why": {"type": "string", "description": "what you need them for"},
+    }, "required": ["packages"]}}}
+
 _CONCLUDE_TOOL = {"type": "function", "function": {
     "name": "conclude",
     "description": "Give the final verdict once you have run enough to decide.",
     "parameters": {"type": "object", "properties": {
         "verdict": {"type": "string",
-                    "enum": ["confirmed", "refuted", "believed", "blocked", "anomalous_state"]},
+                    "enum": ["confirmed", "refuted", "believed", "blocked", "anomalous_state",
+                             "not_exploitable"]},
         "cwe": {"type": "string"},
-        "why": {"type": "string", "description": "why, citing what you observed"},
+        "why": {"type": "string", "description": "why, citing what you observed (or, for not_exploitable, the "
+                                                 "concrete reason the input is not attacker-controlled)"},
         "evidence": {"type": "string", "description": "the concrete observed effect"},
+        "methodology": {"type": "string", "description": "your APPROACH like a pentester's notes: the method "
+                        "you used to test/exploit this and WHY it fits this sink/class, plus other methods or "
+                        "input vectors you tried or considered (and why they did/didn't work)"},
+        "reach_witnessed": {"type": "boolean", "description": "TRUE only if you drove the attacker value IN AT "
+                            "THE UNTRUSTED ENTRY and observed it reach the sink (the whole path ran), not just "
+                            "exercised the sink function in isolation. Leave false/absent if you only proved the "
+                            "sink itself."},
     }, "required": ["verdict", "why"]}}}
 
 
@@ -119,7 +192,87 @@ _PROV_SIGNALS = (
 # sanitizer fired) -- distinguishes "refuted because safe" from "refuted because nothing ever ran".
 _REAL_EXEC_MARKERS = ("WAVE_RESULT", "WAVE_RENDER_CANARY", "WAVE_OUTPUT", "WAVE_CALL_ERROR", "WAVE_LOAD_ERROR",
                       "uid=", "wave_HIT", "WAVE-PWNED",
-                      "AddressSanitizer", "runtime error:", "LeakSanitizer", "SUMMARY: ")  # C/C++ ASan/UBSan
+                      "AddressSanitizer", "runtime error:", "LeakSanitizer", "SUMMARY: ",  # C/C++ ASan/UBSan
+                      "panicked at", "with overflow", "index out of bounds",              # rust runtime panics
+                      "called `Result::unwrap()`", "called `Option::unwrap()`",
+                      "panic:", "goroutine ",                                             # go runtime panics
+                      "Exception in thread", "\tat ",                                     # java/kotlin/scala (JVM)
+                      "Unhandled exception",                                              # c#/.net + dart
+                      "Fatal error:",                                                     # swift runtime trap
+                      "** (",                                                             # elixir exceptions
+                      "*** Exception",                                                    # haskell exceptions
+                      "PHP Fatal error", "Uncaught",                                      # php fatals
+                      "NoMethodError", "undefined method")                                # ruby exceptions
+
+
+# A run is a REPRO ATTEMPT (actually building/running code to test the hypothesis) rather than mere
+# reconnaissance (sed/cat/grep just READING the source). Reading is not proof -- before the model is allowed
+# to settle on 'believed' for a provable finding, it must have TRIED to reproduce. These tokens cover every
+# proof recipe (compilers/interpreters/build tools/the scaffold/the marker). Recon (sed/cat/grep/ls/...) has none.
+_REPRO_TOKENS = ("cargo ", "go run", "go build", "go get", "javac", "java ", "-jar", "dotnet ", "kotlinc",
+                 "swiftc", "swift ", "scala ", "scala-cli", "gcc ", "g++ ", "clang", "python3 ", "python ",
+                 "node ", "ruby ", "php ", "elixir ", "mix ", "lua ", "runghc", "ghc ", "perl ", "dart ",
+                 "bash ", ".wave_repro", "wave_poc", "wave_HIT", "wave_diff", "touch /tmp", "touch /work",
+                 "curl ", "wget ", "psql")
+
+_FORCE_REPRO = (
+    "You concluded 'believed' but you have NOT run a reproduction -- you only INSPECTED code, and reading is "
+    "not proof. Follow the recipe in the task: build the minimal repro and EXECUTE it with a CRAFTED input "
+    "(plus a benign control), then read what actually happened. Only after you have RUN it, conclude: "
+    "'confirmed' if you witnessed the effect, 'refuted' if it ran safe, or 'blocked' if it genuinely cannot be "
+    "built/run here (say the specific reason). Do it now -- run a command, don't just re-read.")
+
+_TRY_ANOTHER = (
+    "You ran a test but couldn't prove it, and you're about to settle for 'believed'. A real pentester does "
+    "NOT stop at one method -- the same bug is often reachable/triggerable a DIFFERENT way. Try ANOTHER angle "
+    "before concluding: a different INPUT VECTOR (path / query / header / body / a nested JSON property), a "
+    "different PAYLOAD shape, a different ENTRY by which the input reaches this sink, or provisioning a missing "
+    "dependency. Run one more, DIFFERENT attempt, then conclude -- and in `methodology` note what you tried.")
+
+
+def _is_repro_attempt(cmd):
+    return any(tok in (cmd or "") for tok in _REPRO_TOKENS)
+
+
+# The image PINS the language/toolchain. A reasoning model sometimes MISREADS the language (it called a Rust
+# file "V" because both use `fn`/`pub`, then hunted a nonexistent `v` compiler and never ran cargo) and burns
+# the whole budget without ever compiling. When the container is a known-language image, insist ONCE on that
+# language's real build/run tool so the reverify actually EXECUTES instead of chasing a phantom toolchain.
+_IMAGE_LANG = (
+    ("rust", ("Rust", "cargo", "cargo (cargo new + cargo run)")),
+    ("golang", ("Go", "go ", "go run")),
+    ("dotnet", ("C#/.NET", "dotnet", "dotnet run")),
+    ("openjdk", ("Java", "java", "javac + java")),
+    ("temurin", ("Java", "java", "javac + java")),
+    ("gradle", ("Java", "java", "javac + java")),
+    ("maven", ("Java", "java", "javac + java")),
+    ("kotlin", ("Kotlin", "kotlinc", "kotlinc + java -jar")),
+    ("swift", ("Swift", "swift", "swift <file>")),
+    ("scala", ("Scala", "scala", "scala-cli")),
+    ("elixir", ("Elixir", "elixir", "elixir <file> or mix")),
+    ("haskell", ("Haskell", "ghc", "runghc <file>")),
+    ("dart", ("Dart", "dart", "dart run")),
+    ("perl", ("Perl", "perl", "perl <file>")),
+    ("ruby", ("Ruby", "ruby", "ruby <file>")),
+    ("php", ("PHP", "php", "php <file>")),
+    ("node", ("JavaScript/TypeScript", "node", "node/tsx")),
+    ("python", ("Python", "python", "python3")),
+)
+
+
+def _expected_lang(image):
+    """(name, tool_token, hint) for a known-language toolchain image, else (None, None, None). Lets the loop
+    correct a model that misidentifies the language and never invokes the right compiler/interpreter."""
+    im = (image or "").lower()
+    for key, spec in _IMAGE_LANG:
+        if key in im:
+            return spec
+    return (None, None, None)
+
+
+def _lang_note(name, hint):
+    return (f"\nNOTE: this file is {name} and the container is a {name} toolchain -- do NOT treat it as any "
+            f"other language or hunt for another compiler. Build the repro with {hint} and RUN it, then conclude.")
 
 
 def _provision_signal(text):
@@ -173,6 +326,76 @@ def _tail(run_log, n=20):
     return "\n".join(run_log.splitlines()[-n:])
 
 
+def _do_install(packages, *, deps, image, kind, state):
+    """The model's `install` action: download the requested packages into the shared deps dir (once), with
+    a user-visible line so they SEE the download happen. Bounded by a budget; already-installed names are a
+    no-op. Returns a short message for the model. Never raises -- a failed install just tells the model."""
+    if isinstance(packages, str):
+        packages = [packages]
+    packages = [str(p).strip() for p in (packages or []) if str(p).strip()]
+    if not packages:
+        return "install: give a non-empty `packages` list."
+    new = [p for p in packages if p.lower() not in state["done"]]
+    if not new:
+        return "already installed this run: " + ", ".join(packages) + " -- just re-run your test."
+    if state["installs"] >= state["budget"]:
+        return (f"install budget ({state['budget']}) reached -- no more downloads. Test with what you have, "
+                "or conclude 'blocked' if a needed dependency is missing.")
+    label = ", ".join(new)
+    print(f"\U0001f4e6 [deps] installing {label} ...", flush=True)
+    res = install_packages(new, deps=deps, image=image, kind=kind)
+    state["installs"] += 1
+    if res.exit_code == 0 and not res.timed_out:
+        state["done"].update(p.lower() for p in new)
+        print(f"\U0001f4e6 [deps] ✓ installed {label}", flush=True)
+        return (f"installed: {label}. They import from {_DEPS_MOUNT} (already on your PYTHONPATH/NODE_PATH) "
+                "-- re-run your test now.")
+    tail = ((res.stderr or res.stdout) or "").strip()[-400:]
+    print(f"\U0001f4e6 [deps] ✗ install failed: {label}", flush=True)
+    return (f"install FAILED for {label} (exit {res.exit_code}"
+            + (" TIMED OUT" if res.timed_out else "") + f"): {tail}\nTry a different package name (pip vs "
+            "npm, or the real distribution name), or conclude 'blocked' if you cannot provision it.")
+
+
+def _do_write(path, content, mount, tag=""):
+    """The model's write_file action: create a NEW file in the sandbox mount so it can author its OWN repro
+    (a React render, a custom driver, a fixture) when the pre-built scaffold doesn't fit. Safety: the path
+    stays INSIDE the mount (never absolute, never via '..') and NEVER overwrites an existing file -- the
+    target's own source must stay pristine or the proof is meaningless. Written paths are recorded in a
+    per-job manifest (.wave_written{tag}.txt) that repro.remove(target, tag) deletes afterward (the `tag`
+    isolates PARALLEL proofs). Returns a short message; never raises."""
+    from pathlib import Path as _P
+    manifest_name = f".wave_written{('_' + tag) if tag else ''}.txt"
+    if not mount:
+        return "write_file unavailable here (no sandbox mount)."
+    raw = (path or "").strip().replace("\\", "/")
+    if not raw or content is None:
+        return "write_file: give a relative `path` and `content`."
+    if raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):   # absolute or drive-letter -> reject
+        return f"write_file: refused '{path}' -- give a path RELATIVE to /work, not an absolute one."
+    rel = raw
+    base = _P(mount).resolve()
+    try:
+        dest = (base / rel).resolve()
+        dest.relative_to(base)                              # reject '..' escaping the mount
+    except Exception:
+        return f"write_file: refused '{path}' -- the path must stay inside the sandbox (no '..' or absolute)."
+    if dest.name.startswith(".wave_written") or dest.exists():
+        return (f"write_file: '{rel}' already exists -- I will NOT overwrite existing/target source. Pick a "
+                f"NEW filename for your repro (e.g. {rel}.wave.mjs).")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+        with (base / manifest_name).open("a", encoding="utf-8") as _fh:
+            _fh.write(rel + "\n")
+    except Exception as e:
+        return f"write_file FAILED for '{rel}': {type(e).__name__}: {e}"
+    print(f"[write] {rel} ({len(content)} bytes)", flush=True)
+    return (f"wrote {len(content)} bytes to /work/{rel}. Now run it with run_command. If it must resolve the "
+            f"repo's node_modules/site-packages, place/anchor it accordingly (e.g. createRequire('/work/"
+            f"<pkgdir>/package.json') in Node, or run from that directory).")
+
+
 def _finalize(verdict, why, ran, saw_prov, saw_real):
     """The grounding rule + structured error escalation on a raw conclusion:
     - confirmed / anomalous_state need an OBSERVATION (ran>0), else -> believed.
@@ -185,6 +408,13 @@ def _finalize(verdict, why, ran, saw_prov, saw_real):
     if verdict == "refuted" and saw_prov and not saw_real:
         return "blocked", ("(under-provisioned: 'refuted' overturned -- the target never executed cleanly; "
                            "every run hit a missing dependency/service, so safety is NOT proven) " + why)
+    if verdict == "not_exploitable":
+        # a SAFE-leaning REASONED judgment (input not attacker-controllable / not a runtime surface). It must
+        # NAME a concrete reason; a bare assertion is not a judgment -> downgrade to a visible 'believed' lead.
+        low = (why or "").lower()
+        if len(low.strip()) < 40 or not any(cue in low for cue in _NONEXPLOIT_CUES):
+            return "believed", ("(not_exploitable needs a NAMED reason the input is not attacker-controlled; "
+                                "none was cited, so this stays an unproven lead) " + why)
     return verdict, why
 
 
@@ -232,6 +462,20 @@ _TAIL_TOOL = {"type": "function", "function": {
         "lines": {"type": "integer", "description": "how many trailing lines (default 20)"},
     }, "required": []}}}
 
+_WRITE_TOOL = {"type": "function", "function": {
+    "name": "write_file",
+    "description": "Create a NEW file in the sandbox so you can author your OWN reproduction when the "
+                   "pre-built scaffold does not fit the target -- e.g. a React component that needs "
+                   "renderToStaticMarkup, a method that must be constructed first, a multi-file fixture, a "
+                   "differential harness. Write it, then run_command it. Paths are relative to /work (the "
+                   "mounted repo); you may create it next to the code you import so its node_modules/packages "
+                   "resolve (e.g. app/.wave_repro.mjs). You may NOT overwrite an existing file -- pick a new "
+                   "name. wave cleans these up afterward.",
+    "parameters": {"type": "object", "properties": {
+        "path": {"type": "string", "description": "relative path for the NEW file, e.g. app/.wave_repro.mjs"},
+        "content": {"type": "string", "description": "the full file contents to write"},
+    }, "required": ["path", "content"]}}}
+
 # --- opt-in web tools (only added when online=True): the model's eyes on the world for an unfamiliar API,
 # library, or third-party service (AWS, etc.) it must understand to judge a flow. Context only, never proof.
 _WEB_SEARCH_TOOL = {"type": "function", "function": {
@@ -253,18 +497,28 @@ _WEB_READ_TOOL = {"type": "function", "function": {
 
 
 def _investigate_native(model, brief, *, image, mount, container, network, max_steps, step_timeout,
-                        online=False):
+                        online=False, deps=None, dep_kind="py", install_budget=6, repro_expected=True,
+                        write_tag=""):
     """Tool-calling loop over the model's NATIVE tools interface (structured tool_calls)."""
     import json as _json
     messages = [{"role": "system", "content": _NATIVE_SYS}, {"role": "user", "content": brief}]
-    tools = [_RUN_TOOL, _GREP_TOOL, _TAIL_TOOL, _CONCLUDE_TOOL]
+    tools = [_RUN_TOOL, _WRITE_TOOL, _GREP_TOOL, _TAIL_TOOL, _CONCLUDE_TOOL]
+    if deps:                                                # let the model fetch what THIS test needs
+        tools.insert(1, _INSTALL_TOOL)
     if online:                                              # opt-in egress: the model's eyes on the world
         tools += [_WEB_SEARCH_TOOL, _WEB_READ_TOOL]
+    inst_state = {"installs": 0, "budget": install_budget, "done": set()}
     trail, ran = [], 0
     run_log = ""                                            # the LAST run's full output (grep/tail read it)
+    witnessed = set()                                       # harness-planted markers seen across ALL runs (oracle)
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
     seen_cmds = set()                                       # to nudge a model re-running the same command
     believed_nudged = False                                 # one-time: a belief must cite evidence
+    repro_attempted = repro_forced = False                  # a 'believed' with NO repro attempt is pushed back once
+    method_nudged = False                                    # tried a method but couldn't prove -> try a DIFFERENT one
+    recon_streak, recon_nudged = 0, False                   # consecutive read-only cmds -> one mid-loop nudge
+    exp_name, exp_tok, exp_hint = _expected_lang(image)     # correct a wrong-language guess (e.g. Rust read as "V")
+    used_expected, lang_nudged = False, False
     for step in range(max_steps):
         try:
             msg = model.chat(messages, tools=tools, temperature=0.2)
@@ -290,6 +544,17 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 verdict, why = _finalize(str(args.get("verdict", "believed")).lower(),
                                          str(args.get("why", "")), ran, saw_prov, saw_real)
                 evidence = str(args.get("evidence", ""))
+                # a 'believed' with NO reproduction attempt = reading, not proving. Push it to RUN once.
+                if (verdict == "believed" and repro_expected and not repro_attempted
+                        and not repro_forced and step < max_steps - 1):
+                    repro_forced = True
+                    messages.append({"role": "user", "content": _FORCE_REPRO})
+                    continue
+                # tried a method but couldn't prove it -> push a DIFFERENT method once (pentester breadth)
+                if (verdict == "believed" and repro_attempted and not method_nudged and step < max_steps - 1):
+                    method_nudged = True
+                    messages.append({"role": "user", "content": _TRY_ANOTHER})
+                    continue
                 # a BELIEF is not a bare assertion -- it must cite evidence. One-time nudge if it doesn't.
                 if (verdict == "believed" and not believed_nudged and step < max_steps - 1
                         and len((evidence + why).strip()) < 40):
@@ -302,13 +567,23 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                     continue
                 print(f"[investigate:native] concluded: {verdict} after {ran} run(s)", flush=True)
                 return Verdict(verdict, why, evidence, str(args.get("cwe", "")), ran, trail,
-                               transcript=list(messages))
+                               transcript=list(messages), methodology=str(args.get("methodology", "")),
+                               reach_witnessed=bool(args.get("reach_witnessed")), witness=sorted(witnessed))
             if name == "grep_output":
                 content = _grep(run_log, str(args.get("pattern", "")), int(args.get("lines") or 10))
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
                 continue
             if name == "tail_output":
                 content = _tail(run_log, int(args.get("lines") or 20))
+                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
+                continue
+            if name == "write_file":                         # model authors its OWN repro when the scaffold doesn't fit
+                content = _do_write(args.get("path"), args.get("content"), mount, write_tag)
+                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
+                continue
+            if name == "install":                            # model asks for a missing dep -> fetch it (visible)
+                content = _do_install(args.get("packages"), deps=deps, image=image, kind=dep_kind,
+                                      state=inst_state)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
                 continue
             if name in ("web_search", "web_read"):          # opt-in egress; degrades to '' on any failure
@@ -323,23 +598,41 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 continue
             cmd = str(args.get("command", "")).strip()      # run_command
             res = execute(cmd, image=str(args.get("image") or image), mount=mount, container=container,
-                          network=str(args.get("network") or network), timeout=step_timeout)
+                          network=str(args.get("network") or network), timeout=step_timeout, deps=deps)
             ran += 1
+            if _is_repro_attempt(cmd):                       # built/ran code, not just read it
+                repro_attempted = True
+                recon_streak = 0
+            else:
+                recon_streak += 1                            # consecutive read-only (cat/sed/grep) commands
             run_log = _combined(res)                         # full output stays here, not in the prompt
+            witnessed |= oracle.scan(run_log)                # HARNESS reads its own markers (not the model's word)
             prov = _provision_signal(run_log)
             saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(run_log)
             print(f"[investigate:native] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
                   + (" TIMEOUT" if res.timed_out else "") + (" [prov-fail]" if prov else ""), flush=True)
             digest = _digest(res)
             if prov:                                         # escalate, never let it read as 'safe'
+                fix = ("call install with the missing package name" if deps
+                       else "install the package (network 'host')")
                 digest += ("\nNOTE: this is a MISSING DEPENDENCY/SERVICE (an environment problem), NOT proof "
-                           "the code is safe. Fix it -- install the package (network 'host') or start the "
-                           "service, then re-run. Do NOT conclude 'refuted' from this; if you still cannot "
-                           "provision, conclude 'blocked'.")
+                           f"the code is safe. Fix it -- {fix} or start the service, then re-run. Do NOT "
+                           "conclude 'refuted' from this; if you still cannot provision, conclude 'blocked'.")
             if cmd in seen_cmds:                             # zombie loop: re-running a command already run
                 digest += ("\nNOTE: you ALREADY ran this exact command -- do NOT repeat it. Stop reading; "
                            "TEST the vulnerability with a payload or CONCLUDE now.")
             seen_cmds.add(cmd)
+            if exp_tok and exp_tok in cmd:                   # model invoked the right toolchain -> stop correcting
+                used_expected = True
+            if (exp_name and repro_expected and not used_expected and not lang_nudged
+                    and ran >= 2 and step < max_steps - 1):  # 2 recon steps but never the right compiler -> correct once
+                lang_nudged = True
+                digest += _lang_note(exp_name, exp_hint)
+            if recon_streak >= 3 and not repro_attempted and not recon_nudged and step < max_steps - 2:
+                recon_nudged = True                          # read-thrash: burning the budget on reads, not tests
+                digest += (f"\nNOTE: you have run {recon_streak} read-only commands and TESTED nothing. Reading "
+                           "is not proof and the code is already in the task. STOP reading -- build the repro "
+                           "from the recipe and RUN it with a crafted input NOW, then conclude.")
             if max_steps - step <= 2:                        # budget almost gone -> push to finish
                 digest += (f"\nNOTE: only {max_steps - step} step(s) left. Run your ONE decisive test now, "
                            "or call conclude.")
@@ -364,6 +657,9 @@ class Verdict:
     ran: int = 0                       # how many commands were actually executed
     trail: list = field(default_factory=list)   # [(command, result_summary)]
     transcript: list = field(default_factory=list)   # the FULL model conversation (for the trace-logger)
+    methodology: str = ""              # the model's documented approach: method used, why, alternatives tried
+    reach_witnessed: bool = False      # the model drove from the untrusted ENTRY to the sink (Half B witnessed)
+    witness: list = field(default_factory=list)   # harness-planted markers the HARNESS saw in the sandbox output
 
 
 def _parse_action(txt):
@@ -390,20 +686,57 @@ def _render(trail, limit=1500):
     return "\n".join(out)
 
 
+def _dep_kind_for(image):
+    img = (image or "").lower()
+    return "js" if ("node" in img or "wave-js" in img or "tsx" in img) else "py"
+
+
 def investigate(model, brief, *, image="python:3.12-slim", mount=None, container=None,
-                network="none", max_steps=6, step_timeout=60, max_new_tokens=2000, online=False) -> Verdict:
+                network="none", max_steps=6, step_timeout=60, max_new_tokens=2000, online=False,
+                deps=None, install_budget=6, repro_expected=True, write_tag="") -> Verdict:
     """Let the model investigate `brief` (a hypothesis + the relevant code) by running commands in a
     sandbox, until it concludes or the step budget is spent. `mount` binds the target dir into the box;
     `container` runs inside the app's own container instead. `online=True` adds the opt-in web_search /
     web_read tools (the box is otherwise fully local). A tool-calling model (WAVE_API_BASE) drives the
-    NATIVE tools loop; a local text model uses the JSON-action protocol below."""
+    NATIVE tools loop; a local text model uses the JSON-action protocol below.
+
+    On-demand deps: unless `deps=False`, the model gets an `install` tool to fetch the packages THIS test
+    needs (downloaded once into a temp store with network; the exploit runs stay offline but can import
+    them). Pass a dir as `deps` to reuse one; the default creates+cleans a per-investigation temp dir."""
+    own_deps = False
+    if deps is False:                                        # caller explicitly disabled on-demand deps
+        deps = None
+    elif deps is None and container is None and shutil.which("docker") is not None:
+        deps = tempfile.mkdtemp(prefix="wave-deps-")         # per-investigation store; cleaned in finally
+        own_deps = True
+    try:
+        return _investigate(model, brief, image=image, mount=mount, container=container, network=network,
+                            max_steps=max_steps, step_timeout=step_timeout, max_new_tokens=max_new_tokens,
+                            online=online, deps=deps, install_budget=install_budget,
+                            repro_expected=repro_expected, write_tag=write_tag)
+    finally:
+        if own_deps and deps:
+            shutil.rmtree(deps, ignore_errors=True)
+
+
+def _investigate(model, brief, *, image, mount, container, network, max_steps, step_timeout,
+                 max_new_tokens, online, deps, install_budget, repro_expected=True, write_tag=""):
+    dep_kind = _dep_kind_for(image)
     if getattr(model, "supports_tools", False):
         return _investigate_native(model, brief, image=image, mount=mount, container=container,
                                    network=network, max_steps=max_steps, step_timeout=step_timeout,
-                                   online=online)
+                                   online=online, deps=deps, dep_kind=dep_kind, install_budget=install_budget,
+                                   write_tag=write_tag,
+                                   repro_expected=repro_expected)
+    inst_state = {"installs": 0, "budget": install_budget, "done": set()}
     trail = []
     ran = 0
+    witnessed = set()                                       # harness-planted markers seen across ALL runs (oracle)
+    repro_attempted = repro_forced = False                  # force a repro before 'believed' on a provable finding
+    method_nudged = False                                    # tried a method but couldn't prove -> try a DIFFERENT one
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
+    exp_name, exp_tok, exp_hint = _expected_lang(image)     # correct a wrong-language guess (e.g. Rust read as "V")
+    used_expected, lang_nudged = False, False
     for step in range(max_steps):
         user = (f"HYPOTHESIS / TASK:\n{brief}\n\nWORK SO FAR:\n{_render(trail)}\n\n"
                 f"Steps left: {max_steps - step}. Your next action (one json object):")
@@ -413,16 +746,29 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
             trail.append(("(no action parsed)", "the model emitted no valid json action"))
             continue
         kind = str(act.get("action", "")).lower()
+        if kind == "install" and deps:
+            msg = _do_install(act.get("packages") or act.get("package"), deps=deps, image=image,
+                              kind=_dep_kind_for(image), state=inst_state)
+            trail.append(("install " + ", ".join(act.get("packages") or []), msg))
+            continue
+        if kind in ("write", "write_file"):                 # author your OWN repro when the scaffold doesn't fit
+            msg = _do_write(act.get("path"), act.get("content"), mount, write_tag)
+            trail.append((f"write_file {act.get('path')}", msg))
+            continue
         if kind == "run":
             cmd = str(act.get("command", "")).strip()
             if not cmd:
                 trail.append(("(empty command)", "no command supplied"))
                 continue
             res = execute(cmd, image=str(act.get("image") or image), mount=mount, container=container,
-                          network=str(act.get("network") or network), timeout=step_timeout)
+                          network=str(act.get("network") or network), timeout=step_timeout, deps=deps)
             ran += 1
-            prov = _provision_signal(_combined(res))
-            saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(_combined(res))
+            if _is_repro_attempt(cmd):
+                repro_attempted = True
+            _out = _combined(res)
+            witnessed |= oracle.scan(_out)                   # HARNESS reads its own markers (not the model's word)
+            prov = _provision_signal(_out)
+            saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(_out)
             print(f"[investigate] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
                   + (" TIMEOUT" if res.timed_out else "") + (" [prov-fail]" if prov else ""), flush=True)
             summ = _digest(res, tools=False)               # head/tail digest, not a blind truncation
@@ -436,6 +782,12 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
                 summ += ("\nNOTE: you already ran this EXACT command. Do NOT repeat it -- READ the output "
                          "above and either CONCLUDE now (if it proves or refutes the issue) or try a "
                          "DIFFERENT command.")
+            if exp_tok and exp_tok in cmd:                  # model invoked the right toolchain -> stop correcting
+                used_expected = True
+            if (exp_name and repro_expected and not used_expected and not lang_nudged
+                    and ran >= 2 and step < max_steps - 1):  # 2 recon steps but never the right compiler -> correct once
+                lang_nudged = True
+                summ += _lang_note(exp_name, exp_hint)
             trail.append((cmd, summ))
         elif kind == "conclude":
             verdict = str(act.get("verdict", "believed")).lower()
@@ -448,8 +800,21 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
                               "concluding, then use a real verdict (confirmed/refuted/believed/blocked)"))
                 continue
             verdict, why = _finalize(verdict, why, ran, saw_prov, saw_real)   # grounding + error escalation
+            # a 'believed' with NO reproduction attempt = reading, not proving. Push it to RUN once.
+            if (verdict == "believed" and repro_expected and not repro_attempted
+                    and not repro_forced and step < max_steps - 1):
+                repro_forced = True
+                trail.append(("(no repro attempted)", _FORCE_REPRO))
+                continue
+            # tried a method but couldn't prove it -> push a DIFFERENT method once (pentester breadth)
+            if (verdict == "believed" and repro_attempted and not method_nudged and step < max_steps - 1):
+                method_nudged = True
+                trail.append(("(try another method)", _TRY_ANOTHER))
+                continue
             print(f"[investigate] concluded: {verdict} after {ran} run(s)", flush=True)
-            return Verdict(verdict, why, str(act.get("evidence", "")), str(act.get("cwe", "")), ran, trail)
+            return Verdict(verdict, why, str(act.get("evidence", "")), str(act.get("cwe", "")), ran, trail,
+                           methodology=str(act.get("methodology", "")),
+                           reach_witnessed=bool(act.get("reach_witnessed")), witness=sorted(witnessed))
         else:
             trail.append((f"(unknown action {kind!r})", "expected run or conclude"))
     verdict = "blocked" if (saw_prov and not saw_real) or ran == 0 else "believed"

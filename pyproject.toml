@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wave-agent"
+version = "0.1.0"
+description = "wave — a local, autonomous vulnerability-discovery & repair agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "tree-sitter-language-pack>=0.14",
+    "requests>=2.31",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# richer web_read deep-reads (falls back to requests+strip if absent)
+web = ["crawl4ai"]
+# running a LOCAL transformers model + trained LoRA adapter instead of the ollama/cloud API
+local-model = ["torch", "transformers", "peft", "bitsandbytes"]
+
+[project.scripts]
+wave = "agent.orchestrator.run:main"
+
+[tool.setuptools.packages.find]
+include = ["agent*"]

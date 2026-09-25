@@ -36,7 +36,14 @@ _NOTE_SYS = (
     "query, an escaped value, or a constant is NOT a finding. ALSO look for BROKEN ACCESS CONTROL / IDOR "
     "(class 'authz'): a handler that reads or writes a resource by an id/owner from the request but never "
     "checks the resource belongs to the CALLER (no ownership/role check) -- these have NO injection sink, so "
-    "the map won't hint them; you must spot them. Output ONE JSON object, nothing else:\n"
+    "the map won't hint them; you must spot them. ALSO flag a CRASH / DoS (class 'other'): an unchecked "
+    "operation on attacker-controlled input that panics or throws -- a Rust `.unwrap()`/`.expect()` or index "
+    "on a request value, a parse with no error handling, an unchecked cast/slice -- these have no injection "
+    "sink either, so you must spot them. KNOWN-SAFE patterns -- do NOT flag these: Rust `serde` "
+    "deserialization (serde_yaml/serde_json/bincode into a typed value) executes no code and is NOT CWE-502; "
+    "serde_json `Value` indexing (`v[\"k\"]`, `v[i]`) is TOTAL -- it returns Null, it does not panic; an "
+    "argv-list exec (Command/execFile/subprocess without a shell) is not command injection. Output ONE JSON "
+    "object, nothing else:\n"
     '{"purpose": "<what this file/module does, one line>", '
     '"untrusted_inputs": "<request params/body/headers/args an external caller controls, or none>", '
     '"findings": [{"line": <int>, "function": "<name>", "class": "<sqli|nosqli|cmd|eval|path|ssrf|xss|'
@@ -50,12 +57,15 @@ _NOTE_SYS = (
 # ---- deterministic ledger index (no model) -----------------------------------------------------------
 
 _AUTH_ADMIN = re.compile(r"adminuser|get_admin_user|\bis_admin\b|isadmin|require_admin|requireadmin|"
-                         r"adminguard|roles\s*\(\s*['\"]admin", re.I)
+                         r"adminguard|roles\s*\(\s*['\"]admin|admintoken|hasrole\s*\(\s*['\"]?admin|"
+                         r"@?preauthorize[^)]*admin|@secured[^)]*admin|rolesallowed[^)]*admin", re.I)
 # NB: match auth DEPENDENCIES, not the login form -- OAuth2PasswordRequestForm is the /login input, not a
 # guard, so don't match bare "oauth2" (it would tag the unauthenticated /login as protected).
 _AUTH_USER = re.compile(r"currentuser|get_current_user|isloggedin|require_auth|requireauth|"
                         r"login_required|useguards|jwtauthguard|authguard|oauth2passwordbearer|"
-                        r"depends\s*\([^)]*(user|auth|current|token|session)", re.I)
+                        r"depends\s*\([^)]*(user|auth|current|token|session)|"
+                        r"@?preauthorize|@secured|rolesallowed|@authenticated|authenticate\s*\{|"
+                        r"\bbefore_action\b|ensure_authenticated|verifyjwt|verify_token|requireuser", re.I)
 
 
 def _auth_from(text):
@@ -148,7 +158,7 @@ def select_targets(model, root, per_file, pinned, budget, index=None):
     user = f"N = {budget}\n\nATTACK-SURFACE INDEX ({len(pinned)} candidate files):\n{_index_text(idx)}"
     picks = []
     try:
-        txt = model.generate(_SELECT_SYS, user, max_new_tokens=2000, temperature=0.2, think=False,
+        txt = model.generate(_SELECT_SYS, user, max_new_tokens=2000, temperature=0.0, think=False,
                              json_mode=True)
         after = (txt or "").split("</think>")[-1]
         i, j = after.find("["), after.rfind("]")
@@ -176,8 +186,12 @@ def _windows_for(src, focus_lines, window=_WINDOW, max_windows=_MAX_WINDOWS):
     actually in view. Falls back to the head when there are no pins. Each window is one generate call."""
     lines = src.splitlines()
     n = len(lines)
-    starts = sorted({((fl - 1) // window) * window for fl in focus_lines if 1 <= fl <= n})
-    starts = (starts or [0])[:max_windows]
+    if focus_lines:                                          # pinned: windows COVER the pin lines
+        starts = sorted({((fl - 1) // window) * window for fl in focus_lines if 1 <= fl <= n})
+        starts = (starts or [0])[:max_windows]
+    else:                                                    # no pins (all-files read): cover head-to-tail, capped
+        nwin = max(1, (n + window - 1) // window)
+        starts = [i * window for i in range(min(nwin, max_windows))]
     out = []
     for s in starts:
         chunk = lines[s:s + window]
@@ -221,27 +235,40 @@ def read_note(model, root, path, per_file_entry):
     focus = [ln for ln, _, _ in routes] + [ln for ln, _, _ in sinks] + [ln for ln, _, _ in dyn]
     hints = _hint_block(per_file_entry)
     rel = _rel(root, path)
-    note = {"file": rel, "purpose": "", "untrusted_inputs": "", "findings": [],
-            "classes_to_try_first": [], "cross_file": ""}
     wins = _windows_for(src, focus)
-    for start, body in wins:
-        span = f" (lines {start}-{start + _WINDOW - 1})" if len(wins) > 1 else ""
-        user = (f"FILE {rel}{span}\nMAP HINTS (confirm or dismiss against the code):\n{hints}\n\n"
-                f"SOURCE:\n{body}")
-        txt = model.generate(_NOTE_SYS, user, max_new_tokens=_TOKENS, temperature=0.2, think=False,
-                             json_mode=True)
-        d = _parse_note(txt)
-        if not d:
-            continue
-        note["purpose"] = note["purpose"] or str(d.get("purpose") or "")
-        note["untrusted_inputs"] = note["untrusted_inputs"] or str(d.get("untrusted_inputs") or "")
-        note["cross_file"] = note["cross_file"] or str(d.get("cross_file") or "")
-        for f in (d.get("findings") or []):
-            if isinstance(f, dict):
-                note["findings"].append(f)
-        for c in (d.get("classes_to_try_first") or []):
-            if c and c not in note["classes_to_try_first"]:
-                note["classes_to_try_first"].append(c)
+
+    def _one_pass(temperature):
+        nt = {"file": rel, "purpose": "", "untrusted_inputs": "", "findings": [],
+              "classes_to_try_first": [], "cross_file": ""}
+        for start, body in wins:
+            span = f" (lines {start}-{start + _WINDOW - 1})" if len(wins) > 1 else ""
+            user = (f"FILE {rel}{span}\nMAP HINTS (confirm or dismiss against the code):\n{hints}\n\n"
+                    f"SOURCE:\n{body}")
+            txt = model.generate(_NOTE_SYS, user, max_new_tokens=_TOKENS, temperature=temperature,
+                                 think=False, json_mode=True)
+            d = _parse_note(txt)
+            if not d:
+                continue
+            nt["purpose"] = nt["purpose"] or str(d.get("purpose") or "")
+            nt["untrusted_inputs"] = nt["untrusted_inputs"] or str(d.get("untrusted_inputs") or "")
+            nt["cross_file"] = nt["cross_file"] or str(d.get("cross_file") or "")
+            for f in (d.get("findings") or []):
+                if isinstance(f, dict):
+                    nt["findings"].append(f)
+            for c in (d.get("classes_to_try_first") or []):
+                if c and c not in nt["classes_to_try_first"]:
+                    nt["classes_to_try_first"].append(c)
+        return nt
+
+    note = _one_pass(0.0)
+    # RECALL: a pin-rich file that came back BLANK (no purpose AND no findings) is almost always a failed /
+    # unparsed model call, not a genuinely clean file -- so we'd permanently lose its model-only findings
+    # (authz/IDOR/crash the sink-pin floor can't recover). This was the pyvuln whiff: app.py had 15 sink-pins
+    # yet an empty note -> 0 notebook candidates. Retry ONCE, with a temperature bump so the pass differs.
+    if focus and not note["purpose"] and not note["findings"]:
+        retry = _one_pass(0.4)
+        if retry["purpose"] or retry["findings"]:
+            note = retry
     # Ground the hint: keep only classes that an actual finding carries (drops the "dumped the whole
     # taxonomy on a clean file" glitch). If findings exist but none matched, fall back to their classes.
     fclasses = []
@@ -275,11 +302,12 @@ def _render_md(root, notes):
     return "\n".join(out)
 
 
-def read_notes(model, root, per_file, pinned, budget=20, out_dir=None, resume=True, targets=None):
+def read_notes(model, root, per_file, pinned, budget=20, out_dir=None, resume=True, targets=None, jobs=1):
     """Read files into persistent notes. `targets` (an ordered list of absolute paths, e.g. from
     select_targets) overrides the default top-`budget` pin-density order. Appends each note to
     wave_notebook.jsonl as it is produced (durable + resumable: a re-run skips files already noted), then
-    renders wave_notebook.md. Returns (notes, paths)."""
+    renders wave_notebook.md. `jobs`>1 reads files CONCURRENTLY (cloud model only). Returns (notes, paths)."""
+    from .parallel import fan_out, is_cloud_model
     out_dir = Path(out_dir or root)
     jsonl = out_dir / "wave_notebook.jsonl"
     done = {}
@@ -291,21 +319,33 @@ def read_notes(model, root, per_file, pinned, budget=20, out_dir=None, resume=Tr
             except Exception:
                 pass
     targets = list(targets) if targets is not None else pinned[:budget]
+    todo = [p for p in targets if _rel(root, p) not in done]
+    for p in targets:
+        if _rel(root, p) in done:
+            print(f"[notebook] skip (already noted) {_rel(root, p)}", flush=True)
+    if jobs > 1 and not is_cloud_model(model):
+        print("[notebook] --jobs>1 needs a cloud model -- reading serially", flush=True)
+        jobs = 1
+
+    def _compute(path, i):
+        rel = _rel(root, path)
+        print(f"[notebook] {i}/{len(todo)} reading {rel} ...", flush=True)
+        try:
+            return read_note(model, root, path, per_file[path])
+        except Exception as e:                              # never let one file kill the pass
+            print(f"[notebook]   read failed {rel}: {type(e).__name__}: {e}", flush=True)
+            return None
+
     with jsonl.open("a", encoding="utf-8") as fh:
-        for i, path in enumerate(targets, 1):
-            rel = _rel(root, path)
-            if rel in done:
-                print(f"[notebook] {i}/{len(targets)} skip (already noted) {rel}", flush=True)
-                continue
-            print(f"[notebook] {i}/{len(targets)} reading {rel} ...", flush=True)
-            note = read_note(model, root, path, per_file[path])
+        def _commit(path, note, i):
             if note is None:
-                continue
+                return
             fh.write(json.dumps(note) + "\n")
             fh.flush()
-            done[rel] = note
+            done[_rel(root, path)] = note
             print(f"[notebook]   -> {len(note['findings'])} finding(s); "
                   f"try {note['classes_to_try_first'] or '-'}", flush=True)
+        fan_out(todo, _compute, _commit, jobs)
     notes = [done[_rel(root, p)] for p in pinned if _rel(root, p) in done]
     md = _render_md(root, notes)
     (out_dir / "wave_notebook.md").write_text(md, encoding="utf-8")

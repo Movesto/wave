@@ -1,9 +1,0 @@
-rules:
-  - id: nest-cmd
-    mode: taint
-    pattern-sources:
-      - patterns: [{pattern-inside: "$M(@Body() $SRC) { ... }"}, {pattern: $SRC}]
-    pattern-sinks: [{pattern: spawn(...)}, {pattern: exec(...)}]
-    message: command injection (NestJS @Body -> spawn)
-    languages: [typescript]
-    severity: ERROR

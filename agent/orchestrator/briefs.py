@@ -430,7 +430,16 @@ def _flow_block(flow):
             f"SOURCE and confirm it reaches the sink along this path.")
 
 
-def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None, flow=None):
+def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None, flow=None,
+               hit_marker=""):
+    """Build the proof brief. `hit_marker` (a PER-RUN random token) replaces the literal `wave_HIT` witness
+    everywhere in the brief, so the exec-witness the model plants is unpredictable -- a memorized or
+    prompt-injected bare `wave_HIT` can no longer satisfy the harness (proof-integrity hardening)."""
+    b = _build_brief(candidate, target, reason, scaffold=scaffold, mode=mode, reach=reach, route=route, flow=flow)
+    return b.replace("wave_HIT", hit_marker) if hit_marker else b
+
+
+def _build_brief(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None, flow=None):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
     fn = str(candidate.unit).split("(")[0].strip()

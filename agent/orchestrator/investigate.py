@@ -498,7 +498,7 @@ _WEB_READ_TOOL = {"type": "function", "function": {
 
 def _investigate_native(model, brief, *, image, mount, container, network, max_steps, step_timeout,
                         online=False, deps=None, dep_kind="py", install_budget=6, repro_expected=True,
-                        write_tag=""):
+                        write_tag="", hit_marker=""):
     """Tool-calling loop over the model's NATIVE tools interface (structured tool_calls)."""
     import json as _json
     messages = [{"role": "system", "content": _NATIVE_SYS}, {"role": "user", "content": brief}]
@@ -607,6 +607,8 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 recon_streak += 1                            # consecutive read-only (cat/sed/grep) commands
             run_log = _combined(res)                         # full output stays here, not in the prompt
             witnessed |= oracle.scan(run_log)                # HARNESS reads its own markers (not the model's word)
+            if hit_marker and hit_marker in run_log:         # the PER-RUN random exec marker actually fired
+                witnessed.add(hit_marker)
             prov = _provision_signal(run_log)
             saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(run_log)
             print(f"[investigate:native] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"
@@ -693,7 +695,7 @@ def _dep_kind_for(image):
 
 def investigate(model, brief, *, image="python:3.12-slim", mount=None, container=None,
                 network="none", max_steps=6, step_timeout=60, max_new_tokens=2000, online=False,
-                deps=None, install_budget=6, repro_expected=True, write_tag="") -> Verdict:
+                deps=None, install_budget=6, repro_expected=True, write_tag="", hit_marker="") -> Verdict:
     """Let the model investigate `brief` (a hypothesis + the relevant code) by running commands in a
     sandbox, until it concludes or the step budget is spent. `mount` binds the target dir into the box;
     `container` runs inside the app's own container instead. `online=True` adds the opt-in web_search /
@@ -713,20 +715,20 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
         return _investigate(model, brief, image=image, mount=mount, container=container, network=network,
                             max_steps=max_steps, step_timeout=step_timeout, max_new_tokens=max_new_tokens,
                             online=online, deps=deps, install_budget=install_budget,
-                            repro_expected=repro_expected, write_tag=write_tag)
+                            repro_expected=repro_expected, write_tag=write_tag, hit_marker=hit_marker)
     finally:
         if own_deps and deps:
             shutil.rmtree(deps, ignore_errors=True)
 
 
 def _investigate(model, brief, *, image, mount, container, network, max_steps, step_timeout,
-                 max_new_tokens, online, deps, install_budget, repro_expected=True, write_tag=""):
+                 max_new_tokens, online, deps, install_budget, repro_expected=True, write_tag="", hit_marker=""):
     dep_kind = _dep_kind_for(image)
     if getattr(model, "supports_tools", False):
         return _investigate_native(model, brief, image=image, mount=mount, container=container,
                                    network=network, max_steps=max_steps, step_timeout=step_timeout,
                                    online=online, deps=deps, dep_kind=dep_kind, install_budget=install_budget,
-                                   write_tag=write_tag,
+                                   write_tag=write_tag, hit_marker=hit_marker,
                                    repro_expected=repro_expected)
     inst_state = {"installs": 0, "budget": install_budget, "done": set()}
     trail = []
@@ -767,6 +769,8 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
                 repro_attempted = True
             _out = _combined(res)
             witnessed |= oracle.scan(_out)                   # HARNESS reads its own markers (not the model's word)
+            if hit_marker and hit_marker in _out:            # the PER-RUN random exec marker actually fired
+                witnessed.add(hit_marker)
             prov = _provision_signal(_out)
             saw_prov, saw_real = saw_prov or prov, saw_real or _real_exec(_out)
             print(f"[investigate] step {step + 1}: ran {cmd[:70]!r} -> exit {res.exit_code}"

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 from pathlib import Path
 
@@ -187,6 +188,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     except Exception:
         xf = None
     xflow = xf.get("note") if xf else None
+    hit = "wave_HIT_" + secrets.token_hex(4)                  # PER-RUN exec witness (unforgeable-by-memorization)
     mode = briefs._proof_mode(c)                             # sanitizer/ssti/protopoll/deser/render/call
     entry_fn, rpath = _reach_of(cmap, c)                     # untrusted entry + path (Half B)
     reach = (getattr(entry_fn, "name", ""), rpath) if entry_fn is not None else None
@@ -224,9 +226,9 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
         # controlled egress point when online, not blanket container network access.
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode,
-                                                        reach=reach, route=route, flow=xflow),
+                                                        reach=reach, route=route, flow=xflow, hit_marker=hit),
                                image=img, mount=target, network="none", max_steps=max_steps,
-                               step_timeout=step_to, online=online, write_tag=tag)
+                               step_timeout=step_to, online=online, write_tag=tag, hit_marker=hit)
     finally:
         repro.remove(target, tag)
     verdict = v.verdict

@@ -809,6 +809,26 @@ def test_oracle_scan_detects_markers_and_fired_canary():
     assert oracle.scan("WAVE_RENDER_CANARY: none") == set()     # canary present but did NOT fire
 
 
+def test_oracle_bare_wave_hit_not_witnessed_but_per_run_token_is():
+    # proof integrity: a BARE wave_HIT (memorized / prompt-injected) must NOT auto-witness via scan;
+    # only sink-origin markers + the harness's exact per-run token count.
+    from agent.orchestrator import oracle
+    assert "wave_HIT" not in oracle.scan("attacker echoed wave_HIT to stdout")
+    # a per-run wave_HIT_<rand> token, once recorded by the harness, still grades cmd/eval/deser confirms
+    assert oracle.graded("cmd", {"wave_HIT_a1b2c3d4"})[0] is True
+    assert oracle.graded("cmd", {"wave_HIT"})[0] is True        # canonical still accepted when explicitly present
+
+
+def test_brief_substitutes_per_run_hit_marker():
+    from agent.orchestrator import briefs
+    c = _cand(file="x/app.py", unit="ping(host)", line=3, cwe="CWE-78")
+    scaffold = ("/work/.wave_repro.py", "python3 /work/.wave_repro.py '<payload>'")   # generic-call brief has wave_HIT
+    b = briefs._brief_for(c, "x", "inconclusive", scaffold=scaffold, hit_marker="wave_HIT_deadbeef")
+    assert "wave_HIT_deadbeef" in b and " wave_HIT " not in b     # per-run token, no bare placeholder left
+    # without a marker, the literal placeholder remains (backward-compatible)
+    assert "wave_HIT" in briefs._brief_for(c, "x", "inconclusive", scaffold=scaffold)
+
+
 def test_audit_confirm_harness_marker_is_tape_grade_no_model(monkeypatch):
     # a deterministic harness marker settles a confirm -- NO second-model call is made (save the spend).
     from agent.orchestrator import prove

@@ -474,6 +474,23 @@ def cmd_iac(args):
     print(f"[iac] {len(fs)} config/infra advisory(ies) -> {out}")
 
 
+def cmd_replay(args):
+    """Re-verify previously CONFIRMED findings (a security regression suite). Needs a model for model-driven
+    findings; canary findings replay deterministically."""
+    from . import replay as _replay
+    from .model import Model
+    results, summary = _replay.run(Model(), args.target, online=getattr(args, "online", False))
+    md = _replay.render(results, summary)
+    print(md)
+    out = Path(args.target) / "wave_replay.md"
+    try:
+        out.write_text(md, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"[replay] {summary.get('still_vulnerable', 0)} still-vulnerable, {summary.get('resolved', 0)} "
+          f"resolved, {summary.get('changed', 0)} changed -> {out}")
+
+
 def cmd_secrets(args):
     """Scan git HISTORY for committed secrets (redacted). Deterministic; needs git + a repo."""
     from . import secrets as _secrets
@@ -690,6 +707,11 @@ def main():
     se = sub.add_parser("secrets", help="scan git history for committed secrets (redacted)")
     se.add_argument("target")
     se.set_defaults(func=cmd_secrets)
+
+    rp2 = sub.add_parser("replay", help="re-verify previously confirmed findings (security regression suite)")
+    rp2.add_argument("target")
+    rp2.add_argument("--online", action="store_true", help="allow the model opt-in web access during replay")
+    rp2.set_defaults(func=cmd_replay)
 
     rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")
     rpt.add_argument("target")

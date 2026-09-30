@@ -222,7 +222,12 @@ wave deps   <repo>                                          # known-CVE dependen
 wave controls <repo>                                        # missing-control advisories (CSRF/rate-limit/cookies)
 wave iac    <repo>                                          # Dockerfile/Compose/GitHub-Actions config issues
 wave secrets <repo>                                         # secrets committed to git history (redacted)
+wave replay <repo> [--online]                               # re-verify confirmed findings (regression suite)
 ```
+
+`wave replay` re-runs the proof on every previously-**confirmed** finding and reports whether each exploit
+**still fires** (still-vulnerable) or **no longer does** (resolved) — a security regression suite for CI: run
+it after changes to catch a reintroduced vuln, or to confirm a fix actually landed.
 
 **Deterministic add-ons** (no model): `wave all --online` also appends these sections to the report —
 **dependency vulnerabilities** (known CVEs via OSV.dev — PyPI/npm/crates.io/Go), **missing security controls**

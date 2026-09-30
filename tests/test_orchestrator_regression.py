@@ -628,6 +628,22 @@ def test_iac_quiet_on_safe_dockerfile(tmp_path):
     assert iac.scan(str(tmp_path)) == []
 
 
+def test_replay_loads_confirmed_and_maps_status(tmp_path):
+    from agent.orchestrator import replay
+    import json as _json
+    recs = [{"file": "a.py", "line": 10, "class": "cmd", "verdict": "confirmed", "cwe": "CWE-78"},
+            {"file": "b.py", "line": 5, "class": "sqli", "verdict": "refuted"},
+            {"file": "a.py", "line": 10, "class": "cmd", "verdict": "confirmed"}]   # dup key -> last wins
+    (tmp_path / "wave_findings.jsonl").write_text("\n".join(_json.dumps(r) for r in recs), encoding="utf-8")
+    conf = replay.load_confirmed(str(tmp_path))
+    assert len(conf) == 1 and conf[0]["file"] == "a.py"        # only confirmed, deduped
+    # status mapping: re-proof verdict -> replay outcome
+    assert replay._status("confirmed") == "still-vulnerable"
+    assert replay._status("refuted") == "resolved" and replay._status("not_exploitable") == "resolved"
+    assert replay._status("anomalous_state") == "changed"
+    assert "No confirmed findings" in replay.render([])
+
+
 def test_secrets_history_scan_diff():
     from agent.orchestrator import secrets
     diff = ("commit abc123def4567890\n+++ b/config.py\n"

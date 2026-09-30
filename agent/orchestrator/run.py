@@ -386,9 +386,23 @@ def cmd_all(args):
     from . import report as _report                        # the readable, human-facing findings report
     rp = _report.generate(t, model=getattr(model, "model_id", ""))
 
+    # Deterministic add-ons (no model): known-CVE dependency scan (OSV.dev, needs --online) + missing-control
+    # advisories. Appended to the one report so it's all in one place.
+    from . import deps as _deps, controls as _controls
+    dep_findings = _deps.scan(t, online=args.online)
+    ctl_findings = _controls.scan(t)
+    try:
+        with open(rp, "a", encoding="utf-8") as fh:
+            fh.write("\n\n" + _deps.render(dep_findings, t) + "\n" + _controls.render(ctl_findings))
+    except OSError:
+        pass
+    if not args.online:
+        print("[all] dependency CVE scan skipped (needs --online for OSV.dev)", flush=True)
+
     print(f"\n=== PIPELINE on {t} ===")
     print(f"  findings={total}  survivors={len(survivors)}  CONFIRMED={len(by['confirmed'])}  "
-          f"anomalous={len(by['anomalous_state'])}  fixed={len(fixed)}")
+          f"anomalous={len(by['anomalous_state'])}  fixed={len(fixed)}  "
+          f"dep-CVEs={len(dep_findings)}  missing-controls={len(ctl_findings)}")
     for d in by["confirmed"]:
         print(f"  [CONFIRMED {d.get('cwe')}] {d['file']}:{d['line']}  {d.get('unit', '')}  "
               f"-- {(d.get('evidence') or '')[:70]}")
@@ -412,6 +426,34 @@ def cmd_report(args):
     from . import report as _report
     rp = _report.generate(args.target, model=os.environ.get("WAVE_MODEL", ""))
     print(f"report -> {rp}")
+
+
+def cmd_deps(args):
+    """Scan the repo's dependencies for known CVEs (OSV.dev; deterministic, no model). Needs network."""
+    from . import deps as _deps
+    fs = _deps.scan(args.target, online=True)
+    md = _deps.render(fs, args.target)
+    print(md)
+    out = Path(args.target) / "wave_deps.md"
+    try:
+        out.write_text(md, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"[deps] {len(fs)} known-vulnerable dependency finding(s) -> {out}")
+
+
+def cmd_controls(args):
+    """Find missing security controls (CSRF / rate-limit / cookie flags). Deterministic, no model, no network."""
+    from . import controls as _controls
+    fs = _controls.scan(args.target)
+    md = _controls.render(fs)
+    print(md)
+    out = Path(args.target) / "wave_controls.md"
+    try:
+        out.write_text(md, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"[controls] {len(fs)} missing-control advisory(ies) -> {out}")
 
 
 # ---- CLI config: set the model/endpoint ONCE (~/.wave/config), so `wave` runs need no env each time -------
@@ -600,6 +642,14 @@ def main():
     al.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="prove N survivors in PARALLEL (cloud model only; ~4 fits a 32GB/6-core box)")
     al.set_defaults(func=cmd_all)
+
+    dp = sub.add_parser("deps", help="scan dependencies for known CVEs (OSV.dev; deterministic, needs network)")
+    dp.add_argument("target")
+    dp.set_defaults(func=cmd_deps)
+
+    ct = sub.add_parser("controls", help="find missing security controls (CSRF / rate-limit / cookie flags)")
+    ct.add_argument("target")
+    ct.set_defaults(func=cmd_controls)
 
     rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")
     rpt.add_argument("target")

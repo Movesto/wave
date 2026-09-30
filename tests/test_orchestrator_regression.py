@@ -554,6 +554,57 @@ def test_brief_instructs_drive_from_entry_half_b(tmp_path):
     assert "REACHABILITY -- prove" not in briefs._brief_for(c, str(tmp_path), "x")
 
 
+def test_deps_lockfile_parsers():
+    # dependency scanning parses (name, version) from the common manifest/lock formats (offline).
+    from agent.orchestrator import deps
+    import json as _json
+    assert deps._parse_requirements("flask==1.0\n# c\nrequests == 2.19.1\nfoo>=1\n") == \
+        [("flask", "1.0"), ("requests", "2.19.1")]                       # only exact pins
+    assert deps._parse_cargo_lock('[[package]]\nname = "time"\nversion = "0.1.42"\n') == [("time", "0.1.42")]
+    assert ("golang.org/x/net", "0.0.1") in deps._parse_go_mod(
+        "module x\nrequire (\n  golang.org/x/net v0.0.1 // indirect\n)\n")
+    pl = {"packages": {"": {}, "node_modules/lodash": {"version": "4.17.4"}}}
+    assert deps._parse_package_lock(_json.dumps(pl)) == [("lodash", "4.17.4")]
+
+
+def test_deps_scan_offline_is_empty(tmp_path):
+    # no network (online=False) -> no findings, never crashes.
+    from agent.orchestrator import deps
+    (tmp_path / "requirements.txt").write_text("flask==0.12.2\n", encoding="utf-8")
+    assert deps.scan(str(tmp_path), online=False) == []
+    assert "No known-vulnerable" in deps.render([])
+
+
+def test_controls_flags_missing_csrf_ratelimit_cookieflags(tmp_path):
+    from agent.orchestrator import controls
+    _write(tmp_path, "app/main.py",
+           "from flask import Flask, make_response\n"
+           "app = Flask(__name__)\n"
+           "@app.route('/login', methods=['POST'])\n"
+           "def login():\n"
+           "    r = make_response('ok')\n"
+           "    r.set_cookie('session', 'abc')\n"
+           "    return r\n")
+    kinds = {f["control"] for f in controls.scan(str(tmp_path))}
+    assert {"csrf", "rate-limit", "cookie-flags"} <= kinds
+
+
+def test_controls_quiet_when_controls_present(tmp_path):
+    # CSRF + rate limiter + cookie flags all present -> no advisories (no false alarms).
+    from agent.orchestrator import controls
+    _write(tmp_path, "app/main.py",
+           "from flask import Flask, make_response\n"
+           "from flask_wtf.csrf import CSRFProtect\n"
+           "from flask_limiter import Limiter\n"
+           "app = Flask(__name__); CSRFProtect(app); limiter = Limiter(app)\n"
+           "@app.route('/login', methods=['POST'])\n"
+           "def login():\n"
+           "    r = make_response('ok')\n"
+           "    r.set_cookie('s', 'abc', httponly=True, secure=True, samesite='Lax')\n"
+           "    return r\n")
+    assert controls.scan(str(tmp_path)) == []
+
+
 def test_xtaint_cross_function_chain(tmp_path):
     # cross-function taint: user input enters a handler and reaches a sink inside a helper it calls.
     from agent.orchestrator import xtaint

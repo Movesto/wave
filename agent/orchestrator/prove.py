@@ -24,7 +24,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import briefs, codemap, oracle, reachability, recorder, repro, routes, rung1, taint
+from . import briefs, codemap, oracle, reachability, recorder, repro, routes, rung1, taint, xtaint
 from . import investigate as invmod
 from .models import Candidate
 
@@ -182,6 +182,11 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
                 "why": f"no model to investigate -- canary unsettled ({reason})"}
     if tnote:                                                # resolve the slice for the model (structure, its job)
         reason = f"{reason} | value-taint: {tstatus} -- {tnote}"
+    try:                                                     # cross-function taint: the exact source->sink path
+        xf = xtaint.analyze(c)
+    except Exception:
+        xf = None
+    xflow = xf.get("note") if xf else None
     mode = briefs._proof_mode(c)                             # sanitizer/ssti/protopoll/deser/render/call
     entry_fn, rpath = _reach_of(cmap, c)                     # untrusted entry + path (Half B)
     reach = (getattr(entry_fn, "name", ""), rpath) if entry_fn is not None else None
@@ -219,7 +224,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
         # controlled egress point when online, not blanket container network access.
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode,
-                                                        reach=reach, route=route),
+                                                        reach=reach, route=route, flow=xflow),
                                image=img, mount=target, network="none", max_steps=max_steps,
                                step_timeout=step_to, online=online, write_tag=tag)
     finally:
@@ -250,6 +255,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
             "driven_trust": driven_trust,                     # trust tier of the entry the model DROVE from
             "witness": sorted(markers), "harness_witnessed": hw, "harness_marker": hmarker,
             "oracle_tier": htier,                             # 'marker' (tape-gradable) | 'judgment' (2nd-model)
+            "value_flow": xflow,                              # deterministic cross-function source->sink path (xtaint)
             "methodology": (getattr(v, "methodology", "") or "")[:400],   # the model's documented approach
             "_transcript": v.transcript, "_mode": mode}   # for the trace-logger (stripped before findings write)
 

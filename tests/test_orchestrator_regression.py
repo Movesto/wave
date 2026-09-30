@@ -554,6 +554,51 @@ def test_brief_instructs_drive_from_entry_half_b(tmp_path):
     assert "REACHABILITY -- prove" not in briefs._brief_for(c, str(tmp_path), "x")
 
 
+def test_xtaint_cross_function_chain(tmp_path):
+    # cross-function taint: user input enters a handler and reaches a sink inside a helper it calls.
+    from agent.orchestrator import xtaint
+    f = tmp_path / "a.py"
+    f.write_text("def handle(req):\n"
+                 "    name = req.args['id']\n"
+                 "    return lookup_user(name)\n"
+                 "def lookup_user(u):\n"
+                 "    return db.execute('SELECT * FROM u WHERE n=' + u)\n", encoding="utf-8")
+    r = xtaint.analyze(_cand(file=str(f), unit="lookup_user(u)", line=5, cwe="CWE-89"))
+    assert r and r["status"] == "flows"
+    hops = [h["func"] for h in r["chain"]]
+    assert hops == ["handle", "lookup_user"]                    # source -> sink path
+    # the cross-function path is surfaced to the model in the proof brief
+    c = _cand(file=str(f), unit="lookup_user(u)", line=5, cwe="CWE-89")
+    brief = briefs._brief_for(c, str(tmp_path), "x", flow=r["note"])
+    assert "VALUE FLOW" in brief and "handle -> lookup_user" in brief
+
+
+def test_xtaint_multi_hop_and_negatives(tmp_path):
+    from agent.orchestrator import xtaint
+    # 3-hop chain handle -> mid -> deep -> os.system
+    f = tmp_path / "c.py"
+    f.write_text("import os\n"
+                 "def handle(req):\n"
+                 "    x = req.args['q']\n"
+                 "    mid(x)\n"
+                 "def mid(v):\n"
+                 "    deep(v)\n"
+                 "def deep(w):\n"
+                 "    os.system('echo ' + w)\n", encoding="utf-8")
+    r = xtaint.analyze(_cand(file=str(f), unit="deep(w)", line=8, cwe="CWE-78"))
+    assert r and r["status"] == "flows" and [h["func"] for h in r["chain"]] == ["handle", "mid", "deep"]
+    # NEGATIVE: helper called only with a constant -> no untrusted chain (no false flow)
+    g = tmp_path / "b.py"
+    g.write_text("def handle(req):\n    return lookup(\"admin\")\n"
+                 "def lookup(u):\n    return db.execute('SELECT ' + u)\n", encoding="utf-8")
+    assert xtaint.analyze(_cand(file=str(g), unit="lookup(u)", line=4, cwe="CWE-89")) is None
+    # NEGATIVE: sanitized on the way in (int()) -> no raw flow
+    h = tmp_path / "d.py"
+    h.write_text("def handle(req):\n    name = int(req.args['id'])\n    return lookup(name)\n"
+                 "def lookup(u):\n    return db.execute('SELECT ' + u)\n", encoding="utf-8")
+    assert xtaint.analyze(_cand(file=str(h), unit="lookup(u)", line=5, cwe="CWE-89")) is None
+
+
 def test_taint_chained_sink_not_marked_unrelated(tmp_path):
     # #3: a chained sink `subprocess.run(<tainted>).decode('utf-8')` must read 'flows', not 'unrelated' --
     # the OUTER .decode's args are constants, but the inner run() carries the taint (the pyvuln cmd bug that

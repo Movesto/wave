@@ -421,7 +421,16 @@ def _route_block(route):
     return body
 
 
-def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None):
+def _flow_block(flow):
+    """Deterministic cross-function value flow (xtaint): the exact source->sink path, so the model feeds the
+    payload at the right place instead of guessing where the taint enters."""
+    if not flow:
+        return ""
+    return (f"\n\nVALUE FLOW (deterministic cross-function taint): {flow}. Feed the attacker payload at that "
+            f"SOURCE and confirm it reaches the sink along this path.")
+
+
+def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None, flow=None):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
     fn = str(candidate.unit).split("(")[0].strip()
@@ -556,4 +565,4 @@ def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None
             f"A quick automatic check was inconclusive ({reason}).\n\nCode around the sink:\n{code}\n\n"
             f"The whole repository is mounted at your working directory (/work). Prove or refute whether "
             f"this is a REAL, exploitable {candidate.cwe} by running code.{extra}"
-            f"{_route_block(route) if route else _reach_block(reach)}")
+            f"{_route_block(route) if route else _reach_block(reach)}{_flow_block(flow)}")

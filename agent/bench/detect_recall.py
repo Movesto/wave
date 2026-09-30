@@ -102,4 +102,9 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    r = run()
+    # CI gate: a recall regression (a vuln pin missed) OR a deterministic-precision leak fails the build.
+    if r["recall"] < 1.0 or r["fp"] > 0:
+        print(f"\nFAIL: detection recall {r['recall']:.0%} (want 100%) / deterministic FPs {r['fp']} (want 0)")
+        sys.exit(1)
+    print("\nOK: detection recall 100%, 0 deterministic false positives")

@@ -605,6 +605,47 @@ def test_controls_quiet_when_controls_present(tmp_path):
     assert controls.scan(str(tmp_path)) == []
 
 
+def test_iac_flags_dockerfile_compose_actions(tmp_path):
+    from agent.orchestrator import iac
+    _write(tmp_path, "Dockerfile", "FROM python:3.11\nADD https://x/y.sh /y.sh\nRUN curl https://get.x | sh\n"
+                                   "ENV API_KEY=abcdef123456\nCMD [\"python\",\"app.py\"]\n")
+    _write(tmp_path, "docker-compose.yml", "services:\n  db:\n    image: postgres\n    privileged: true\n"
+                                           "    network_mode: host\n    ports:\n      - \"5432:5432\"\n")
+    _write(tmp_path, ".github/workflows/ci.yml",
+           "on: pull_request_target\npermissions: write-all\njobs:\n  b:\n    steps:\n"
+           "      - uses: actions/checkout@v4\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"
+           "      - run: echo ${{ github.event.pull_request.title }}\n")
+    titles = {f["title"] for f in iac.scan(str(tmp_path))}
+    assert any("root" in t for t in titles) and any("curl" in t.lower() for t in titles)
+    assert any("Privileged" in t for t in titles) and any("Host network" in t for t in titles)
+    assert any("Database port" in t for t in titles)
+    assert any("pull_request_target" in t for t in titles) and any("script injection" in t for t in titles)
+
+
+def test_iac_quiet_on_safe_dockerfile(tmp_path):
+    from agent.orchestrator import iac
+    _write(tmp_path, "Dockerfile", "FROM python:3.11\nCOPY . /app\nUSER appuser\nCMD [\"python\",\"app.py\"]\n")
+    assert iac.scan(str(tmp_path)) == []
+
+
+def test_secrets_history_scan_diff():
+    from agent.orchestrator import secrets
+    diff = ("commit abc123def4567890\n+++ b/config.py\n"
+            "+AWS_KEY = \"AKIAIOSFODNN7EXAMPLE\"\n"          # canonical EXAMPLE -> ignored
+            "+password = \"changeme\"\n"                     # placeholder -> ignored
+            "+db_password = \"s3cr3tP@ssw0rd!\"\n"           # real -> flagged (prefixed key)
+            "+GITHUB = \"ghp_1234567890abcdefghijklmnopqrstuvwxyz\"\n"
+            "+url = \"postgres://admin:realpass123@db:5432/x\"\n"
+            "+api_key = os.environ['KEY']\n")                # env indirection -> ignored
+    types = {f["type"] for f in secrets.scan_diff(diff)}
+    assert "GitHub token" in types and "Credentials in URL" in types
+    assert any("db_password" in t for t in types)
+    assert "AWS access key id" not in types                  # EXAMPLE excluded
+    # values are redacted (never printed in full)
+    assert all("EXAMPLE" not in f["match"] and "realpass123" not in f["match"]
+               for f in secrets.scan_diff(diff))
+
+
 def test_xtaint_cross_function_chain(tmp_path):
     # cross-function taint: user input enters a handler and reaches a sink inside a helper it calls.
     from agent.orchestrator import xtaint

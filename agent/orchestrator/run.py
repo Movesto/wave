@@ -388,12 +388,15 @@ def cmd_all(args):
 
     # Deterministic add-ons (no model): known-CVE dependency scan (OSV.dev, needs --online) + missing-control
     # advisories. Appended to the one report so it's all in one place.
-    from . import deps as _deps, controls as _controls
+    from . import deps as _deps, controls as _controls, iac as _iac, secrets as _secrets
     dep_findings = _deps.scan(t, online=args.online)
     ctl_findings = _controls.scan(t)
+    iac_findings = _iac.scan(t)
+    sec_findings = _secrets.scan(t)
     try:
         with open(rp, "a", encoding="utf-8") as fh:
-            fh.write("\n\n" + _deps.render(dep_findings, t) + "\n" + _controls.render(ctl_findings))
+            fh.write("\n\n" + _deps.render(dep_findings, t) + "\n" + _controls.render(ctl_findings)
+                     + "\n" + _iac.render(iac_findings) + "\n" + _secrets.render(sec_findings))
     except OSError:
         pass
     if not args.online:
@@ -402,7 +405,8 @@ def cmd_all(args):
     print(f"\n=== PIPELINE on {t} ===")
     print(f"  findings={total}  survivors={len(survivors)}  CONFIRMED={len(by['confirmed'])}  "
           f"anomalous={len(by['anomalous_state'])}  fixed={len(fixed)}  "
-          f"dep-CVEs={len(dep_findings)}  missing-controls={len(ctl_findings)}")
+          f"dep-CVEs={len(dep_findings)}  missing-controls={len(ctl_findings)}  iac={len(iac_findings)}  "
+          f"history-secrets={len(sec_findings)}")
     for d in by["confirmed"]:
         print(f"  [CONFIRMED {d.get('cwe')}] {d['file']}:{d['line']}  {d.get('unit', '')}  "
               f"-- {(d.get('evidence') or '')[:70]}")
@@ -454,6 +458,34 @@ def cmd_controls(args):
     except OSError:
         pass
     print(f"[controls] {len(fs)} missing-control advisory(ies) -> {out}")
+
+
+def cmd_iac(args):
+    """Scan Dockerfiles / Compose / GitHub Actions for dangerous config. Deterministic, no model, no network."""
+    from . import iac as _iac
+    fs = _iac.scan(args.target)
+    md = _iac.render(fs)
+    print(md)
+    out = Path(args.target) / "wave_iac.md"
+    try:
+        out.write_text(md, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"[iac] {len(fs)} config/infra advisory(ies) -> {out}")
+
+
+def cmd_secrets(args):
+    """Scan git HISTORY for committed secrets (redacted). Deterministic; needs git + a repo."""
+    from . import secrets as _secrets
+    fs = _secrets.scan(args.target)
+    md = _secrets.render(fs)
+    print(md)
+    out = Path(args.target) / "wave_secrets.md"
+    try:
+        out.write_text(md, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"[secrets] {len(fs)} secret(s) in git history -> {out}  (rotate any exposed credential)")
 
 
 # ---- CLI config: set the model/endpoint ONCE (~/.wave/config), so `wave` runs need no env each time -------
@@ -650,6 +682,14 @@ def main():
     ct = sub.add_parser("controls", help="find missing security controls (CSRF / rate-limit / cookie flags)")
     ct.add_argument("target")
     ct.set_defaults(func=cmd_controls)
+
+    ia = sub.add_parser("iac", help="scan Dockerfiles / Compose / GitHub Actions for dangerous config")
+    ia.add_argument("target")
+    ia.set_defaults(func=cmd_iac)
+
+    se = sub.add_parser("secrets", help="scan git history for committed secrets (redacted)")
+    se.add_argument("target")
+    se.set_defaults(func=cmd_secrets)
 
     rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")
     rpt.add_argument("target")

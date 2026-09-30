@@ -628,6 +628,17 @@ def test_iac_quiet_on_safe_dockerfile(tmp_path):
     assert iac.scan(str(tmp_path)) == []
 
 
+def test_codemap_survives_deeply_nested_file(tmp_path):
+    # a pathologically deep AST (a giant generated/minified file) must be SKIPPED, not crash the whole scan
+    # (RecursionError in codemap._walk killed the elasticsearch map at ~300 files).
+    _write(tmp_path, "ok.py", "def h(req):\n    import os; os.system(req.args['c'])\n")
+    _write(tmp_path, "deep.py", "x = " + "(" * 4000 + "1" + ")" * 4000 + "\n")
+    cm = codemap.build(str(tmp_path))
+    files = list(cm.files)
+    assert any(p.endswith("ok.py") for p in files)              # the normal file is mapped
+    assert not any(p.endswith("deep.py") for p in files)        # the pathological file is skipped, no crash
+
+
 def test_replay_loads_confirmed_and_maps_status(tmp_path):
     from agent.orchestrator import replay
     import json as _json

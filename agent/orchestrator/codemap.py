@@ -539,6 +539,8 @@ def build(target, progress=True):
     """Parse every source file under `target` into a CodeMap (structure + a per-file composition view).
     On a large repo this is the slowest deterministic step, so emit a heartbeat every 300 files."""
     from tree_sitter_language_pack import get_parser
+    import sys
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 3000))   # tree-sitter ASTs of big files nest deep
     m = CodeMap()
     parsers = {}
     n = 0
@@ -556,8 +558,15 @@ def build(target, progress=True):
         path = str(f)
         finfo = FileInfo(path=path, lang=lang, loc=src.count(b"\n") + 1,
                          doc=_module_doc(tree.root_node, lang))
+        try:                                            # a pathologically deep AST (a giant generated/minified
+            _walk(tree.root_node, m, path, lang, "<module>", finfo, None)   # file) must not kill the whole scan
+        except RecursionError:
+            if progress:
+                print(f"[codemap] skip deeply-nested file: {path}", flush=True)
+            continue
+        except Exception:
+            continue
         m.files[path] = finfo
-        _walk(tree.root_node, m, path, lang, "<module>", finfo, None)
         finfo.imports = sorted(m.imports.get(path, ()))
         n += 1
         if progress and n % 300 == 0:

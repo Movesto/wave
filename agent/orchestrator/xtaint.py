@@ -142,76 +142,118 @@ def _calls_to(fn, name, src, cfg):
     return [n for n in _t._walk(fn) if n.type in cfg["call"] and _callee_name(n, src, cfg) == name]
 
 
-def analyze(candidate, max_depth=_MAX_DEPTH):
-    """Trace a cross-function source->sink chain for `candidate`. Returns a dict
-    {status:'flows'|'flows_intra', source, chain:[{func,line}...], note} or None. Never raises."""
+def _norm(p):
+    return str(p or "").replace("\\", "/")
+
+
+def analyze(candidate, cmap=None, max_depth=_MAX_DEPTH):
+    """Trace a cross-function source->sink chain for `candidate`. With `cmap` the walk follows callers ACROSS
+    files (via the call graph, conservative on name collisions); without it, SAME-FILE only. Returns a dict
+    {status:'flows'|'flows_intra', source, chain:[{func,line,file}...], note} or None. Never raises."""
     path = getattr(candidate, "file", "") or ""
-    lang = _t._lang(path)
     line = int(getattr(candidate, "line", 0) or 0)
-    if lang not in _t._LANGS or line <= 0:
+    if _t._lang(path) not in _t._LANGS or line <= 0:
         return None
-    cfg = _t._LANGS[lang]
-    try:
-        src = Path(path).read_bytes()
-        from tree_sitter_language_pack import get_parser
-        root = get_parser(cfg["parser"]).parse(src).root_node
-    except Exception:
+    from tree_sitter_language_pack import get_parser
+
+    cache = {}                                                  # file -> (root, src_bytes, cfg) | None
+
+    def load(fp):
+        fp = str(fp)
+        if fp in cache:
+            return cache[fp]
+        fl = _t._lang(fp)
+        try:
+            if fl not in _t._LANGS:
+                cache[fp] = None
+            else:
+                b = Path(fp).read_bytes()
+                root = get_parser(_t._LANGS[fl]["parser"]).parse(b).root_node
+                cache[fp] = (root, b, _t._LANGS[fl])
+        except Exception:
+            cache[fp] = None
+        return cache[fp]
+
+    sink = load(path)
+    if sink is None:
         return None
-    defs = _func_defs(root, cfg, src)
+    root, src, cfg = sink
     sink_fn = _t._enclosing_func(root, line, cfg)
     if sink_fn is None:
         return None
-    sink_name = next((nm for nm, node in defs if node == sink_fn), "")
+    sink_name = next((nm for nm, node in _func_defs(root, cfg, src) if node == sink_fn), "")
 
-    # in-function request source already reaches the sink -> intra-function (taint.py covers it; note it).
     if _reaches(sink_fn, line, set(_t._REQUEST_SOURCES), src, cfg) == "raw":
         return {"status": "flows_intra", "source": "a request object in this function",
-                "chain": [{"func": sink_name, "line": line}],
+                "chain": [{"func": sink_name, "line": line, "file": path}],
                 "note": f"untrusted request input reaches the sink in {sink_name}"}
 
     positional = _positional_params(sink_fn, src, cfg)
     reaching = [i for i, nm in enumerate(positional) if nm and _reaches(sink_fn, line, {nm}, src, cfg) == "raw"]
     if not reaching:
-        return None                                            # sink args are constants/opaque -> nothing to trace
+        return None
 
-    def walk(fn_name, fn_node, positions, depth, seen):
-        """Find a caller (same file) that feeds an untrusted value into one of `positions` of fn_name."""
+    def callers_of(fn_name, fn_file):
+        """Edges (caller_name, caller_node, cfile, csrc, ccfg) that plausibly call fn_name-defined-in-fn_file.
+        Same-file always; cross-file via cmap only when the name is UNIQUE (avoids collision false chains)."""
+        edges, ff = [], _norm(fn_file)
+        r = load(fn_file)
+        if r:
+            for nm, node in _func_defs(r[0], r[2], r[1]):
+                if _calls_to(node, fn_name, r[1], r[2]):
+                    edges.append((nm, node, fn_file, r[1], r[2]))
+        if cmap is not None:
+            unique = len(cmap.funcs.get(fn_name, [])) <= 1
+            for (caller, call_file, recv) in cmap.call_sites.get(fn_name, []):
+                if _norm(call_file) == ff:
+                    continue                                    # same-file already covered
+                if not unique or recv == "other":               # conservative: unique bare/self names only
+                    continue
+                rr = load(call_file)
+                if not rr:
+                    continue
+                for nm, node in _func_defs(rr[0], rr[2], rr[1]):
+                    if nm == caller and _calls_to(node, fn_name, rr[1], rr[2]):
+                        edges.append((nm, node, call_file, rr[1], rr[2]))
+        return edges
+
+    def walk(fn_name, fn_file, positions, depth, seen):
         if depth > max_depth or not fn_name:
             return None
-        callers = [(nm, node) for nm, node in defs if node != fn_node and _calls_to(node, fn_name, src, cfg)]
-        for cname, cnode in callers:
-            if (cname, cnode.start_byte) in seen:
+        for cname, cnode, cfile, csrc, ccfg in callers_of(fn_name, fn_file):
+            sig = (cname, _norm(cfile), cnode.start_byte)
+            if sig in seen:
                 continue
-            for call in _calls_to(cnode, fn_name, src, cfg):
-                args = _positional_args(call, cfg)
+            for call in _calls_to(cnode, fn_name, csrc, ccfg):
+                args = _positional_args(call, ccfg)
                 cline = call.start_point[0] + 1
                 for pos in positions:
                     if pos >= len(args):
                         continue
                     arg = args[pos]
-                    # (a) the arg carries a REQUEST source in the caller (directly, or via a tainted local)
-                    if _expr_taint(cnode, cline, arg, set(_t._REQUEST_SOURCES), src, cfg) == "raw":
-                        return [{"func": cname, "line": cline, "source": _t._txt(arg, src)[:80]}]
-                    # (b) the arg traces to a PARAMETER of the caller -> recurse up to that param's callers
-                    cparams = _positional_params(cnode, src, cfg)
-                    fed_params = [i for i, nm in enumerate(cparams)
-                                  if nm and _expr_taint(cnode, cline, arg, {nm}, src, cfg) == "raw"]
-                    if fed_params:
-                        deeper = walk(cname, cnode, fed_params, depth + 1, seen | {(cname, cnode.start_byte)})
+                    if _expr_taint(cnode, cline, arg, set(_t._REQUEST_SOURCES), csrc, ccfg) == "raw":
+                        return [{"func": cname, "line": cline, "file": cfile,
+                                 "source": _t._txt(arg, csrc)[:80]}]
+                    cparams = _positional_params(cnode, csrc, ccfg)
+                    fed = [i for i, nm in enumerate(cparams)
+                           if nm and _expr_taint(cnode, cline, arg, {nm}, csrc, ccfg) == "raw"]
+                    if fed:
+                        deeper = walk(cname, cfile, fed, depth + 1, seen | {sig})
                         if deeper is not None:
-                            return deeper + [{"func": cname, "line": cline}]
-                        # no in-file caller feeds it -> the caller's param is the external/entry boundary
-                        if not [1 for nm, node in defs if node != cnode and _calls_to(node, cname, src, cfg)]:
-                            pname = cparams[fed_params[0]]
-                            return [{"func": cname, "line": cline, "source": f"parameter '{pname}' (external input)"}]
+                            return deeper + [{"func": cname, "line": cline, "file": cfile}]
+                        if not callers_of(cname, cfile):        # external/entry boundary parameter
+                            return [{"func": cname, "line": cline, "file": cfile,
+                                     "source": f"parameter '{cparams[fed[0]]}' (external input)"}]
         return None
 
-    chain = walk(sink_name, sink_fn, reaching, 1, {(sink_name, sink_fn.start_byte)})
+    chain = walk(sink_name, path, reaching, 1, {(sink_name, _norm(path), sink_fn.start_byte)})
     if chain is None:
         return None
-    full = chain + [{"func": sink_name, "line": line}]
+    full = chain + [{"func": sink_name, "line": line, "file": path}]
     entry = full[0]
     hops = " -> ".join(h["func"] for h in full)
-    return {"status": "flows", "source": entry.get("source", "untrusted input"),
-            "chain": full, "note": f"untrusted input ({entry.get('source', '?')}) in {entry['func']} "
-                                   f"flows to the sink via {hops}"}
+    xfile = len({_norm(h.get("file", "")) for h in full}) > 1
+    return {"status": "flows", "source": entry.get("source", "untrusted input"), "chain": full,
+            "cross_file": xfile,
+            "note": f"untrusted input ({entry.get('source', '?')}) in {entry['func']} flows to the sink via "
+                    f"{hops}" + (" (across files)" if xfile else "")}

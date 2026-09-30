@@ -183,7 +183,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     if tnote:                                                # resolve the slice for the model (structure, its job)
         reason = f"{reason} | value-taint: {tstatus} -- {tnote}"
     try:                                                     # cross-function taint: the exact source->sink path
-        xf = xtaint.analyze(c)
+        xf = xtaint.analyze(c, cmap=cmap)
     except Exception:
         xf = None
     xflow = xf.get("note") if xf else None

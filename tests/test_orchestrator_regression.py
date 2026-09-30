@@ -665,6 +665,21 @@ def test_xtaint_cross_function_chain(tmp_path):
     assert "VALUE FLOW" in brief and "handle -> lookup_user" in brief
 
 
+def test_xtaint_cross_file_chain(tmp_path):
+    # cross-FILE: handler in a.py passes user input to a helper defined in b.py that reaches the sink.
+    from agent.orchestrator import xtaint, codemap
+    _write(tmp_path, "a.py", "from b import lookup_user\n"
+                             "def handle(req):\n    name = req.args['id']\n    return lookup_user(name)\n")
+    _write(tmp_path, "b.py", "def lookup_user(u):\n    return db.execute('SELECT * FROM u WHERE n=' + u)\n")
+    cm = codemap.build(str(tmp_path))
+    c = _cand(file=str(tmp_path / "b.py"), unit="lookup_user(u)", line=2, cwe="CWE-89")
+    r = xtaint.analyze(c, cmap=cm)
+    assert r and r["status"] == "flows" and r["cross_file"] is True
+    assert [h["func"] for h in r["chain"]] == ["handle", "lookup_user"]
+    # WITHOUT the cmap, the cross-file chain is not followed (same-file only) -> None (conservative)
+    assert xtaint.analyze(c) is None
+
+
 def test_xtaint_multi_hop_and_negatives(tmp_path):
     from agent.orchestrator import xtaint
     # 3-hop chain handle -> mid -> deep -> os.system

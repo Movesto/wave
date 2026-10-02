@@ -302,6 +302,14 @@ def cmd_all(args):
     t = args.target
     model = Model()
 
+    # Preflight: one cheap model call BEFORE the (expensive) map, so a dead/unauthorized endpoint fails loudly
+    # here instead of silently 401-ing every notebook/detect/prove call and emitting a misleading report.
+    hc = model.healthcheck()
+    if hc:
+        raise SystemExit(f"[all] model endpoint check FAILED: {hc}\n"
+                         f"      every model stage (notebook/detect/prove) would fail -- aborting before the "
+                         f"repo map. Fix the model config (`wave config show` / WAVE_API_KEY / credits) and re-run.")
+
     # Stage 1 -- whole-repo map + per-file notebook (model selects targets on big repos)
     _banner(1, "EYES: map the repo + notebook", "building the code map (tree-sitter over every file) ...")
     res = repomap.build_map(t)

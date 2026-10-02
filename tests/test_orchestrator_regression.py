@@ -628,6 +628,29 @@ def test_iac_quiet_on_safe_dockerfile(tmp_path):
     assert iac.scan(str(tmp_path)) == []
 
 
+def test_model_auth_error_fails_fast_and_healthcheck_surfaces_it(monkeypatch):
+    # a 401/403 is PERMANENT -- it must raise ModelAuthError immediately (not retry 3x, not degrade to blocked),
+    # and healthcheck must surface it as a string so `wave all` can abort before the expensive run.
+    # (The elasticsearch run silently 401'd every model call and emitted a misleading report.)
+    import pytest, requests
+    from agent.orchestrator import model as M
+    calls = {"n": 0}
+
+    class _Resp:
+        status_code, reason = 401, "Unauthorized"
+        def raise_for_status(self):
+            raise AssertionError("raise_for_status must not be reached for a 401")
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1) or _Resp()))
+    m = M.Model(model_id="x", api_base="https://openrouter.ai/api/v1", api_key="bad")
+    with pytest.raises(M.ModelAuthError):
+        m._api_chat([{"role": "user", "content": "hi"}])
+    assert calls["n"] == 1                                      # failed fast -- NOT retried 3x
+    assert "401" in (m.healthcheck() or "")                    # preflight reports it instead of crashing
+
+
 def test_codemap_survives_deeply_nested_file(tmp_path):
     # a pathologically deep AST (a giant generated/minified file) must be SKIPPED, not crash the whole scan
     # (RecursionError in codemap._walk killed the elasticsearch map at ~300 files).

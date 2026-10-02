@@ -140,8 +140,15 @@ def _in_run_block(lines, idx):
     return False
 
 
+def _rel(path, target):
+    try:
+        return str(Path(path).resolve().relative_to(Path(target).resolve())).replace("\\", "/")
+    except Exception:
+        return str(path).replace("\\", "/")
+
+
 def scan(target):
-    """Deterministic IaC/config advisories. Returns a list of finding dicts."""
+    """Deterministic IaC/config advisories. Returns a list of finding dicts (file = repo-relative path)."""
     out = []
     for f, scanner in ((_is_dockerfile, _scan_dockerfile), (_is_compose, _scan_compose),
                        (_is_gh_action, _scan_gh_action)):
@@ -154,6 +161,8 @@ def scan(target):
                 out += scanner(path, lines)
             except Exception:
                 continue
+    for fi in out:                                            # repo-relative paths so sibling Dockerfiles differ
+        fi["file"] = _rel(fi["file"], target)
     return out
 
 
@@ -163,7 +172,7 @@ def render(findings):
     lines = [f"## Config / infrastructure issues  ({len(findings)})", "",
              "Dangerous patterns in Dockerfiles / Compose / GitHub Actions (deterministic, review-tier).", ""]
     for f in findings:
-        loc = f"{Path(f['file']).name}:{f['line']}"
+        loc = f"{f['file']}:{f['line']}"                      # repo-relative (siblings like Dockerfile differ)
         lines.append(f"- **[{f['kind']}]** {f['title']}  _[{f['severity']}]_ — {loc}")
         lines.append(f"  - {f['detail']}")
         lines.append(f"  - fix: {f['fix']}")

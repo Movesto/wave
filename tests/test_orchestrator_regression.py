@@ -678,6 +678,28 @@ def test_replay_loads_confirmed_and_maps_status(tmp_path):
     assert "No confirmed findings" in replay.render([])
 
 
+def test_detect_deprioritizes_infra_and_shell_scripts():
+    # big-repo fix: app code must be ranked (and thus proven within budget) BEFORE pin-dense CI/shell scripts.
+    from agent.orchestrator import detector
+    from agent.orchestrator.repomap import is_low_priority_path
+    assert is_low_priority_path("ci/deploy.sh") and is_low_priority_path(".buildkite/run.sh")
+    assert is_low_priority_path("server/src/test/java/Foo.java") and is_low_priority_path("Dockerfile")
+    assert not is_low_priority_path("server/src/main/java/Handler.java")
+    app = {"file": "server/src/main/App.java", "class": "cmd", "confidence": "high"}
+    infra = {"file": ".buildkite/x.sh", "class": "cmd", "confidence": "high"}
+    ranked = sorted([infra, app], key=detector._rank_key, reverse=True)
+    assert ranked[0] is app                                   # app code first, shell script after
+
+
+def test_secrets_downranks_test_paths():
+    from agent.orchestrator import secrets
+    diff = ("commit abc1234567\n+++ b/src/test/java/FooTests.java\n"
+            "+GITHUB = \"ghp_1234567890abcdefghijklmnopqrstuvwxyz\"\n")
+    assert secrets.scan_diff(diff)[0]["severity"] == "medium"  # high token down-ranked one notch in a test path
+    assert secrets.scan_diff(diff.replace("src/test/java/FooTests.java",
+                                          "src/main/java/Foo.java"))[0]["severity"] == "high"   # prod stays high
+
+
 def test_secrets_history_scan_diff():
     from agent.orchestrator import secrets
     diff = ("commit abc123def4567890\n+++ b/config.py\n"

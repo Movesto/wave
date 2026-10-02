@@ -315,8 +315,12 @@ def cmd_all(args):
     res = repomap.build_map(t)
     s = res["stats"]
     print(f"[all] map done: {s['files']} files, {s['pinned_files']} pinned, {s['sink_pins']} sink-pins", flush=True)
-    idx = notebook.ledger_index(res["cmap"], t, res["per_file"], res["pinned"])
-    pinned, per_file = res["pinned"], res["per_file"]
+    # APP CODE FIRST: stable-sort pinned so infra/CI/build/test files fall behind application code (a stable
+    # sort keeps repomap's pin-density order within each tier). Flows into the model's selection index AND the
+    # density fallback, so on a big repo the model deep-reads the real surface, not pin-dense CI shell scripts.
+    pinned = sorted(res["pinned"], key=repomap.is_low_priority_path)
+    per_file = res["per_file"]
+    idx = notebook.ledger_index(res["cmap"], t, per_file, pinned)
     pinset = set(pinned)
     all_src = pinned + [p for p in per_file if p not in pinset]   # pinned-first, then the rest
     if args.all_files:                                       # completeness: read EVERY source file

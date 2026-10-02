@@ -29,6 +29,14 @@ _ASSIGN = re.compile(r"""(?ix)([\w.\-]{0,20}(?:password|passwd|secret|api[_-]?ke
                          auth[_-]?token|client[_-]?secret|private[_-]?key))\s*[:=]\s*['"]([^'"]{8,})['"]""", re.X)
 _PLACEHOLDER = re.compile(r"(?i)example|changeme|change_me|your[_-]?|placeholder|dummy|test|xxxx|redacted|"
                           r"\$\{|process\.env|os\.environ|getenv|<[^>]+>|\bnull\b|\bnone\b|\*{3,}")
+# a secret in a TEST path is usually test-fixture data, not a production leak -> down-rank one notch.
+_TEST_PATH = re.compile(r"(?i)(^|/)(tests?|testfixtures|fixtures|__tests__|specs?|e2e|qa|examples?|"
+                        r"javaresttest|benchmarks?)(/|$)|[._-]test[._-]|\.spec\.|conftest")
+_DOWNRANK = {"high": "medium", "medium": "low", "low": "low"}
+
+
+def _sev(base, path):
+    return _DOWNRANK.get(base, base) if _TEST_PATH.search(str(path or "").replace("\\", "/")) else base
 
 
 def _redact(s):
@@ -59,14 +67,14 @@ def scan_diff(diff_text):
                 key = (name, commit, path, m.group(0)[:12])
                 if key not in seen:
                     seen.add(key)
-                    out.append({"type": name, "severity": sev, "commit": commit, "file": path,
+                    out.append({"type": name, "severity": _sev(sev, path), "commit": commit, "file": path,
                                 "match": _redact(m.group(0))})
         am = _ASSIGN.search(added)
         if am and not _PLACEHOLDER.search(am.group(2)):
             key = ("assign:" + am.group(1).lower(), commit, path, am.group(2)[:12])
             if key not in seen:
                 seen.add(key)
-                out.append({"type": f"hardcoded {am.group(1).lower()}", "severity": "medium",
+                out.append({"type": f"hardcoded {am.group(1).lower()}", "severity": _sev("medium", path),
                             "commit": commit, "file": path, "match": _redact(am.group(2))})
     return out
 

@@ -110,7 +110,11 @@ def _load_findings(notebook_path, root=None):
 
 
 def _rank_key(f):
-    return (_SEV.get(f["class"], 1), 1 if f["confidence"].lower() == "high" else 0)
+    # APP CODE FIRST: infra/CI/build/test files are deprioritized so the budget proves real application code
+    # before pin-dense shell/CI scripts (which otherwise crowd out the attack surface on big repos).
+    from .repomap import is_low_priority_path
+    app_first = 0 if is_low_priority_path(f.get("file", "")) else 1
+    return (app_first, _SEV.get(f["class"], 1), 1 if f["confidence"].lower() == "high" else 0)
 
 
 def _slice(root, rel, line, pad=30):

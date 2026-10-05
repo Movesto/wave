@@ -554,6 +554,230 @@ def test_brief_instructs_drive_from_entry_half_b(tmp_path):
     assert "REACHABILITY -- prove" not in briefs._brief_for(c, str(tmp_path), "x")
 
 
+def test_deps_lockfile_parsers():
+    # dependency scanning parses (name, version) from the common manifest/lock formats (offline).
+    from agent.orchestrator import deps
+    import json as _json
+    assert deps._parse_requirements("flask==1.0\n# c\nrequests == 2.19.1\nfoo>=1\n") == \
+        [("flask", "1.0"), ("requests", "2.19.1")]                       # only exact pins
+    assert deps._parse_cargo_lock('[[package]]\nname = "time"\nversion = "0.1.42"\n') == [("time", "0.1.42")]
+    assert ("golang.org/x/net", "0.0.1") in deps._parse_go_mod(
+        "module x\nrequire (\n  golang.org/x/net v0.0.1 // indirect\n)\n")
+    pl = {"packages": {"": {}, "node_modules/lodash": {"version": "4.17.4"}}}
+    assert deps._parse_package_lock(_json.dumps(pl)) == [("lodash", "4.17.4")]
+
+
+def test_deps_scan_offline_is_empty(tmp_path):
+    # no network (online=False) -> no findings, never crashes.
+    from agent.orchestrator import deps
+    (tmp_path / "requirements.txt").write_text("flask==0.12.2\n", encoding="utf-8")
+    assert deps.scan(str(tmp_path), online=False) == []
+    assert "No known-vulnerable" in deps.render([])
+
+
+def test_controls_flags_missing_csrf_ratelimit_cookieflags(tmp_path):
+    from agent.orchestrator import controls
+    _write(tmp_path, "app/main.py",
+           "from flask import Flask, make_response\n"
+           "app = Flask(__name__)\n"
+           "@app.route('/login', methods=['POST'])\n"
+           "def login():\n"
+           "    r = make_response('ok')\n"
+           "    r.set_cookie('session', 'abc')\n"
+           "    return r\n")
+    kinds = {f["control"] for f in controls.scan(str(tmp_path))}
+    assert {"csrf", "rate-limit", "cookie-flags"} <= kinds
+
+
+def test_controls_quiet_when_controls_present(tmp_path):
+    # CSRF + rate limiter + cookie flags all present -> no advisories (no false alarms).
+    from agent.orchestrator import controls
+    _write(tmp_path, "app/main.py",
+           "from flask import Flask, make_response\n"
+           "from flask_wtf.csrf import CSRFProtect\n"
+           "from flask_limiter import Limiter\n"
+           "app = Flask(__name__); CSRFProtect(app); limiter = Limiter(app)\n"
+           "@app.route('/login', methods=['POST'])\n"
+           "def login():\n"
+           "    r = make_response('ok')\n"
+           "    r.set_cookie('s', 'abc', httponly=True, secure=True, samesite='Lax')\n"
+           "    return r\n")
+    assert controls.scan(str(tmp_path)) == []
+
+
+def test_iac_flags_dockerfile_compose_actions(tmp_path):
+    from agent.orchestrator import iac
+    _write(tmp_path, "Dockerfile", "FROM python:3.11\nADD https://x/y.sh /y.sh\nRUN curl https://get.x | sh\n"
+                                   "ENV API_KEY=abcdef123456\nCMD [\"python\",\"app.py\"]\n")
+    _write(tmp_path, "docker-compose.yml", "services:\n  db:\n    image: postgres\n    privileged: true\n"
+                                           "    network_mode: host\n    ports:\n      - \"5432:5432\"\n")
+    _write(tmp_path, ".github/workflows/ci.yml",
+           "on: pull_request_target\npermissions: write-all\njobs:\n  b:\n    steps:\n"
+           "      - uses: actions/checkout@v4\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"
+           "      - run: echo ${{ github.event.pull_request.title }}\n")
+    titles = {f["title"] for f in iac.scan(str(tmp_path))}
+    assert any("root" in t for t in titles) and any("curl" in t.lower() for t in titles)
+    assert any("Privileged" in t for t in titles) and any("Host network" in t for t in titles)
+    assert any("Database port" in t for t in titles)
+    assert any("pull_request_target" in t for t in titles) and any("script injection" in t for t in titles)
+
+
+def test_iac_quiet_on_safe_dockerfile(tmp_path):
+    from agent.orchestrator import iac
+    _write(tmp_path, "Dockerfile", "FROM python:3.11\nCOPY . /app\nUSER appuser\nCMD [\"python\",\"app.py\"]\n")
+    assert iac.scan(str(tmp_path)) == []
+
+
+def test_model_auth_error_fails_fast_and_healthcheck_surfaces_it(monkeypatch):
+    # a 401/403 is PERMANENT -- it must raise ModelAuthError immediately (not retry 3x, not degrade to blocked),
+    # and healthcheck must surface it as a string so `wave all` can abort before the expensive run.
+    # (The elasticsearch run silently 401'd every model call and emitted a misleading report.)
+    import pytest, requests
+    from agent.orchestrator import model as M
+    calls = {"n": 0}
+
+    class _Resp:
+        status_code, reason = 401, "Unauthorized"
+        def raise_for_status(self):
+            raise AssertionError("raise_for_status must not be reached for a 401")
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1) or _Resp()))
+    m = M.Model(model_id="x", api_base="https://openrouter.ai/api/v1", api_key="bad")
+    with pytest.raises(M.ModelAuthError):
+        m._api_chat([{"role": "user", "content": "hi"}])
+    assert calls["n"] == 1                                      # failed fast -- NOT retried 3x
+    assert "401" in (m.healthcheck() or "")                    # preflight reports it instead of crashing
+
+
+def test_codemap_survives_deeply_nested_file(tmp_path):
+    # a pathologically deep AST (a giant generated/minified file) must be SKIPPED, not crash the whole scan
+    # (RecursionError in codemap._walk killed the elasticsearch map at ~300 files).
+    _write(tmp_path, "ok.py", "def h(req):\n    import os; os.system(req.args['c'])\n")
+    _write(tmp_path, "deep.py", "x = " + "(" * 4000 + "1" + ")" * 4000 + "\n")
+    cm = codemap.build(str(tmp_path))
+    files = list(cm.files)
+    assert any(p.endswith("ok.py") for p in files)              # the normal file is mapped
+    assert not any(p.endswith("deep.py") for p in files)        # the pathological file is skipped, no crash
+
+
+def test_replay_loads_confirmed_and_maps_status(tmp_path):
+    from agent.orchestrator import replay
+    import json as _json
+    recs = [{"file": "a.py", "line": 10, "class": "cmd", "verdict": "confirmed", "cwe": "CWE-78"},
+            {"file": "b.py", "line": 5, "class": "sqli", "verdict": "refuted"},
+            {"file": "a.py", "line": 10, "class": "cmd", "verdict": "confirmed"}]   # dup key -> last wins
+    (tmp_path / "wave_findings.jsonl").write_text("\n".join(_json.dumps(r) for r in recs), encoding="utf-8")
+    conf = replay.load_confirmed(str(tmp_path))
+    assert len(conf) == 1 and conf[0]["file"] == "a.py"        # only confirmed, deduped
+    # status mapping: re-proof verdict -> replay outcome
+    assert replay._status("confirmed") == "still-vulnerable"
+    assert replay._status("refuted") == "resolved" and replay._status("not_exploitable") == "resolved"
+    assert replay._status("anomalous_state") == "changed"
+    assert "No confirmed findings" in replay.render([])
+
+
+def test_detect_deprioritizes_infra_and_shell_scripts():
+    # big-repo fix: app code must be ranked (and thus proven within budget) BEFORE pin-dense CI/shell scripts.
+    from agent.orchestrator import detector
+    from agent.orchestrator.repomap import is_low_priority_path
+    assert is_low_priority_path("ci/deploy.sh") and is_low_priority_path(".buildkite/run.sh")
+    assert is_low_priority_path("server/src/test/java/Foo.java") and is_low_priority_path("Dockerfile")
+    assert not is_low_priority_path("server/src/main/java/Handler.java")
+    app = {"file": "server/src/main/App.java", "class": "cmd", "confidence": "high"}
+    infra = {"file": ".buildkite/x.sh", "class": "cmd", "confidence": "high"}
+    ranked = sorted([infra, app], key=detector._rank_key, reverse=True)
+    assert ranked[0] is app                                   # app code first, shell script after
+
+
+def test_secrets_downranks_test_paths():
+    from agent.orchestrator import secrets
+    diff = ("commit abc1234567\n+++ b/src/test/java/FooTests.java\n"
+            "+GITHUB = \"ghp_1234567890abcdefghijklmnopqrstuvwxyz\"\n")
+    assert secrets.scan_diff(diff)[0]["severity"] == "medium"  # high token down-ranked one notch in a test path
+    assert secrets.scan_diff(diff.replace("src/test/java/FooTests.java",
+                                          "src/main/java/Foo.java"))[0]["severity"] == "high"   # prod stays high
+
+
+def test_secrets_history_scan_diff():
+    from agent.orchestrator import secrets
+    diff = ("commit abc123def4567890\n+++ b/config.py\n"
+            "+AWS_KEY = \"AKIAIOSFODNN7EXAMPLE\"\n"          # canonical EXAMPLE -> ignored
+            "+password = \"changeme\"\n"                     # placeholder -> ignored
+            "+db_password = \"s3cr3tP@ssw0rd!\"\n"           # real -> flagged (prefixed key)
+            "+GITHUB = \"ghp_1234567890abcdefghijklmnopqrstuvwxyz\"\n"
+            "+url = \"postgres://admin:realpass123@db:5432/x\"\n"
+            "+api_key = os.environ['KEY']\n")                # env indirection -> ignored
+    types = {f["type"] for f in secrets.scan_diff(diff)}
+    assert "GitHub token" in types and "Credentials in URL" in types
+    assert any("db_password" in t for t in types)
+    assert "AWS access key id" not in types                  # EXAMPLE excluded
+    # values are redacted (never printed in full)
+    assert all("EXAMPLE" not in f["match"] and "realpass123" not in f["match"]
+               for f in secrets.scan_diff(diff))
+
+
+def test_xtaint_cross_function_chain(tmp_path):
+    # cross-function taint: user input enters a handler and reaches a sink inside a helper it calls.
+    from agent.orchestrator import xtaint
+    f = tmp_path / "a.py"
+    f.write_text("def handle(req):\n"
+                 "    name = req.args['id']\n"
+                 "    return lookup_user(name)\n"
+                 "def lookup_user(u):\n"
+                 "    return db.execute('SELECT * FROM u WHERE n=' + u)\n", encoding="utf-8")
+    r = xtaint.analyze(_cand(file=str(f), unit="lookup_user(u)", line=5, cwe="CWE-89"))
+    assert r and r["status"] == "flows"
+    hops = [h["func"] for h in r["chain"]]
+    assert hops == ["handle", "lookup_user"]                    # source -> sink path
+    # the cross-function path is surfaced to the model in the proof brief
+    c = _cand(file=str(f), unit="lookup_user(u)", line=5, cwe="CWE-89")
+    brief = briefs._brief_for(c, str(tmp_path), "x", flow=r["note"])
+    assert "VALUE FLOW" in brief and "handle -> lookup_user" in brief
+
+
+def test_xtaint_cross_file_chain(tmp_path):
+    # cross-FILE: handler in a.py passes user input to a helper defined in b.py that reaches the sink.
+    from agent.orchestrator import xtaint, codemap
+    _write(tmp_path, "a.py", "from b import lookup_user\n"
+                             "def handle(req):\n    name = req.args['id']\n    return lookup_user(name)\n")
+    _write(tmp_path, "b.py", "def lookup_user(u):\n    return db.execute('SELECT * FROM u WHERE n=' + u)\n")
+    cm = codemap.build(str(tmp_path))
+    c = _cand(file=str(tmp_path / "b.py"), unit="lookup_user(u)", line=2, cwe="CWE-89")
+    r = xtaint.analyze(c, cmap=cm)
+    assert r and r["status"] == "flows" and r["cross_file"] is True
+    assert [h["func"] for h in r["chain"]] == ["handle", "lookup_user"]
+    # WITHOUT the cmap, the cross-file chain is not followed (same-file only) -> None (conservative)
+    assert xtaint.analyze(c) is None
+
+
+def test_xtaint_multi_hop_and_negatives(tmp_path):
+    from agent.orchestrator import xtaint
+    # 3-hop chain handle -> mid -> deep -> os.system
+    f = tmp_path / "c.py"
+    f.write_text("import os\n"
+                 "def handle(req):\n"
+                 "    x = req.args['q']\n"
+                 "    mid(x)\n"
+                 "def mid(v):\n"
+                 "    deep(v)\n"
+                 "def deep(w):\n"
+                 "    os.system('echo ' + w)\n", encoding="utf-8")
+    r = xtaint.analyze(_cand(file=str(f), unit="deep(w)", line=8, cwe="CWE-78"))
+    assert r and r["status"] == "flows" and [h["func"] for h in r["chain"]] == ["handle", "mid", "deep"]
+    # NEGATIVE: helper called only with a constant -> no untrusted chain (no false flow)
+    g = tmp_path / "b.py"
+    g.write_text("def handle(req):\n    return lookup(\"admin\")\n"
+                 "def lookup(u):\n    return db.execute('SELECT ' + u)\n", encoding="utf-8")
+    assert xtaint.analyze(_cand(file=str(g), unit="lookup(u)", line=4, cwe="CWE-89")) is None
+    # NEGATIVE: sanitized on the way in (int()) -> no raw flow
+    h = tmp_path / "d.py"
+    h.write_text("def handle(req):\n    name = int(req.args['id'])\n    return lookup(name)\n"
+                 "def lookup(u):\n    return db.execute('SELECT ' + u)\n", encoding="utf-8")
+    assert xtaint.analyze(_cand(file=str(h), unit="lookup(u)", line=5, cwe="CWE-89")) is None
+
+
 def test_taint_chained_sink_not_marked_unrelated(tmp_path):
     # #3: a chained sink `subprocess.run(<tainted>).decode('utf-8')` must read 'flows', not 'unrelated' --
     # the OUTER .decode's args are constants, but the inner run() carries the taint (the pyvuln cmd bug that
@@ -655,6 +879,26 @@ def test_oracle_scan_detects_markers_and_fired_canary():
     got = oracle.scan("log line\nWAVE-SINK-SHELL:: exec echo\nWAVE_RENDER_CANARY: 1\n")
     assert "WAVE-SINK-SHELL" in got and "WAVE_RENDER_CANARY:1" in got
     assert oracle.scan("WAVE_RENDER_CANARY: none") == set()     # canary present but did NOT fire
+
+
+def test_oracle_bare_wave_hit_not_witnessed_but_per_run_token_is():
+    # proof integrity: a BARE wave_HIT (memorized / prompt-injected) must NOT auto-witness via scan;
+    # only sink-origin markers + the harness's exact per-run token count.
+    from agent.orchestrator import oracle
+    assert "wave_HIT" not in oracle.scan("attacker echoed wave_HIT to stdout")
+    # a per-run wave_HIT_<rand> token, once recorded by the harness, still grades cmd/eval/deser confirms
+    assert oracle.graded("cmd", {"wave_HIT_a1b2c3d4"})[0] is True
+    assert oracle.graded("cmd", {"wave_HIT"})[0] is True        # canonical still accepted when explicitly present
+
+
+def test_brief_substitutes_per_run_hit_marker():
+    from agent.orchestrator import briefs
+    c = _cand(file="x/app.py", unit="ping(host)", line=3, cwe="CWE-78")
+    scaffold = ("/work/.wave_repro.py", "python3 /work/.wave_repro.py '<payload>'")   # generic-call brief has wave_HIT
+    b = briefs._brief_for(c, "x", "inconclusive", scaffold=scaffold, hit_marker="wave_HIT_deadbeef")
+    assert "wave_HIT_deadbeef" in b and " wave_HIT " not in b     # per-run token, no bare placeholder left
+    # without a marker, the literal placeholder remains (backward-compatible)
+    assert "wave_HIT" in briefs._brief_for(c, "x", "inconclusive", scaffold=scaffold)
 
 
 def test_audit_confirm_harness_marker_is_tape_grade_no_model(monkeypatch):

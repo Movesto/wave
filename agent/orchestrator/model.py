@@ -23,6 +23,12 @@ def code_block(text):
     return None
 
 
+class ModelAuthError(RuntimeError):
+    """The model endpoint rejected auth (HTTP 401/403) or is out of credits -- PERMANENT, not transient.
+    A whole run is invalid when this fires, so it is never retried or swallowed into a 'blocked' verdict;
+    the pipeline aborts loudly (check WAVE_API_KEY / account credits)."""
+
+
 class Model:
     def __init__(self, model_id=None, max_new_tokens=1500, api_base=None, api_key=None):
         self.model_id = model_id or os.environ.get("WAVE_MODEL", _DEFAULT)
@@ -110,8 +116,13 @@ class Model:
             try:
                 r = requests.post(url, headers={"Authorization": f"Bearer {self.api_key or 'local'}",
                                                 "Content-Type": "application/json"}, json=body, timeout=timeout)
+                if r.status_code in (401, 403):             # auth/credits -- PERMANENT, retrying is pointless
+                    raise ModelAuthError(f"{r.status_code} {r.reason} from {self.api_base} "
+                                         f"(model {self.model_id}) -- check WAVE_API_KEY / account credits")
                 r.raise_for_status()
                 return r.json()["choices"][0]["message"]
+            except ModelAuthError:                          # don't retry or swallow an auth failure
+                raise
             except Exception as e:                          # transient 500 / timeout / connection blip -> retry
                 last = e
                 time.sleep(2 * (attempt + 1))
@@ -223,6 +234,20 @@ class Model:
                                        do_sample=True, temperature=temperature, top_p=0.95,
                                        pad_token_id=self._tok.eos_token_id)
         return self._tok.decode(out[0][plen:], skip_special_tokens=True)
+
+    def healthcheck(self):
+        """One cheap call to verify the endpoint answers AND auth is valid, before an expensive run. Returns
+        None on success, or a short error string. API/cloud models only -- a local in-process model (no
+        api_base) returns None (loading it IS the check)."""
+        if not self.api_base:
+            return None
+        try:
+            self.generate("health check", "reply ok", max_new_tokens=1, temperature=0.0)
+            return None
+        except ModelAuthError as e:
+            return str(e)
+        except Exception as e:
+            return f"{type(e).__name__}: {str(e)[:160]}"
 
     def unload(self):
         if self._model is None:

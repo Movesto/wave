@@ -302,13 +302,25 @@ def cmd_all(args):
     t = args.target
     model = Model()
 
+    # Preflight: one cheap model call BEFORE the (expensive) map, so a dead/unauthorized endpoint fails loudly
+    # here instead of silently 401-ing every notebook/detect/prove call and emitting a misleading report.
+    hc = model.healthcheck()
+    if hc:
+        raise SystemExit(f"[all] model endpoint check FAILED: {hc}\n"
+                         f"      every model stage (notebook/detect/prove) would fail -- aborting before the "
+                         f"repo map. Fix the model config (`wave config show` / WAVE_API_KEY / credits) and re-run.")
+
     # Stage 1 -- whole-repo map + per-file notebook (model selects targets on big repos)
     _banner(1, "EYES: map the repo + notebook", "building the code map (tree-sitter over every file) ...")
     res = repomap.build_map(t)
     s = res["stats"]
     print(f"[all] map done: {s['files']} files, {s['pinned_files']} pinned, {s['sink_pins']} sink-pins", flush=True)
-    idx = notebook.ledger_index(res["cmap"], t, res["per_file"], res["pinned"])
-    pinned, per_file = res["pinned"], res["per_file"]
+    # APP CODE FIRST: stable-sort pinned so infra/CI/build/test files fall behind application code (a stable
+    # sort keeps repomap's pin-density order within each tier). Flows into the model's selection index AND the
+    # density fallback, so on a big repo the model deep-reads the real surface, not pin-dense CI shell scripts.
+    pinned = sorted(res["pinned"], key=repomap.is_low_priority_path)
+    per_file = res["per_file"]
+    idx = notebook.ledger_index(res["cmap"], t, per_file, pinned)
     pinset = set(pinned)
     all_src = pinned + [p for p in per_file if p not in pinset]   # pinned-first, then the rest
     if args.all_files:                                       # completeness: read EVERY source file
@@ -386,9 +398,27 @@ def cmd_all(args):
     from . import report as _report                        # the readable, human-facing findings report
     rp = _report.generate(t, model=getattr(model, "model_id", ""))
 
+    # Deterministic add-ons (no model): known-CVE dependency scan (OSV.dev, needs --online) + missing-control
+    # advisories. Appended to the one report so it's all in one place.
+    from . import deps as _deps, controls as _controls, iac as _iac, secrets as _secrets
+    dep_findings = _deps.scan(t, online=args.online)
+    ctl_findings = _controls.scan(t)
+    iac_findings = _iac.scan(t)
+    sec_findings = _secrets.scan(t)
+    try:
+        with open(rp, "a", encoding="utf-8") as fh:
+            fh.write("\n\n" + _deps.render(dep_findings, t) + "\n" + _controls.render(ctl_findings)
+                     + "\n" + _iac.render(iac_findings) + "\n" + _secrets.render(sec_findings))
+    except OSError:
+        pass
+    if not args.online:
+        print("[all] dependency CVE scan skipped (needs --online for OSV.dev)", flush=True)
+
     print(f"\n=== PIPELINE on {t} ===")
     print(f"  findings={total}  survivors={len(survivors)}  CONFIRMED={len(by['confirmed'])}  "
-          f"anomalous={len(by['anomalous_state'])}  fixed={len(fixed)}")
+          f"anomalous={len(by['anomalous_state'])}  fixed={len(fixed)}  "
+          f"dep-CVEs={len(dep_findings)}  missing-controls={len(ctl_findings)}  iac={len(iac_findings)}  "
+          f"history-secrets={len(sec_findings)}")
     for d in by["confirmed"]:
         print(f"  [CONFIRMED {d.get('cwe')}] {d['file']}:{d['line']}  {d.get('unit', '')}  "
               f"-- {(d.get('evidence') or '')[:70]}")
@@ -412,6 +442,79 @@ def cmd_report(args):
     from . import report as _report
     rp = _report.generate(args.target, model=os.environ.get("WAVE_MODEL", ""))
     print(f"report -> {rp}")
+
+
+def cmd_deps(args):
+    """Scan the repo's dependencies for known CVEs (OSV.dev; deterministic, no model). Needs network."""
+    from . import deps as _deps
+    fs = _deps.scan(args.target, online=True)
+    md = _deps.render(fs, args.target)
+    print(md)
+    out = Path(args.target) / "wave_deps.md"
+    try:
+        out.write_text(md, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"[deps] {len(fs)} known-vulnerable dependency finding(s) -> {out}")
+
+
+def cmd_controls(args):
+    """Find missing security controls (CSRF / rate-limit / cookie flags). Deterministic, no model, no network."""
+    from . import controls as _controls
+    fs = _controls.scan(args.target)
+    md = _controls.render(fs)
+    print(md)
+    out = Path(args.target) / "wave_controls.md"
+    try:
+        out.write_text(md, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"[controls] {len(fs)} missing-control advisory(ies) -> {out}")
+
+
+def cmd_iac(args):
+    """Scan Dockerfiles / Compose / GitHub Actions for dangerous config. Deterministic, no model, no network."""
+    from . import iac as _iac
+    fs = _iac.scan(args.target)
+    md = _iac.render(fs)
+    print(md)
+    out = Path(args.target) / "wave_iac.md"
+    try:
+        out.write_text(md, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"[iac] {len(fs)} config/infra advisory(ies) -> {out}")
+
+
+def cmd_replay(args):
+    """Re-verify previously CONFIRMED findings (a security regression suite). Needs a model for model-driven
+    findings; canary findings replay deterministically."""
+    from . import replay as _replay
+    from .model import Model
+    results, summary = _replay.run(Model(), args.target, online=getattr(args, "online", False))
+    md = _replay.render(results, summary)
+    print(md)
+    out = Path(args.target) / "wave_replay.md"
+    try:
+        out.write_text(md, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"[replay] {summary.get('still_vulnerable', 0)} still-vulnerable, {summary.get('resolved', 0)} "
+          f"resolved, {summary.get('changed', 0)} changed -> {out}")
+
+
+def cmd_secrets(args):
+    """Scan git HISTORY for committed secrets (redacted). Deterministic; needs git + a repo."""
+    from . import secrets as _secrets
+    fs = _secrets.scan(args.target)
+    md = _secrets.render(fs)
+    print(md)
+    out = Path(args.target) / "wave_secrets.md"
+    try:
+        out.write_text(md, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"[secrets] {len(fs)} secret(s) in git history -> {out}  (rotate any exposed credential)")
 
 
 # ---- CLI config: set the model/endpoint ONCE (~/.wave/config), so `wave` runs need no env each time -------
@@ -600,6 +703,27 @@ def main():
     al.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="prove N survivors in PARALLEL (cloud model only; ~4 fits a 32GB/6-core box)")
     al.set_defaults(func=cmd_all)
+
+    dp = sub.add_parser("deps", help="scan dependencies for known CVEs (OSV.dev; deterministic, needs network)")
+    dp.add_argument("target")
+    dp.set_defaults(func=cmd_deps)
+
+    ct = sub.add_parser("controls", help="find missing security controls (CSRF / rate-limit / cookie flags)")
+    ct.add_argument("target")
+    ct.set_defaults(func=cmd_controls)
+
+    ia = sub.add_parser("iac", help="scan Dockerfiles / Compose / GitHub Actions for dangerous config")
+    ia.add_argument("target")
+    ia.set_defaults(func=cmd_iac)
+
+    se = sub.add_parser("secrets", help="scan git history for committed secrets (redacted)")
+    se.add_argument("target")
+    se.set_defaults(func=cmd_secrets)
+
+    rp2 = sub.add_parser("replay", help="re-verify previously confirmed findings (security regression suite)")
+    rp2.add_argument("target")
+    rp2.add_argument("--online", action="store_true", help="allow the model opt-in web access during replay")
+    rp2.set_defaults(func=cmd_replay)
 
     rpt = sub.add_parser("report", help="(re)generate the readable wave_results/wave_report.md for a repo")
     rpt.add_argument("target")

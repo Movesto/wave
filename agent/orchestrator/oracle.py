@@ -35,8 +35,10 @@ CLASS_WITNESS = {
     # TIER 3 (no deterministic marker -> judgment + second-model audit):
     "authz": (), "idor": (), "access": (), "bola": (), "bfla": (), "redirect": (), "other": (),
 }
-# every distinct token the harness plants -- for a cheap "did ANY witness fire" scan of a run's output.
-_ALL_TOKENS = sorted({t for toks in CLASS_WITNESS.values() for t in toks} | {_HIT})
+# tokens scanned generically from run output. `wave_HIT` is EXCLUDED here on purpose: it is model-planted
+# (the exploit does `touch <marker>`), so a memorized/prompt-injected bare "wave_HIT" must NOT auto-witness.
+# The harness matches a PER-RUN random `wave_HIT_<rand>` explicitly (investigate.py) -- proof integrity.
+_ALL_TOKENS = sorted({t for toks in CLASS_WITNESS.values() for t in toks if t != _HIT})
 
 # CWE -> class, for callers that carry only a cwe (mirror of prove._CLASS_CWE, injection classes only).
 _CWE_CLASS = {"CWE-78": "cmd", "CWE-89": "sqli", "CWE-943": "nosqli", "CWE-918": "ssrf", "CWE-22": "path",
@@ -71,7 +73,8 @@ def graded(cls, markers, cwe=""):
     toks = CLASS_WITNESS.get(c)
     if not toks:                                     # unknown class OR TIER 3 -> judgment
         return False, "", "judgment"
-    marks = set(markers or ())
+    # a per-run `wave_HIT_<rand>` witness normalizes to the canonical `wave_HIT` for matching.
+    marks = {(_HIT if str(m).startswith(_HIT) else m) for m in (markers or ())}
     if c == "xss":                                   # TIER 2: require the canary to have FIRED
         return ("WAVE_RENDER_CANARY:1" in marks, "WAVE_RENDER_CANARY:1", "marker")
     for tok in toks:

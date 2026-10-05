@@ -218,7 +218,24 @@ wave detect <repo>                                          # clean-room falsify
 wave prove  <repo> [--online]                               # the confirmation ladder
 wave patch  <repo> [--write]                                # patch + reverify the confirmed findings
 wave report <repo>                                          # (re)generate the readable report
+wave deps   <repo>                                          # known-CVE dependency scan (OSV.dev; needs network)
+wave controls <repo>                                        # missing-control advisories (CSRF/rate-limit/cookies)
+wave iac    <repo>                                          # Dockerfile/Compose/GitHub-Actions config issues
+wave secrets <repo>                                         # secrets committed to git history (redacted)
+wave replay <repo> [--online]                               # re-verify confirmed findings (regression suite)
 ```
+
+`wave replay` re-runs the proof on every previously-**confirmed** finding and reports whether each exploit
+**still fires** (still-vulnerable) or **no longer does** (resolved) — a security regression suite for CI: run
+it after changes to catch a reintroduced vuln, or to confirm a fix actually landed.
+
+**Deterministic add-ons** (no model): `wave all --online` also appends these sections to the report —
+**dependency vulnerabilities** (known CVEs via OSV.dev — PyPI/npm/crates.io/Go), **missing security controls**
+(state-changing routes with no CSRF, auth routes with no rate limiting, cookies without httpOnly/secure/
+sameSite), **config/infra issues** (Dockerfile runs-as-root / `curl|sh` / baked secrets, Compose privileged /
+host-network / exposed DB ports, GitHub Actions `pull_request_target` untrusted checkout / script injection),
+and **secrets in git history** (committed-then-removed credentials, redacted). Run any standalone with
+`wave deps` / `wave controls` / `wave iac` / `wave secrets`.
 
 `wave eyes <repo>` with no flags is instant (deterministic map + attack-surface index, no model). Add
 `--notes` to run the model's per-file notebook; combine with `--all-files` to read the whole repo or

@@ -13,6 +13,24 @@ are HINTS for triage, never verdicts -- the detector re-judges and a tool proves
 from __future__ import annotations
 
 import re
+
+# Infra / CI / build / test / vendor / docs paths. Real application code should be deep-read and PROVEN
+# before these: they are pin-dense with shell commands (every `$(...)` looks like a cmd sink) and otherwise
+# crowd out the real attack surface within a budget on big monorepos (the elasticsearch .buildkite case).
+_LOWPRI_DIRS = {"scripts", "tools", "bin", "ci", ".github", ".buildkite", "packaging", "dev-tools", "devtools",
+                "benchmarks", "benchmark", "test", "tests", "testfixtures", "fixtures", "vendor", "examples",
+                "example", "e2e", "__tests__", "spec", "qa", "docs", "doc"}
+
+
+def is_low_priority_path(path):
+    """True for an infra/CI/build/test/vendor/docs file -- deprioritized (not dropped) behind app code."""
+    p = str(path or "").replace("\\", "/").lower()
+    if p.endswith((".sh", ".bash", ".ps1", ".bat")):
+        return True
+    base = p.rsplit("/", 1)[-1]
+    if base.startswith("dockerfile") or base.endswith(".dockerfile"):
+        return True
+    return bool(set(p.strip("/").split("/")) & _LOWPRI_DIRS)
 from pathlib import Path
 
 from . import codemap, eyes, reachability

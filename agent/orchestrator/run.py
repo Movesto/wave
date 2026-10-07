@@ -60,6 +60,38 @@ def cmd_loop(args):
         print("\n" + case.report())
 
 
+def cmd_dast(args):
+    from . import dast_scan
+    # Active scanning sends real attack traffic (injection payloads, OAST callbacks, brute-force bursts)
+    # to the target. Refuse to run unless the operator explicitly asserts authorization for THIS host --
+    # a scanner must never be pointed at a site the operator has no permission to test.
+    if not args.authorized:
+        print("REFUSED: `wave dast` sends live attack traffic. Only scan systems you own or are\n"
+              "explicitly authorized (in writing) to test. Re-run with --authorized to confirm you\n"
+              f"have permission to actively test {args.url}.", file=sys.stderr)
+        raise SystemExit(2)
+    print(f"[authorized] active DAST against {args.url} -- operator asserted permission.\n")
+    seed_targets = []
+    for s in (args.target_param or []):              # "METHOD route vector param", e.g. "GET /search query q"
+        parts = s.split()
+        if len(parts) == 4:
+            seed_targets.append((parts[0].upper(), parts[1], parts[2].lower(), parts[3]))
+    case = dast_scan.scan(args.url, seeds=tuple(args.seed or ["/"]), max_pages=args.max_pages,
+                          identities=0 if args.no_auth else args.identities, seed_targets=seed_targets,
+                          timing=args.timing, oast=not args.no_oast, oast_host=args.oast_host)
+    print(f"\n=== BLACK-BOX DAST on {args.url} ===")
+    c = case.counts()
+    print(f"  confirmed={c['confirmed']} anomalous={c['anomalous_state']} blocked={c['blocked']} "
+          f"routes={len(case.by_kind('route'))}\n")
+    if args.out:
+        try:
+            case.save(args.out)
+            print(f"[case file saved -> {args.out}]\n")
+        except OSError as e:
+            print(f"[could not save case file: {e}]\n")
+    print(case.report())
+
+
 def cmd_discover(args):
     cands = disc.discover(args.target, diff_ref=args.diff)
     if args.json:
@@ -734,6 +766,23 @@ def main():
     tr.add_argument("--deep", action="store_true",
                     help="Shift 2: let the model refine 'web' modules that are not remote-facing (safe-direction)")
     tr.set_defaults(func=cmd_trust)
+
+    da = sub.add_parser("dast", help="black-box DAST: prove vulns from a LIVE URL only (no source)")
+    da.add_argument("url", help="the live base URL, e.g. http://localhost:8080")
+    da.add_argument("--authorized", action="store_true",
+                    help="REQUIRED: confirm you own or are authorized to actively test this target")
+    da.add_argument("--seed", action="append", help="crawl seed path (repeatable; default /)")
+    da.add_argument("--max-pages", type=int, default=10, dest="max_pages", help="crawl page budget")
+    da.add_argument("--target-param", action="append", dest="target_param",
+                    help='known injection point: "METHOD route vector param" (repeatable)')
+    da.add_argument("--no-auth", action="store_true", help="skip the auth-synthesizer (unauthenticated scan)")
+    da.add_argument("--identities", type=int, default=2, help="auth identities to synthesize (>=2 for IDOR)")
+    da.add_argument("--timing", action="store_true", help="enable blind time-based probes (slow, intrusive)")
+    da.add_argument("--no-oast", action="store_true", help="disable the OAST canary (skip ssrf / blind-rce)")
+    da.add_argument("--oast-host", dest="oast_host",
+                    help="callback host:port the TARGET can reach (default host.docker.internal; set for remote)")
+    da.add_argument("--out", help="write the case file JSON to this path")
+    da.set_defaults(func=cmd_dast)
 
     cf = sub.add_parser("config", help="set the model/endpoint once (~/.wave/config), so runs need no env")
     cf.add_argument("action", choices=["set", "show"])

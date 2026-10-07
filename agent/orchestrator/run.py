@@ -60,6 +60,11 @@ def cmd_loop(args):
         print("\n" + case.report())
 
 
+def cmd_shell(args):
+    from . import shell
+    return shell.run()
+
+
 def cmd_dast(args):
     from . import dast_scan
     # Active scanning sends real attack traffic (injection payloads, OAST callbacks, brute-force bursts)
@@ -600,11 +605,13 @@ def cmd_config(args):
     print(f"set {key} -> {cfg}")
 
 
-def main():
+def main(argv=None):
     _load_config()                                          # set env once via `wave config`; then just run
     ap = argparse.ArgumentParser(prog="wave",
                                  description="wave — a local, autonomous vulnerability-discovery & repair agent")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd")                     # optional: bare `wave` opens the interactive shell
+    sh = sub.add_parser("shell", help="launch the interactive wave shell (the default when no command is given)")
+    sh.set_defaults(func=cmd_shell)
     d = sub.add_parser("discover", help="SAST front-end: static candidate discovery")
     d.add_argument("target")
     d.add_argument("--json", action="store_true")
@@ -790,7 +797,13 @@ def main():
     cf.add_argument("value", nargs="?", help="the value to set")
     cf.set_defaults(func=cmd_config)
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    if getattr(args, "cmd", None) is None:                  # no subcommand
+        if sys.stdin.isatty():                              # interactive -> the shell (Claude-CLI style)
+            from . import shell
+            return shell.run()
+        ap.print_help()                                     # piped / CI -> don't block on input
+        return 0
     args.func(args)
 
 

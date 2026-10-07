@@ -19,6 +19,9 @@ dependencies = [
 web = ["crawl4ai"]
 # running a LOCAL transformers model + trained LoRA adapter instead of the ollama/cloud API
 local-model = ["torch", "transformers", "peft", "bitsandbytes"]
+# black-box DAST (wave dast): headless browser for the XSS DOM oracle / recon crawl / stored-XSS, and
+# rich DNS records for recon. Also run `playwright install chromium` once to fetch the browser.
+dast = ["playwright", "dnspython"]
 
 [project.scripts]
 wave = "agent.orchestrator.run:main"

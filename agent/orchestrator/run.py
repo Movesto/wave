@@ -838,7 +838,21 @@ def main(argv=None):
             return shell.run()
         ap.print_help()                                     # piped / CI -> don't block on input
         return 0
+    for _attr in ("target", "url", "out", "har", "findings"):  # strip stray surrounding quotes a user/
+        _v = getattr(args, _attr, None)                        # paste/shell may leave on a path (Errno 22
+        if isinstance(_v, str):                                # on Windows: `"` is illegal in a filename)
+            setattr(args, _attr, _unquote(_v))
     args.func(args)
+
+
+def _unquote(s):
+    """Strip surrounding whitespace and a matching pair of wrapping quotes from a path/arg. The
+    interactive shell reads with input() (which, unlike a terminal, keeps quotes), and pasted Windows
+    paths often arrive quoted -- a literal `"` in the path then makes every file op fail with Errno 22."""
+    s = (s or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    return s
 
 
 if __name__ == "__main__":

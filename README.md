@@ -15,8 +15,10 @@ no dependence on a frontier cloud model for the parts that matter.
 ## Quickstart
 
 ```bash
-# 1. install as a CLI (Docker must also be running -- proofs run in throwaway containers)
-pip install -e .                     # gives you the `wave` command
+# 1. install the `wave` CLI (Python 3.11+, from the repo root)
+pip install -e .                     # core -> the `wave` command
+# for DAST (wave dast): pip install -e ".[dast]" && playwright install chromium
+# white-box proving (wave all / loop) needs Docker running -- proofs run in throwaway containers
 
 # 2. point at a model ONCE (saved to ~/.wave/config -- no need to re-set it each run)
 wave config set base  "http://localhost:11434/v1"        # LOCAL via ollama (private, the design intent)
@@ -187,12 +189,27 @@ Prefer a guided experience? Just run `wave` with no command to drop into an inte
 
 ## How to run it
 
-### 1. Prerequisites
+### 1. Install
 
-- **Python** 3.11+; install the CLI with `pip install -e .` (pulls `tree-sitter-language-pack`, `requests`,
-  `PyYAML`). This gives you the `wave` command.
-- **Docker** running (the proof loop executes everything in throwaway containers — never on your host).
-- **A model** (pick one, next section).
+**Python 3.11+.** From the repo root:
+
+```bash
+pip install -e .          # core: the `wave` command + tree-sitter-language-pack / requests / PyYAML
+```
+
+Then add extras for what you actually run:
+
+| To run… | Also install |
+|---|---|
+| **DAST** (`wave dast`) — XSS, the recon crawl, stored-XSS | `pip install -e ".[dast]"` then `playwright install chromium` |
+| A **local** transformers model + LoRA adapter (instead of ollama/cloud) | `pip install -e ".[local-model]"` |
+| Richer `web_read` deep-reads | `pip install -e ".[web]"` |
+
+- **Docker** is required **only for the white-box proof loop** (`wave all` / `wave loop` / `wave detect`) —
+  it runs every exploit and patch check in a throwaway container, never on your host. **DAST (`wave dast`)
+  is black-box and needs no Docker.**
+- **A model** is needed for the white-box pipeline (and for `wave dast --model`); a plain `wave dast` scan
+  needs none. Pick one in the next section.
 
 ### 2. Point it at a model (once)
 

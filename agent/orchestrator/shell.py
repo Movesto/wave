@@ -190,6 +190,8 @@ def _cmd_dast(arg):
     har = _ask("import a captured HAR for surface/recall (path, blank = none)")
     if har:
         argv += ["--har", har]
+    if _confirm("use the model to craft payloads on a battery miss (needs a configured endpoint)?"):
+        argv.append("--model")
     seed = _ask("seed endpoint as 'METHOD route vector param' (blank to skip)")
     if seed:
         argv += ["--target-param", seed]
@@ -290,6 +292,9 @@ _HELP_DAST = """
                              (/.git, /.env, /actuator, swagger, admin, backups, ...).
     APP (injection):         sqli, xss (reflected DOM-execution), STORED/second-order xss (--stored),
                              path, open redirect, SSTI, eval, NoSQLi, SSRF & blind RCE (OAST callback).
+    MODEL (opt-in):          --model -- on a battery miss, the model CRAFTS payloads tailored to the
+                             response (context breakout, DB-specific, filter evasion); our oracles still
+                             prove every confirm. Needs a configured endpoint (/setup).
     JUDGMENT (differential): IDOR, broken access control, missing rate-limit / old-password
                              (reported as anomalous_state -- observed effect, severity is a judgment).
     SAFETY: active traffic (scans ports, sends payloads) -- only run against systems you own or are
@@ -299,8 +304,8 @@ _HELP_DAST = """
             logged-in areas (otherwise a dummy login is synthesized).
     One-shot:  wave dast <url> --authorized [--cookie "sid=.."] [--header "Authorization: Bearer .."]
                               [--no-auth] [--timing] [--stored] [--delay SECONDS]
-                              [--plugins nuclei,ffuf,zap,mitmproxy] [--har capture.har] [--no-recon]
-                              [--no-ports] [--target-param "METHOD route vector param"] [--out f]
+                              [--plugins nuclei,ffuf,zap,mitmproxy] [--har capture.har] [--model]
+                              [--no-recon] [--no-ports] [--target-param "METHOD route vector param"] [--out f]
     POLITENESS: --delay SECONDS throttles ALL outbound requests (recon, battery, writes, renders) to
                 avoid hammering / tripping rate limits on a live target.
     TOOLS:      --plugins nuclei,ffuf,zap,mitmproxy (or all) runs free external tools as PERCEPTION --

@@ -54,11 +54,12 @@ def test_dast_builds_authorized_argv(monkeypatch):
 
 def test_dast_adds_no_auth_when_declined(monkeypatch):
     calls = _capture(monkeypatch)
-    answers = iter([True, False, False, False])          # authorize yes, synth-auth no, timing no, stored no
+    answers = iter([True, False, False, False, False])   # authorize, synth-auth no, timing no, stored no, model no
     monkeypatch.setattr(shell, "_confirm", lambda prompt: next(answers))
     monkeypatch.setattr(shell, "_ask", lambda *a, **k: "")
     shell._cmd_dast("http://t")
     assert "--no-auth" in calls[0] and "--timing" not in calls[0] and "--stored" not in calls[0]
+    assert "--model" not in calls[0]
 
 
 def test_sast_discover_argv(monkeypatch):

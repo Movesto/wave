@@ -199,7 +199,7 @@ def _authz_candidates(routes):
 
 def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
          battery=INJECTION_BATTERY, timing=False, oast=True, oast_host=None,
-         recon=True, ports=True, auth_headers=None, stored=False, delay=0.0, plugins=()):
+         recon=True, ports=True, auth_headers=None, stored=False, delay=0.0, plugins=(), model=False):
     """Run the black-box loop against `url`. Returns a CaseFile (the investigation record / report).
     `auth_headers` (a dict) supplies a REAL session (cookie/bearer) to test authenticated areas directly
     -- when given it is used instead of synthesizing a dummy login. `delay` sets a minimum seconds
@@ -290,22 +290,48 @@ def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
             except Exception as e:
                 case.record("hypothesis", "auth", "tool", "blocked", provenance=url, note=f"auth failed: {e}")
 
-        # ---- injection + out-of-band battery (confirmed) ----
+        # ---- model-driven payloads (opt-in): the model CRAFTS, our oracles still PROVE ----
+        model_obj = None
+        if model:
+            try:
+                from . import model as modelmod
+                model_obj = modelmod.Model()
+                case.record("control", "model", "tool", "confirmed", provenance=url,
+                            note=f"model-driven payloads enabled ({model_obj.model_id})")
+            except Exception as e:
+                case.record("hypothesis", "model", "tool", "blocked", provenance=url,
+                            note=f"model unavailable: {e}")
+
+        # ---- injection + out-of-band battery (confirmed); model-driven fallback on a miss ----
         for method, route, vector, param in targets:
+            sender = dast_oracle.Sender(url, method, route, vector, param, headers=auth_hdrs)
+            got = None
             for cls in _battery_for(param, battery):
                 try:
-                    sender = dast_oracle.Sender(url, method, route, vector, param, headers=auth_hdrs)
                     got = dast_oracle.witness(cls, sender.send, url_for=sender.url_for,
                                               headers=auth_hdrs, canary=canary,
                                               op_send=sender.send_op, timing=timing)
                 except Exception:
                     got = None
                 if got:
-                    case.record("confirmation", f"{got['class']} via `{param}` on {method} {route}",
-                                "oracle", "confirmed",
-                                provenance=f"{method} {route}  [{vector}:{param}]  payload={got['payload']}",
-                                cwe=got["cwe"], evidence=got["evidence"], payload=got["payload"])
-                    break                            # one proven class per param is enough
+                    break
+            if got is None and model_obj is not None:      # deterministic battery missed -> let the model try
+                from .model import ModelAuthError
+                from . import dast_model
+                try:
+                    base, probe = sender.send("1"), sender.send("1'")
+                    got = dast_model.run(model_obj, sender, base, probe, canary=canary, headers=auth_hdrs)
+                except ModelAuthError as e:
+                    model_obj = None                        # permanent: disable + stop trying, note once
+                    case.record("hypothesis", "model", "tool", "blocked", provenance=url,
+                                note=f"model auth error, disabled: {e}")
+                except Exception:
+                    got = None
+            if got:
+                case.record("confirmation", f"{got['class']} via `{param}` on {method} {route}",
+                            "oracle", "confirmed",
+                            provenance=f"{method} {route}  [{vector}:{param}]  payload={got['payload']}",
+                            cwe=got["cwe"], evidence=got["evidence"], payload=got["payload"])
 
         # ---- stored / second-order XSS (opt-in: it WRITES payloads + re-renders the surface) ----
         if stored:

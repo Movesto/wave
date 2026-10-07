@@ -128,6 +128,63 @@ Classes it can't yet witness (missing deps, business logic beyond IDOR, gadget c
 
 ---
 
+## Black-box DAST — testing a live URL
+
+Everything above is the **white-box** path: it reads the source, provisions the app in a container, and
+instruments the sink. The second mode, `wave dast <url>`, is **pure black-box** — given only a live URL
+and no source, it works like an external red-teamer: map the surface from any angle, then prove what it
+can from the client alone.
+
+```
+wave dast https://staging.example.com --authorized
+```
+
+Active scanning sends real attack traffic, so it **refuses to run without `--authorized`** — only point
+it at systems you own or are authorized to test.
+
+One pass covers four layers:
+
+- **Recon / infra** — DNS, email-spoofing posture (SPF/DMARC), subdomain takeover, TLS certificate
+  (expiry / self-signed / mismatch + the SANs it leaks), and a port/service exposure scan.
+- **HTTP posture** — stack fingerprint, missing security headers, weak cookie flags, CORS misconfig,
+  dangerous methods, and sensitive-path discovery (`/.git`, `/.env`, `/actuator`, swagger, backups…)
+  gated on a content signature so a soft-404 can't false-fire.
+- **Surface expansion (recall)** — ingests an OpenAPI/Swagger spec, `robots.txt`, `sitemap.xml`, and
+  crawled query params, so a JSON API becomes a full target list with no manual seeding.
+- **Injection** — SQLi (error / boolean / blind-timing), reflected **and stored** XSS (proven by actual
+  execution in headless Chromium), path traversal, open redirect, SSTI, eval, NoSQLi, and **SSRF + blind
+  RCE** via an out-of-band (OAST) callback to a listener we control.
+- **Differential** — IDOR, broken access control, and missing controls (rate-limit, old-password check).
+
+The same honesty rule holds: a tool-witnessed injection or an OAST callback is `confirmed`; a behavioral
+differential is `anomalous_state` (a real observed effect whose severity is a judgment); everything else
+is a `believed` lead — never a false `confirmed`. The output is a replayable HTTP PoC, not a patch (there
+is no source to fix).
+
+Useful flags:
+
+```
+wave dast <url> --authorized \
+  --cookie "session=…"            # or --header "Authorization: Bearer …" — test as a logged-in user
+  --delay 1.0                     # politeness: min seconds between ALL requests (recon, battery, renders)
+  --stored                        # hunt stored / second-order XSS (writes payloads, re-renders pages)
+  --har capture.har               # import captured traffic (any proxy/browser HAR) as surface
+  --plugins nuclei,ffuf,zap,mitmproxy   # run free external tools as perception (leads only)
+  --target-param "GET /users/v1/:id path id"   # seed a known endpoint
+```
+
+**External tools are perception, never the proof authority.** `--plugins` runs free tools —
+[nuclei](https://github.com/projectdiscovery/nuclei) (known-issue templates),
+[ffuf](https://github.com/ffuf/ffuf) (content discovery), [ZAP](https://www.zaproxy.org/) (spider +
+passive, opt-in active via `WAVE_ZAP_ACTIVE=1`), and [mitmproxy](https://mitmproxy.org/) (HAR traffic
+import) — and ingests their output as leads and extra surface. wave's own oracles still own every
+`confirmed`, so a noisy tool widens recall but can never manufacture a false positive.
+
+Prefer a guided experience? Just run `wave` with no command to drop into an interactive shell
+(`/setup`, `/sast`, `/dast`, `/both`, `/help`).
+
+---
+
 ## How to run it
 
 ### 1. Prerequisites

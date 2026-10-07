@@ -73,6 +73,65 @@ def targets_from_surface(recon, seed_targets=()):
     return out
 
 
+def query_targets(links):
+    """(GET, path, query, param) for every query param in crawled/seed links that carry a query string.
+    This is the recall fix for `?id=`/`?q=` params the crawler used to drop. Pure, deduped."""
+    from urllib.parse import parse_qs, urlparse
+    out, seen = [], set()
+    for u in links or []:
+        pr = urlparse(u)
+        for k in parse_qs(pr.query):
+            key = ("GET", pr.path or "/", "query", k)
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+    return out
+
+
+def _dedup(targets):
+    seen, out = set(), []
+    for t in targets:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+# Common locations an API publishes its spec; one hit is enough.
+_SPEC_PATHS = ("/openapi.json", "/swagger.json", "/v2/swagger.json", "/v3/api-docs", "/api-docs",
+               "/api/swagger.json", "/swagger/v1/swagger.json")
+
+
+def _expand_surface(url):
+    """Pull routes + injection targets from the machine-readable surface: an OpenAPI/Swagger spec (the
+    big API-recall win -- no manual seeding), plus robots.txt / sitemap.xml paths. Guarded/best-effort."""
+    import json
+    routes, targets, paths = [], [], []
+    for sp in _SPEC_PATHS:
+        r = dast_recon.http_fetch(url.rstrip("/") + sp, "GET")
+        if not (r.get("status") and 200 <= r["status"] < 300):
+            continue
+        try:
+            spec = json.loads(r.get("body") or "")
+        except Exception:
+            continue
+        rts, tgts = dast_web.parse_openapi(spec)
+        if rts or tgts:
+            routes += rts
+            targets += tgts
+            break
+    rb = dast_recon.http_fetch(url.rstrip("/") + "/robots.txt", "GET")
+    if rb.get("status") and 200 <= rb["status"] < 300:
+        paths += dast_web.paths_from_robots(rb.get("body"))
+    sm = dast_recon.http_fetch(url.rstrip("/") + "/sitemap.xml", "GET")
+    if sm.get("status") and 200 <= sm["status"] < 300:
+        paths += dast_web.paths_from_sitemap(sm.get("body"))
+    for p in paths:
+        routes.append(("GET", p.split("?")[0]))
+    targets += query_targets(paths)
+    return routes, targets
+
+
 def _battery_for(param, battery):
     """The classes to try on a param: a name-gated class (redirect/ssrf/cmd) runs only when the param
     name hints that sink; sqli/xss/path run on every param."""
@@ -137,8 +196,10 @@ def _authz_candidates(routes):
 
 def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
          battery=INJECTION_BATTERY, timing=False, oast=True, oast_host=None,
-         recon=True, ports=True):
-    """Run the black-box loop against `url`. Returns a CaseFile (the investigation record / report)."""
+         recon=True, ports=True, auth_headers=None):
+    """Run the black-box loop against `url`. Returns a CaseFile (the investigation record / report).
+    `auth_headers` (a dict) supplies a REAL session (cookie/bearer) to test authenticated areas directly
+    -- when given it is used instead of synthesizing a dummy login."""
     case = CaseFile(target=url)
 
     ok, info = dastmod.reachable(url)
@@ -172,14 +233,31 @@ def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
         rt = dastmod.Target(url)
         rec = browser_recon.recon(rt, seeds=tuple(seeds), max_pages=max_pages)
         routes = list(rec.get("routes", [])) + _seed_routes(seed_targets)
-        for r in routes:
-            case.record("route", f"{r.method} {r.path}", "tool", "confirmed", provenance=r.file or "")
         if rec.get("error"):
             case.record("hypothesis", url, "tool", "blocked", provenance=url,
                         note=f"recon limited: {rec['error']}")
 
-        identity_list, auth_hdrs = [], {}
-        if identities and routes:
+        # ---- surface expansion (recall): crawled query params + OpenAPI spec + robots/sitemap ----
+        targets = list(targets_from_surface(rec, seed_targets))
+        targets += query_targets(rec.get("links"))
+        ex_routes, ex_targets = _expand_surface(url)
+        for m, p in ex_routes:
+            routes.append(routes_mod.Route(m, p, "<surface>", ""))
+        targets = _dedup(targets + ex_targets)
+        for r in routes:
+            case.record("route", f"{r.method} {r.path}", "tool", "confirmed", provenance=r.file or "")
+        if ex_targets or ex_routes:
+            case.record("entity", "surface-expansion", "tool", "confirmed", provenance=url,
+                        note=f"recall: +{len(ex_routes)} routes, +{len(ex_targets)} params from "
+                             f"OpenAPI/robots/sitemap")
+
+        # ---- auth: a provided real session wins; else synthesize dummy identities ----
+        auth_hdrs = {}
+        if auth_headers:
+            auth_hdrs = dict(auth_headers)
+            case.record("control", "auth", "tool", "confirmed", provenance=url,
+                        note=f"using provided session ({', '.join(auth_headers)})")
+        elif identities and routes:
             try:
                 identity_list = authmod.synthesize_multi(rt, routes, n=max(identities, 1))
                 if identity_list:
@@ -191,7 +269,7 @@ def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
                 case.record("hypothesis", "auth", "tool", "blocked", provenance=url, note=f"auth failed: {e}")
 
         # ---- injection + out-of-band battery (confirmed) ----
-        for method, route, vector, param in targets_from_surface(rec, seed_targets):
+        for method, route, vector, param in targets:
             for cls in _battery_for(param, battery):
                 try:
                     sender = dast_oracle.Sender(url, method, route, vector, param, headers=auth_hdrs)

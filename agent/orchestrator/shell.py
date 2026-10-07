@@ -172,7 +172,10 @@ def _cmd_dast(arg):
         print(RED("  refused -- only scan systems you are authorized to test."))
         return
     argv = ["dast", url, "--authorized"]
-    if not _confirm("synthesize an authenticated session (auth)?"):
+    cookie = _ask("paste a session Cookie to test as a logged-in user (blank = synthesize)")
+    if cookie:
+        argv += ["--cookie", cookie]
+    elif not _confirm("synthesize an authenticated session (auth)?"):
         argv.append("--no-auth")
     if _confirm("enable blind time-based probes (slow, more intrusive)?"):
         argv.append("--timing")
@@ -280,7 +283,11 @@ _HELP_DAST = """
                              (reported as anomalous_state -- observed effect, severity is a judgment).
     SAFETY: active traffic (scans ports, sends payloads) -- only run against systems you own or are
     authorized to test. The command refuses without an authorization affirmation.
-    One-shot:  wave dast <url> --authorized [--no-auth] [--timing] [--no-recon] [--no-ports]
+    RECALL: ingests an OpenAPI/Swagger spec + robots/sitemap + crawled query params automatically, so
+            an API needs no manual seeding. AUTH: pass a real session with --cookie / --header to test
+            logged-in areas (otherwise a dummy login is synthesized).
+    One-shot:  wave dast <url> --authorized [--cookie "sid=.."] [--header "Authorization: Bearer .."]
+                              [--no-auth] [--timing] [--no-recon] [--no-ports]
                               [--target-param "METHOD route vector param"] [--identities N] [--out f]
 """
 

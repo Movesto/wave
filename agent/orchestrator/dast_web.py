@@ -161,3 +161,93 @@ def directory_listing(body):
     if re.search(r"<title>Index of /|Directory listing for |<h1>Index of", b):
         return ("directory listing enabled (file enumeration)", "CWE-548")
     return None
+
+
+# ---------- surface expansion (recall): OpenAPI / robots / sitemap -> routes + injection targets -----
+
+def _schema_props(obj):
+    """Top-level property names from a (possibly nested requestBody/schema) dict. Shallow on purpose --
+    $ref resolution is out of scope; the names feed the oracle, which proves or clears each."""
+    names = []
+    if not isinstance(obj, dict):
+        return names
+    schema = obj
+    content = obj.get("content")
+    if isinstance(content, dict):                        # openapi 3 requestBody.content[*].schema
+        for media in content.values():
+            if isinstance(media, dict) and isinstance(media.get("schema"), dict):
+                schema = media["schema"]
+                break
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        names = [k for k in props if isinstance(k, str)]
+    return names
+
+
+def parse_openapi(spec):
+    """OpenAPI 2.0 (Swagger) / 3.x -> (routes, targets). Pure. routes: [(METHOD, path)]; targets:
+    [(METHOD, path, vector, param)] with the spec's {param} templates. This is the big API-recall win:
+    a JSON API with no HTML forms becomes a full target list without manual --target-param seeding."""
+    if not isinstance(spec, dict):
+        return [], []
+    base = spec.get("basePath") or ""                    # swagger 2.0
+    servers = spec.get("servers")
+    if not base and isinstance(servers, list) and servers and isinstance(servers[0], dict):
+        from urllib.parse import urlparse
+        base = urlparse(servers[0].get("url", "")).path or ""
+    _loc = {"query": "query", "path": "path", "header": "header", "formdata": "body", "body": "body",
+            "cookie": "header"}
+    routes, targets, seen = [], [], set()
+
+    def add_t(m, p, v, name):
+        k = (m, p, v, name)
+        if name and k not in seen:
+            seen.add(k)
+            targets.append(k)
+
+    for path, item in (spec.get("paths") or {}).items():
+        if not isinstance(item, dict):
+            continue
+        full = (base.rstrip("/") + "/" + str(path).lstrip("/")) if base else str(path)
+        shared = item.get("parameters") if isinstance(item.get("parameters"), list) else []
+        for method, op in item.items():
+            if method.lower() not in ("get", "post", "put", "delete", "patch") or not isinstance(op, dict):
+                continue
+            routes.append((method.upper(), full))
+            params = list(shared) + (op.get("parameters") if isinstance(op.get("parameters"), list) else [])
+            for p in params:
+                if not isinstance(p, dict) or not p.get("name"):
+                    continue
+                vector = _loc.get((p.get("in") or "").lower(), "query")
+                if isinstance(p.get("schema"), dict) and (p.get("in") or "").lower() == "body":
+                    for name in _schema_props(p["schema"]):   # swagger-2 body param with an inline schema
+                        add_t(method.upper(), full, "body", name)
+                else:
+                    add_t(method.upper(), full, vector, p["name"])
+            for name in _schema_props(op.get("requestBody")):   # openapi-3 requestBody
+                add_t(method.upper(), full, "body", name)
+    return routes, targets
+
+
+def paths_from_robots(text):
+    """Disallow/Allow paths from robots.txt (pure) -- the operator LISTED these as interesting, so they
+    are prime surface. Wildcards are truncated to their literal prefix."""
+    out = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line.lower().startswith(("disallow:", "allow:")):
+            p = line.split(":", 1)[1].strip()
+            if p and p != "/":
+                out.append(p.split("*")[0].split("$")[0])
+    return sorted({p for p in out if p.startswith("/")})
+
+
+def paths_from_sitemap(xml):
+    """URL paths from a sitemap.xml <loc> entries (pure)."""
+    from urllib.parse import urlparse
+    out = []
+    for loc in re.findall(r"<loc>\s*([^<]+?)\s*</loc>", xml or "", re.I):
+        pr = urlparse(loc.strip())
+        if pr.path:
+            out.append(pr.path + ("?" + pr.query if pr.query else ""))
+    return sorted(set(out))

@@ -76,6 +76,13 @@ def cmd_dast(args):
               f"have permission to actively test {args.url}.", file=sys.stderr)
         raise SystemExit(2)
     print(f"[authorized] active DAST against {args.url} -- operator asserted permission.\n")
+    extra_headers = {}
+    for h in (args.header or []):                            # --header "Name: value" (repeatable)
+        if ":" in h:
+            k, v = h.split(":", 1)
+            extra_headers[k.strip()] = v.strip()
+    if args.cookie:
+        extra_headers["Cookie"] = args.cookie
     seed_targets = []
     for s in (args.target_param or []):              # "METHOD route vector param", e.g. "GET /search query q"
         parts = s.split()
@@ -84,7 +91,8 @@ def cmd_dast(args):
     case = dast_scan.scan(args.url, seeds=tuple(args.seed or ["/"]), max_pages=args.max_pages,
                           identities=0 if args.no_auth else args.identities, seed_targets=seed_targets,
                           timing=args.timing, oast=not args.no_oast, oast_host=args.oast_host,
-                          recon=not args.no_recon, ports=not args.no_ports)
+                          recon=not args.no_recon, ports=not args.no_ports,
+                          auth_headers=extra_headers or None)
     print(f"\n=== BLACK-BOX DAST on {args.url} ===")
     c = case.counts()
     print(f"  confirmed={c['confirmed']} anomalous={c['anomalous_state']} blocked={c['blocked']} "
@@ -785,6 +793,9 @@ def main(argv=None):
                     help='known injection point: "METHOD route vector param" (repeatable)')
     da.add_argument("--no-auth", action="store_true", help="skip the auth-synthesizer (unauthenticated scan)")
     da.add_argument("--identities", type=int, default=2, help="auth identities to synthesize (>=2 for IDOR)")
+    da.add_argument("--header", action="append",
+                    help='use a REAL session: send this header on every request, "Name: value" (repeatable)')
+    da.add_argument("--cookie", help="use a REAL session: send this Cookie header on every request")
     da.add_argument("--timing", action="store_true", help="enable blind time-based probes (slow, intrusive)")
     da.add_argument("--no-recon", action="store_true",
                     help="skip external recon (DNS/TLS/ports/headers/content) -- app-layer tests only")

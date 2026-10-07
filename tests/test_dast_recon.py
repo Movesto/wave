@@ -178,3 +178,47 @@ def test_classify_exposure_non_2xx_rejected():
 def test_directory_listing():
     assert web.directory_listing("<title>Index of /uploads</title>") is not None
     assert web.directory_listing("<html>normal page</html>") is None
+
+
+# ---------- surface expansion: OpenAPI / robots / sitemap ----------
+
+def test_parse_openapi_swagger2():
+    spec = {"swagger": "2.0", "basePath": "/api/v1", "paths": {
+        "/users/{id}": {"get": {"parameters": [{"name": "id", "in": "path"},
+                                                {"name": "fields", "in": "query"}]}},
+        "/login": {"post": {"parameters": [{"name": "body", "in": "body",
+                                            "schema": {"properties": {"user": {}, "pass": {}}}}]}}}}
+    routes, targets = web.parse_openapi(spec)
+    assert ("GET", "/api/v1/users/{id}") in routes
+    assert ("GET", "/api/v1/users/{id}", "path", "id") in targets
+    assert ("GET", "/api/v1/users/{id}", "query", "fields") in targets
+    assert ("POST", "/api/v1/login", "body", "user") in targets
+
+
+def test_parse_openapi_v3_requestbody():
+    spec = {"openapi": "3.0.1", "servers": [{"url": "https://h/base"}], "paths": {
+        "/search": {"get": {"parameters": [{"name": "q", "in": "query"}]},
+                    "post": {"requestBody": {"content": {"application/json": {
+                        "schema": {"properties": {"term": {}, "limit": {}}}}}}}}}}
+    routes, targets = web.parse_openapi(spec)
+    assert ("GET", "/base/search", "query", "q") in targets
+    assert ("POST", "/base/search", "body", "term") in targets
+    assert ("POST", "/base/search", "body", "limit") in targets
+
+
+def test_parse_openapi_rejects_junk():
+    assert web.parse_openapi(None) == ([], [])
+    assert web.parse_openapi({"paths": {"/x": "notadict"}}) == ([], [])
+
+
+def test_paths_from_robots():
+    txt = "User-agent: *\nDisallow: /admin/\nDisallow: /api/secret*\nAllow: /public\nDisallow: /"
+    paths = web.paths_from_robots(txt)
+    assert "/admin/" in paths and "/api/secret" in paths and "/public" in paths
+    assert "/" not in paths
+
+
+def test_paths_from_sitemap():
+    xml = "<urlset><url><loc>https://h/a?x=1</loc></url><url><loc>https://h/b/c</loc></url></urlset>"
+    paths = web.paths_from_sitemap(xml)
+    assert "/a?x=1" in paths and "/b/c" in paths

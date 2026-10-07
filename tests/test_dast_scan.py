@@ -58,6 +58,47 @@ def test_battery_name_gates_ssrf_and_cmd():
     assert "cmd" in list(dast_scan._battery_for("pingHost", dast_scan.INJECTION_BATTERY))
 
 
+def test_query_targets_from_links():
+    links = ["/search?q=hello&page=2", "/item?id=5", "/static/app.js", "/search?q=again"]
+    t = dast_scan.query_targets(links)
+    assert ("GET", "/search", "query", "q") in t
+    assert ("GET", "/search", "query", "page") in t
+    assert ("GET", "/item", "query", "id") in t
+    assert len([x for x in t if x == ("GET", "/search", "query", "q")]) == 1   # deduped
+
+
+def test_dedup_preserves_order():
+    assert dast_scan._dedup([("a",), ("b",), ("a",)]) == [("a",), ("b",)]
+
+
+def test_expand_surface_ingests_openapi(monkeypatch):
+    spec = '{"swagger":"2.0","paths":{"/u/{id}":{"get":{"parameters":[{"name":"id","in":"path"}]}}}}'
+
+    def fake_fetch(u, method="GET", headers=None, timeout=8):
+        if u.endswith("/openapi.json"):
+            return {"status": 200, "headers": {}, "cookies": [], "allow": "", "body": spec}
+        return {"status": 404, "headers": {}, "cookies": [], "allow": "", "body": ""}
+    monkeypatch.setattr(dast_scan.dast_recon, "http_fetch", fake_fetch)
+    routes, targets = dast_scan._expand_surface("http://t")
+    assert ("GET", "/u/{id}") in routes
+    assert ("GET", "/u/{id}", "path", "id") in targets
+
+
+def test_scan_uses_provided_session(monkeypatch):
+    # auth_headers given -> used directly, synthesize_multi never called
+    recon = {"forms": [], "routes": [], "links": [], "egress": []}
+    nofetch = {"status": 404, "headers": {}, "cookies": [], "allow": "", "body": ""}
+    called = {"synth": 0}
+    monkeypatch.setattr(dast_scan.authmod, "synthesize_multi", lambda *a, **k: called.__setitem__("synth", 1) or [])
+    with mock.patch.object(dastmod, "reachable", return_value=(True, 200)), \
+         mock.patch.object(dast_scan.dast_recon, "http_fetch", return_value=nofetch), \
+         mock.patch.object(dast_scan.browser_recon, "recon", return_value=recon):
+        case = dast_scan.scan("http://t", recon=False, oast=False,
+                              auth_headers={"Cookie": "sid=real"})
+    assert called["synth"] == 0
+    assert any("provided session" in (e.data.get("note") or "") for e in case.all())
+
+
 def test_seed_routes_builds_route_objects():
     rts = dast_scan._seed_routes([("GET", "/users/v1/:username", "path", "username"),
                                   ("GET", "/users/v1/:username", "path", "username")])   # dup collapses
@@ -135,8 +176,10 @@ def test_scan_wires_canary_and_tears_it_down():
         def start(self): return self
         def stop(self): stopped["n"] += 1
 
+    nofetch = {"status": 404, "headers": {}, "cookies": [], "allow": "", "body": ""}
     with mock.patch.object(dastmod, "reachable", return_value=(True, 200)), \
          mock.patch.object(dast_scan.oastmod, "Canary", return_value=FakeCanary()), \
+         mock.patch.object(dast_scan.dast_recon, "http_fetch", return_value=nofetch), \
          mock.patch.object(dast_scan.browser_recon, "recon", return_value=recon):
         case = dast_scan.scan("http://localhost:8080", identities=0, recon=False)
     assert stopped["n"] == 1                          # canary always torn down (finally)
@@ -174,7 +217,9 @@ def test_scan_confirms_a_witnessed_param():
     # reachable + a recon surface with one form field; the oracle witnesses sqli on that param.
     recon = {"forms": [{"method": "GET", "path": "/search", "fields": ["q"]}], "routes": [], "egress": []}
     poc = {"class": "sqli", "cwe": "CWE-89", "payload": "1'", "evidence": "DB error leaked"}
+    nofetch = {"status": 404, "headers": {}, "cookies": [], "allow": "", "body": ""}
     with mock.patch.object(dastmod, "reachable", return_value=(True, 200)), \
+         mock.patch.object(dast_scan.dast_recon, "http_fetch", return_value=nofetch), \
          mock.patch.object(dast_scan.browser_recon, "recon", return_value=recon), \
          mock.patch.object(dast_scan.dast_oracle, "witness", return_value=poc):
         case = dast_scan.scan("http://localhost:8080", identities=0, oast=False, recon=False)

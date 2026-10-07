@@ -5,6 +5,20 @@ Scope: **pure black-box** (URL only, never source), **full loop** in one pass. O
 canary by default; `--oast-host` for a remote-reachable host/tunnel). Verified live on VAmPI: SQLi
 (confirmed) + missing rate-limit (anomalous_state) in one run.
 
+Fifth increment (2026-10-06, user: "improve the dast in areas it lacks"): closed the two real gaps --
+RECALL and realism.
+  - RECALL (recon now FEEDS the attack): `_expand_surface` ingests an OpenAPI/Swagger spec
+    (dast_web.parse_openapi -> routes + params; swagger-2 + openapi-3, incl requestBody) so a JSON API
+    needs NO manual --target-param; robots.txt Disallow + sitemap.xml <loc> become routes/targets;
+    browser_recon now KEEPS link query strings and `query_targets` turns every `?p=` into a target
+    (previously dropped -- the biggest hole). All targets deduped, fed to the injection battery + the
+    route table (so IDOR/authz/rate-limit see more too).
+  - REALISM (test as a logged-in user): `scan(auth_headers=)` + CLI `--header "N: v"` / `--cookie` and a
+    shell prompt -- supply a REAL session instead of the synthesized dummy login. Provided session wins;
+    synthesis is skipped.
+  - All new logic pure + offline-tested (parse_openapi sw2/v3, robots, sitemap, query_targets, dedup,
+    _expand_surface via mocked fetch, provided-session path). Suite 355.
+
 Fourth increment (2026-10-06, user: "make dast complete -- more than web; think like a red teamer given
 only a URL, any angle"): added an EXTERNAL RECON layer (dast_recon.py + dast_web.py) that runs before the
 app stage and widens the surface:

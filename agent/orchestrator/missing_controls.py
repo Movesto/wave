@@ -34,9 +34,16 @@ def sensitive_routes(routes):
     return out
 
 
-def prove_no_ratelimit(rt, route, auth=None, n=18):
+_SHAPE_REJECT = (400, 404, 405, 415, 422)                 # the endpoint rejected the REQUEST, not an attempt
+
+
+def prove_no_ratelimit(rt, route, auth=None, n=18, require_success=False):
     """Fire n rapid requests; if NONE are throttled (429/423, or a lockout 403 after a few) and the
-    endpoint keeps responding, brute-force protection is missing. A throttle at any point -> defer."""
+    endpoint keeps responding, brute-force protection is missing. A throttle at any point -> defer.
+
+    `require_success` (DAST sets it) demands that the endpoint actually PROCESS the attempts: if most
+    responses are request-shape rejections (400/404/405/415/422) the endpoint never ran a real
+    credential attempt, so 'no rate limit' would be a false positive -> not-proven."""
     body = {"username": "wavebrute", "password": "x"}     # handlers ignore extra fields
     statuses = []
     for i in range(n):
@@ -45,6 +52,12 @@ def prove_no_ratelimit(rt, route, auth=None, n=18):
         if st in (429, 423) or (st == 403 and i > 3):     # throttled / locked out -> protected
             return {"status": "not-proven", "cwe": "CWE-307",
                     "notes": f"throttled after {i + 1} requests (status {st}) -- rate limit present"}
+    if require_success:
+        rejected = sum(1 for s in statuses if s in _SHAPE_REJECT)
+        if rejected >= n / 2:
+            return {"status": "not-proven", "cwe": "CWE-307",
+                    "notes": (f"endpoint rejected the request shape on {rejected}/{n} tries (4xx client "
+                              f"errors, not credential attempts) -- not a live brute-force path")}
     return {"status": "proven", "cwe": "CWE-307", "oracle": "behavioral",
             "payload": f"{n} rapid requests", "request": f"{route.method} {route.path}",
             "evidence": (f"{n} rapid requests to {route.path} all accepted (statuses "

@@ -22,12 +22,19 @@ and is **not** used by this agent — it keeps its own copies of the detector.
 
 ## Run (from the repo root)
 ```
-# static discovery only (fast, no model)
-python -m agent.orchestrator.run discover data/downloads/VAmPI
+# interactive shell (Claude-CLI style): banner, /setup, /sast, /dast, /both, /help
+wave                       # or: python -m agent.orchestrator.run        (bare -> shell)
 
-# full loop: discover -> provision(Docker) -> craft+prove -> patch + dual-gate
-python -m agent.orchestrator.run loop data/downloads/VAmPI --fix
+# one-shot (scriptable) -- everything the shell does, directly:
+python -m agent.orchestrator.run discover data/downloads/VAmPI          # fast SAST, no model
+python -m agent.orchestrator.run all data/downloads/VAmPI --patch       # full SAST + repair
+python -m agent.orchestrator.run loop data/downloads/VAmPI --fix        # provision + prove + fix
+python -m agent.orchestrator.run dast http://localhost:8080 --authorized  # black-box DAST (live URL)
 ```
+The **interactive shell** is the default surface: run `wave` with no command to get a prompt with
+slash-commands — `/setup` (model + API endpoint), `/sast [path]`, `/dast [url]`, `/both`, and
+`/help [topic]`. DAST is active testing, so both the shell and the one-shot `dast` command require an
+explicit authorization affirmation (`--authorized`) before any traffic is sent.
 - Targets are passed as a path arg (they live in `data/downloads/`, not in this folder — they are
   test data, not code).
 - Discovery defaults to the deterministic detector; add `--model-discover` to use the fast review

@@ -528,11 +528,14 @@ def _build_brief(candidate, target, reason, scaffold=None, mode="call", reach=No
                 "`ls -l /work/wave_HIT`. CONFIRMED if the file EXISTS (the payload executed on deserialize). "
                 "REFUTED if the load raises / rejects it and no file appears.")
         else:
+            # built as a plain string (not inside the f-string expr): f-strings can't contain a
+            # backslash in an expression part before Python 3.12, and CI runs 3.11.
+            obj_ex = run_hint.replace('<payload>', chr(39) + '{{\"path\": \"; id\"}}' + chr(39))
             extra = (f"\nA reproduction scaffold is ready at {cont} -- it loads the target and calls it with "
                      f"ARG (run it with the command below), printing WAVE_RESULT + WAVE_CALL_ERROR. The ARG is parsed as JSON if it can "
                      f"be, so the taint can flow through a PROPERTY -- match the function's signature:\n"
                      f"  - takes a string:  {run_hint.replace('<payload>', '; id')}\n"
-                     f"  - takes an object: {run_hint.replace('<payload>', chr(39) + '{{\"path\": \"; id\"}}' + chr(39))}\n"
+                     f"  - takes an object: {obj_ex}\n"
                      f"  - takes a URL:     pass {chr(39)}{{\"href\":\"https://x/; id\",\"hash\":\"\",\"search\":\"\","
                      f"\"pathname\":\"/x\"}}{chr(39)}\n"
                      f"For OS-command injection the injected command's output is often NOT returned -- inject a "

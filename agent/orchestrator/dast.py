@@ -11,9 +11,36 @@ The DECISION (plan/bootable/dast_mode) is deterministic and unit-tested here. Th
 """
 from __future__ import annotations
 
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from . import provision as prov
+
+
+class Target:
+    """A LIVE-URL stand-in for the provision handle. Every live-driving stage (auth, browser_recon,
+    bizlogic, idor, missing_controls, exploit.fire) reaches the app through only `.base_url`, so this
+    is all they need to run black-box -- no Docker boot, no source, no instrumented sinks. `hooks` is
+    kept empty for interface parity (there is nothing to instrument on someone else's server)."""
+
+    def __init__(self, base_url, hooks=None):
+        self.base_url = base_url.rstrip("/")
+        self.hooks = list(hooks or [])
+
+
+def reachable(base_url, timeout=6):
+    """The 'boot' replacement: is a live HTTP server answering at base_url? Returns (ok, status|reason).
+    A 4xx/5xx still counts as reachable (the server is up); only a connect/timeout error is 'down'."""
+    url = base_url.rstrip("/") + "/"
+    req = urllib.request.Request(url, method="GET", headers={"User-Agent": "wave-dast"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return True, r.status
+    except urllib.error.HTTPError as e:
+        return True, e.code                     # server answered (even if an error) -> reachable
+    except Exception as e:
+        return False, str(e)[:160]
 
 # a live oracle exists for these; map a finding's class/CWE to the DAST mode that can witness it
 _DIFF_CWE = {"CWE-639", "CWE-284", "CWE-862", "CWE-863", "CWE-566"}

@@ -33,6 +33,8 @@ def _post(opener, url, data, form):
         body = json.dumps(data).encode()
         ct = "application/json"
     req = urllib.request.Request(url, data=body, headers={"Content-Type": ct}, method="POST")
+    from . import dast_throttle
+    dast_throttle.wait()
     try:
         with opener.open(req, timeout=8) as r:
             return r.status, r.read().decode("utf-8", "replace"), r.headers

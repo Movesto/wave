@@ -60,6 +60,60 @@ def cmd_loop(args):
         print("\n" + case.report())
 
 
+def cmd_shell(args):
+    from . import shell
+    return shell.run()
+
+
+def cmd_dast(args):
+    from . import dast_scan
+    # Active scanning sends real attack traffic (injection payloads, OAST callbacks, brute-force bursts)
+    # to the target. Refuse to run unless the operator explicitly asserts authorization for THIS host --
+    # a scanner must never be pointed at a site the operator has no permission to test.
+    if not args.authorized:
+        print("REFUSED: `wave dast` sends live attack traffic. Only scan systems you own or are\n"
+              "explicitly authorized (in writing) to test. Re-run with --authorized to confirm you\n"
+              f"have permission to actively test {args.url}.", file=sys.stderr)
+        raise SystemExit(2)
+    print(f"[authorized] active DAST against {args.url} -- operator asserted permission.\n")
+    extra_headers = {}
+    for h in (args.header or []):                            # --header "Name: value" (repeatable)
+        if ":" in h:
+            k, v = h.split(":", 1)
+            extra_headers[k.strip()] = v.strip()
+    if args.cookie:
+        extra_headers["Cookie"] = args.cookie
+    plugins_sel = args.plugins
+    if args.har:                                            # import captured traffic -> auto-enable mitmproxy
+        os.environ["WAVE_HAR"] = args.har
+        if not plugins_sel:
+            plugins_sel = "mitmproxy"
+        elif "mitmproxy" not in plugins_sel:
+            plugins_sel += ",mitmproxy"
+    seed_targets = []
+    for s in (args.target_param or []):              # "METHOD route vector param", e.g. "GET /search query q"
+        parts = s.split()
+        if len(parts) == 4:
+            seed_targets.append((parts[0].upper(), parts[1], parts[2].lower(), parts[3]))
+    case = dast_scan.scan(args.url, seeds=tuple(args.seed or ["/"]), max_pages=args.max_pages,
+                          identities=0 if args.no_auth else args.identities, seed_targets=seed_targets,
+                          timing=args.timing, oast=not args.no_oast, oast_host=args.oast_host,
+                          recon=not args.no_recon, ports=not args.no_ports,
+                          auth_headers=extra_headers or None, stored=args.stored, delay=args.delay,
+                          plugins=plugins_sel)
+    print(f"\n=== BLACK-BOX DAST on {args.url} ===")
+    c = case.counts()
+    print(f"  confirmed={c['confirmed']} anomalous={c['anomalous_state']} blocked={c['blocked']} "
+          f"routes={len(case.by_kind('route'))}\n")
+    if args.out:
+        try:
+            case.save(args.out)
+            print(f"[case file saved -> {args.out}]\n")
+        except OSError as e:
+            print(f"[could not save case file: {e}]\n")
+    print(case.report())
+
+
 def cmd_discover(args):
     cands = disc.discover(args.target, diff_ref=args.diff)
     if args.json:
@@ -568,11 +622,13 @@ def cmd_config(args):
     print(f"set {key} -> {cfg}")
 
 
-def main():
+def main(argv=None):
     _load_config()                                          # set env once via `wave config`; then just run
     ap = argparse.ArgumentParser(prog="wave",
                                  description="wave — a local, autonomous vulnerability-discovery & repair agent")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd")                     # optional: bare `wave` opens the interactive shell
+    sh = sub.add_parser("shell", help="launch the interactive wave shell (the default when no command is given)")
+    sh.set_defaults(func=cmd_shell)
     d = sub.add_parser("discover", help="SAST front-end: static candidate discovery")
     d.add_argument("target")
     d.add_argument("--json", action="store_true")
@@ -735,13 +791,50 @@ def main():
                     help="Shift 2: let the model refine 'web' modules that are not remote-facing (safe-direction)")
     tr.set_defaults(func=cmd_trust)
 
+    da = sub.add_parser("dast", help="black-box DAST: prove vulns from a LIVE URL only (no source)")
+    da.add_argument("url", help="the live base URL, e.g. http://localhost:8080")
+    da.add_argument("--authorized", action="store_true",
+                    help="REQUIRED: confirm you own or are authorized to actively test this target")
+    da.add_argument("--seed", action="append", help="crawl seed path (repeatable; default /)")
+    da.add_argument("--max-pages", type=int, default=10, dest="max_pages", help="crawl page budget")
+    da.add_argument("--target-param", action="append", dest="target_param",
+                    help='known injection point: "METHOD route vector param" (repeatable)')
+    da.add_argument("--no-auth", action="store_true", help="skip the auth-synthesizer (unauthenticated scan)")
+    da.add_argument("--identities", type=int, default=2, help="auth identities to synthesize (>=2 for IDOR)")
+    da.add_argument("--header", action="append",
+                    help='use a REAL session: send this header on every request, "Name: value" (repeatable)')
+    da.add_argument("--cookie", help="use a REAL session: send this Cookie header on every request")
+    da.add_argument("--timing", action="store_true", help="enable blind time-based probes (slow, intrusive)")
+    da.add_argument("--stored", action="store_true",
+                    help="stored/second-order XSS: write token payloads + re-render the surface (writes data)")
+    da.add_argument("--delay", type=float, default=0.0, metavar="SECONDS",
+                    help="minimum seconds between requests (politeness / rate-limit avoidance; default 0)")
+    da.add_argument("--plugins", metavar="LIST",
+                    help="run external tools as perception (comma list: nuclei,ffuf,zap,mitmproxy  or  all)")
+    da.add_argument("--har", metavar="PATH",
+                    help="import captured traffic (HAR) as surface -- routes+params for recall (enables mitmproxy)")
+    da.add_argument("--no-recon", action="store_true",
+                    help="skip external recon (DNS/TLS/ports/headers/content) -- app-layer tests only")
+    da.add_argument("--no-ports", action="store_true", help="skip the port scan within recon")
+    da.add_argument("--no-oast", action="store_true", help="disable the OAST canary (skip ssrf / blind-rce)")
+    da.add_argument("--oast-host", dest="oast_host",
+                    help="callback host:port the TARGET can reach (default host.docker.internal; set for remote)")
+    da.add_argument("--out", help="write the case file JSON to this path")
+    da.set_defaults(func=cmd_dast)
+
     cf = sub.add_parser("config", help="set the model/endpoint once (~/.wave/config), so runs need no env")
     cf.add_argument("action", choices=["set", "show"])
     cf.add_argument("key", nargs="?", help="model | base | key | trace | a WAVE_* name")
     cf.add_argument("value", nargs="?", help="the value to set")
     cf.set_defaults(func=cmd_config)
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    if getattr(args, "cmd", None) is None:                  # no subcommand
+        if sys.stdin.isatty():                              # interactive -> the shell (Claude-CLI style)
+            from . import shell
+            return shell.run()
+        ap.print_help()                                     # piped / CI -> don't block on input
+        return 0
     args.func(args)
 
 

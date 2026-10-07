@@ -26,6 +26,7 @@ def recon(rt, seeds=("/",), max_pages=10):
     base = rt.base_url.rstrip("/")
     host = urlparse(base).hostname
     seen, forms, links, egress, form_keys = set(), [], set(), set(), set()
+    links_q = set()                                       # same-origin hrefs WITH their query string (recall)
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
         ctx = b.new_context(ignore_https_errors=True)
@@ -37,6 +38,8 @@ def recon(rt, seeds=("/",), max_pages=10):
             if path in seen:
                 continue
             seen.add(path)
+            from . import dast_throttle
+            dast_throttle.wait()
             try:
                 page.goto(base + path, wait_until="load", timeout=8000)
                 page.wait_for_timeout(200)
@@ -55,16 +58,18 @@ def recon(rt, seeds=("/",), max_pages=10):
                     forms.append({"method": method, "path": fpath, "fields": fields})
             for a in page.query_selector_all("a[href]"):
                 u = urljoin(base + path, a.get_attribute("href") or "")
-                if urlparse(u).hostname == host and urlparse(u).path:
-                    lp = urlparse(u).path
-                    links.add(lp)
-                    if lp not in seen:
-                        queue.append(lp)
+                pr = urlparse(u)
+                if pr.hostname == host and pr.path:
+                    links.add(pr.path)
+                    links_q.add(pr.path + ("?" + pr.query if pr.query else ""))
+                    if pr.path not in seen:
+                        queue.append(pr.path)
         b.close()
 
     disc = [routes_mod.Route(f["method"], f["path"], "<browser-recon>", "") for f in forms]
     disc += [routes_mod.Route("GET", lp, "<browser-recon>", "") for lp in sorted(links)]
-    return {"routes": disc, "forms": forms, "egress": sorted(h for h in egress if h)}
+    return {"routes": disc, "forms": forms, "egress": sorted(h for h in egress if h),
+            "links": sorted(links_q)}
 
 
 def _note_egress(url, host, egress):

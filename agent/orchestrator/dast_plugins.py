@@ -160,19 +160,172 @@ def run_ffuf(target, authorized=False, delay=0.0, timeout=600):
                 pass
 
 
-# ================================ ZAP (opt-in, stub) ================================
+# ================================ ZAP (daemon + REST API) ================================
+# OWASP ZAP driven headlessly: boot `zap.sh -daemon` on an ephemeral port with a random API key, spider
+# the target (discovery), let the passive scanner drain (posture), OPTIONALLY active-scan (injection,
+# gated by WAVE_ZAP_ACTIVE because it is slow + intrusive), pull the alerts, shut down. Per wave's rule,
+# every ZAP alert is a LEAD -- High/Medium -> believed (our oracle re-verifies), Low/Info -> anomalous;
+# spidered URLs become GET routes that widen wave's own surface.
 
-ZAP_IMPLEMENTED = False
+ZAP_IMPLEMENTED = True
+_ZAP_RISK_TIER = {"high": "believed", "medium": "believed", "low": "anomalous",
+                  "informational": "anomalous", "info": "anomalous"}
 
 
 def zap_available():
-    return _which("zap.sh") or _which("zaproxy")
+    import os
+    return bool(_which("zap.sh") or _which("zaproxy") or os.environ.get("WAVE_ZAP"))
+
+
+def zap_delay_ms(delay):
+    """Our per-request delay -> ZAP active-scanner delay in milliseconds (pure)."""
+    return max(0, int((delay or 0) * 1000))
+
+
+def _zap_cwe(raw):
+    try:
+        n = int(raw)
+        return f"CWE-{n}" if n > 0 else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+def parse_zap(alerts_json):
+    """ZAP core/alerts JSON -> normalized leads (pure). Risk sets the tier; cweid<=0 means 'no CWE'."""
+    data = alerts_json if isinstance(alerts_json, dict) else _loads(alerts_json)
+    out = []
+    for a in (data.get("alerts") or []):
+        risk = (a.get("risk") or "info").split()[0].lower()
+        name = a.get("alert") or a.get("name") or "zap alert"
+        url = a.get("url") or ""
+        pid = a.get("pluginId") or a.get("pluginid") or a.get("alertRef") or ""
+        out.append({"tool": "zap", "class": "zap", "cwe": _zap_cwe(a.get("cweid") or a.get("cweId")),
+                    "severity": risk, "tier": _ZAP_RISK_TIER.get(risk, "anomalous"),
+                    "evidence": f"{name} [{risk}] at {url}"[:200], "provenance": f"zap:{pid}"})
+    return out
+
+
+def parse_zap_urls(spider_json):
+    """ZAP spider results -> deduped GET routes (recall). Pure."""
+    data = spider_json if isinstance(spider_json, dict) else _loads(spider_json)
+    seen, out = set(), []
+    for u in (data.get("results") or []):
+        p = urlparse(u).path
+        if p and ("GET", p) not in seen:
+            seen.add(("GET", p))
+            out.append(("GET", p))
+    return out
+
+
+def _loads(text):
+    try:
+        return json.loads(text or "{}")
+    except Exception:
+        return {}
+
+
+def _free_port():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _zap_get(base, key, path, timeout=30, **params):
+    import urllib.parse
+    import urllib.request
+    params["apikey"] = key
+    url = base + path + "?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
 
 
 def run_zap(target, authorized=False, delay=0.0, timeout=1800):
-    """Placeholder for the heavyweight ZAP plugin (daemon + REST API: spider/ajax-spider/passive as
-    perception, active-scan alerts demoted to leads our oracles re-verify). Not implemented yet."""
-    return []
+    """Boot ZAP in daemon mode, spider + passive (+ optional active via WAVE_ZAP_ACTIVE), collect alerts,
+    shut down. Heavily guarded: any failure returns whatever was gathered so far (or [])."""
+    import os
+    import secrets
+    import subprocess
+    import time
+    if not authorized or not zap_available():
+        return []
+    exe = _which("zap.sh") or _which("zaproxy") or os.environ.get("WAVE_ZAP")
+    port, key, base = _free_port(), secrets.token_hex(8), None
+    base = f"http://127.0.0.1:{port}"
+    proc = None
+    try:
+        proc = subprocess.Popen([exe, "-daemon", "-host", "127.0.0.1", "-port", str(port),
+                                 "-config", f"api.key={key}"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + min(timeout, 120)
+        up = False
+        while time.time() < deadline:
+            try:
+                _zap_get(base, key, "/JSON/core/view/version/")
+                up = True
+                break
+            except Exception:
+                time.sleep(2)
+        if not up:
+            return []
+        try:
+            _zap_get(base, key, "/JSON/core/action/accessUrl/", url=target)
+        except Exception:
+            pass
+        routes = []
+        try:
+            sid = str(_zap_get(base, key, "/JSON/spider/action/scan/", url=target).get("scan", "0"))
+            sdl = time.time() + min(timeout, 300)
+            while time.time() < sdl:
+                if str(_zap_get(base, key, "/JSON/spider/view/status/", scanId=sid).get("status", "0")) == "100":
+                    break
+                time.sleep(3)
+            routes = parse_zap_urls(_zap_get(base, key, "/JSON/spider/view/results/", scanId=sid))
+        except Exception:
+            pass
+        try:
+            pdl = time.time() + 120
+            while time.time() < pdl:
+                if str(_zap_get(base, key, "/JSON/pscan/view/recordsToScan/").get("recordsToScan", "0")) == "0":
+                    break
+                time.sleep(2)
+        except Exception:
+            pass
+        if os.environ.get("WAVE_ZAP_ACTIVE"):
+            try:
+                if delay > 0:
+                    _zap_get(base, key, "/JSON/ascan/action/setOptionDelayInMs/", Integer=str(zap_delay_ms(delay)))
+                aid = str(_zap_get(base, key, "/JSON/ascan/action/scan/", url=target, recurse="true").get("scan", "0"))
+                adl = time.time() + min(timeout, 900)
+                while time.time() < adl:
+                    if str(_zap_get(base, key, "/JSON/ascan/view/status/", scanId=aid).get("status", "0")) == "100":
+                        break
+                    time.sleep(5)
+            except Exception:
+                pass
+        alerts = []
+        try:
+            alerts = parse_zap(_zap_get(base, key, "/JSON/core/view/alerts/", baseurl=target))
+        except Exception:
+            pass
+        facts = [{"tool": "zap", "class": "discovery", "cwe": "", "severity": "info", "tier": "fact",
+                  "evidence": f"spidered {m} {p}", "provenance": "zap:spider", "routes": [(m, p)]}
+                 for (m, p) in routes]
+        return facts + alerts
+    except Exception:
+        return []
+    finally:
+        if proc is not None:
+            try:
+                _zap_get(base, key, "/JSON/core/action/shutdown/")
+            except Exception:
+                pass
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
 
 # ================================ registry / orchestration ================================

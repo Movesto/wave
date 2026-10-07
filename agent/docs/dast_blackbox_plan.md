@@ -5,6 +5,14 @@ Scope: **pure black-box** (URL only, never source), **full loop** in one pass. O
 canary by default; `--oast-host` for a remote-reachable host/tunnel). Verified live on VAmPI: SQLi
 (confirmed) + missing rate-limit (anomalous_state) in one run.
 
+Ninth increment (2026-10-06, user: "build out the ZAP plugin"): ZAP is now a REAL plugin (was a stub).
+`run_zap` boots `zap.sh -daemon` on an ephemeral port + random API key, drives the REST API over urllib
+(no zapv2 dependency): accessUrl -> spider (-> GET routes = recall) -> passive drain -> OPTIONAL active
+scan (gated by env WAVE_ZAP_ACTIVE; slow+intrusive) -> pull alerts -> shutdown, all heavily guarded.
+Pure offline-tested parsers: `parse_zap` (alerts -> leads; High/Medium=believed so our oracle
+re-verifies, Low/Info=anomalous; cweid<=0 -> no CWE), `parse_zap_urls` (spider -> deduped GET routes),
+`zap_delay_ms` (--delay -> active-scanner delay ms). ZAP_IMPLEMENTED=True. Suite 385.
+
 Eighth increment (2026-10-06, user: external-tool plugin layer -- nuclei + ffuf, ZAP stub, skip Caido):
 `dast_plugins.py` -- optional free-tool PERCEPTION plugins. A tool's output is a LEAD (believed /
 anomalous_state) or surface FACT (entity), NEVER a tool-witnessed `confirmed` -- wave's oracles stay the

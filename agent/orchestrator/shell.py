@@ -299,9 +299,10 @@ _HELP_DAST = """
                               [--no-recon] [--no-ports] [--target-param "METHOD route vector param"] [--out f]
     POLITENESS: --delay SECONDS throttles ALL outbound requests (recon, battery, writes, renders) to
                 avoid hammering / tripping rate limits on a live target.
-    TOOLS:      --plugins nuclei,ffuf (or all) runs free external tools as PERCEPTION -- their output is
-                ingested as leads/surface (wave's oracle still owns every `confirmed`). ZAP is stubbed
-                (opt-in next); Caido is intentionally not an autonomous plugin.
+    TOOLS:      --plugins nuclei,ffuf,zap (or all) runs free external tools as PERCEPTION -- their output
+                is ingested as leads/surface (wave's oracle still owns every `confirmed`). ZAP spiders +
+                passive-scans by default; set WAVE_ZAP_ACTIVE=1 for its (slow) active scan. Caido is
+                intentionally not an autonomous plugin (use mitmproxy for a programmatic proxy).
 """
 
 _HELP_SETUP = """

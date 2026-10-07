@@ -65,9 +65,36 @@ def test_resolve():
     assert pl.resolve(["nuclei", "bogus"]) == ["nuclei"]
 
 
-def test_zap_is_registered_but_stub():
-    assert "zap" in pl.PLUGINS and pl.ZAP_IMPLEMENTED is False
-    assert pl.run_zap("http://t", authorized=True) == []
+def test_zap_registered_and_implemented():
+    assert "zap" in pl.PLUGINS and pl.ZAP_IMPLEMENTED is True
+
+
+def test_zap_no_op_without_authorization(monkeypatch):
+    monkeypatch.setattr(pl, "zap_available", lambda: True)
+    assert pl.run_zap("http://t", authorized=False) == []        # never boots ZAP unauthorized
+
+
+def test_parse_zap_tiers_and_cwe():
+    alerts = {"alerts": [
+        {"alert": "SQL Injection", "risk": "High", "cweid": "89", "url": "http://t/x", "pluginId": "40018"},
+        {"name": "X-Frame-Options missing", "risk": "Low", "cweid": "1021", "url": "http://t/"},
+        {"alert": "Info leak", "risk": "Informational", "cweid": "-1", "url": "http://t/"},
+    ]}
+    out = pl.parse_zap(alerts)
+    assert out[0]["tier"] == "believed" and out[0]["cwe"] == "CWE-89" and out[0]["provenance"] == "zap:40018"
+    assert out[1]["tier"] == "anomalous" and out[1]["cwe"] == "CWE-1021"
+    assert out[2]["cwe"] == ""                                    # cweid -1 -> no CWE
+
+
+def test_parse_zap_urls_dedup():
+    spider = {"results": ["http://t/a", "http://t/a?x=1", "http://t/b", "http://x/c"]}
+    routes = pl.parse_zap_urls(spider)
+    assert ("GET", "/a") in routes and ("GET", "/b") in routes and ("GET", "/c") in routes
+    assert routes.count(("GET", "/a")) == 1
+
+
+def test_zap_delay_ms():
+    assert pl.zap_delay_ms(0) == 0 and pl.zap_delay_ms(1.5) == 1500
 
 
 # ---------- collect (stubbed registry) ----------

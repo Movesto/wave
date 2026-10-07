@@ -100,7 +100,7 @@ def cmd_dast(args):
                           timing=args.timing, oast=not args.no_oast, oast_host=args.oast_host,
                           recon=not args.no_recon, ports=not args.no_ports,
                           auth_headers=extra_headers or None, stored=args.stored, delay=args.delay,
-                          plugins=plugins_sel)
+                          plugins=plugins_sel, model=args.model)
     print(f"\n=== BLACK-BOX DAST on {args.url} ===")
     c = case.counts()
     print(f"  confirmed={c['confirmed']} anomalous={c['anomalous_state']} blocked={c['blocked']} "
@@ -813,6 +813,9 @@ def main(argv=None):
                     help="run external tools as perception (comma list: nuclei,ffuf,zap,mitmproxy  or  all)")
     da.add_argument("--har", metavar="PATH",
                     help="import captured traffic (HAR) as surface -- routes+params for recall (enables mitmproxy)")
+    da.add_argument("--model", action="store_true",
+                    help="model-driven payloads: on a battery miss, the model crafts tailored payloads "
+                         "(needs a configured endpoint; our oracles still prove)")
     da.add_argument("--no-recon", action="store_true",
                     help="skip external recon (DNS/TLS/ports/headers/content) -- app-layer tests only")
     da.add_argument("--no-ports", action="store_true", help="skip the port scan within recon")

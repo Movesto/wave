@@ -5,6 +5,15 @@ Scope: **pure black-box** (URL only, never source), **full loop** in one pass. O
 canary by default; `--oast-host` for a remote-reachable host/tunnel). Verified live on VAmPI: SQLi
 (confirmed) + missing rate-limit (anomalous_state) in one run.
 
+Eleventh increment (2026-10-06, user: "build it as an opt-in --model layer"): MODEL-DRIVEN PAYLOADS
+(dast_model.py, opt-in `--model`). The model CRAFTS payloads tailored to the observed (baseline, probe)
+responses -- context breakout, DB-specific syntax, template fingerprint, filter evasion -- and the SAME
+deterministic effect-detectors PROVE them (DB-error signature, OAST callback, DOM execution, system-file
+signature, a distinctive COMPUTED value present-not-in-baseline-not-in-payload). Runs ONLY where the
+deterministic battery missed, so it's a recall/evasion escalation that can never mint a false confirm.
+Grounding rule intact (model proposes, tool proves). Pure build_prompt/parse_probes/prove_response +
+stubbed-model run() tests. ModelAuthError disables the model once (not a scan abort). Suite 402.
+
 Tenth increment (2026-10-06, user: "add the mitmproxy plugin"): mitmproxy plugin = TRAFFIC CAPTURE for
 recall (not a scanner). Core is a pure, universal HAR parser (`parse_har`): every captured request ->
 a GET/POST route + its query params and form/JSON body keys as injection targets (host-filtered to the

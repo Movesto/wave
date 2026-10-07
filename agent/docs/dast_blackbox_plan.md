@@ -5,6 +5,14 @@ Scope: **pure black-box** (URL only, never source), **full loop** in one pass. O
 canary by default; `--oast-host` for a remote-reachable host/tunnel). Verified live on VAmPI: SQLi
 (confirmed) + missing rate-limit (anomalous_state) in one run.
 
+Tenth increment (2026-10-06, user: "add the mitmproxy plugin"): mitmproxy plugin = TRAFFIC CAPTURE for
+recall (not a scanner). Core is a pure, universal HAR parser (`parse_har`): every captured request ->
+a GET/POST route + its query params and form/JSON body keys as injection targets (host-filtered to the
+target), emitted as one `fact` finding whose routes/targets widen wave's own surface. `run_mitmproxy`
+imports a HAR via `--har`/WAVE_HAR (works with any proxy/browser export, mitmproxy not even required), or
+runs an opt-in live timed `mitmdump` capture (WAVE_MITM_SECS). `--har` auto-enables the plugin. Offline
+HAR-parse + import tests. Caido stays excluded; this is the programmatic-proxy answer. Suite 390.
+
 Ninth increment (2026-10-06, user: "build out the ZAP plugin"): ZAP is now a REAL plugin (was a stub).
 `run_zap` boots `zap.sh -daemon` on an ephemeral port + random API key, drives the REST API over urllib
 (no zapv2 dependency): accessUrl -> spider (-> GET routes = recall) -> passive drain -> OPTIONAL active

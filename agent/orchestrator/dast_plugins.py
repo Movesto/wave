@@ -328,12 +328,130 @@ def run_zap(target, authorized=False, delay=0.0, timeout=1800):
                 pass
 
 
+# ================================ mitmproxy (traffic capture -> recall) ================================
+# Unlike the scanners, mitmproxy CAPTURES real traffic -- the richest surface source for a JS-heavy or
+# authenticated app or an API client: whatever the user (or a tool) actually exercised becomes routes +
+# injection targets for wave's own oracles. The reliable, universal core is a HAR parser (mitmproxy's
+# `hardump`, or any proxy/browser HAR export); a live timed `mitmdump` capture is an opt-in bonus.
+
+def mitmproxy_available():
+    import os
+    return bool(_which("mitmdump") or os.environ.get("WAVE_HAR"))
+
+
+def parse_har(har, host=None):
+    """HAR (1.2) -> one 'capture' FACT finding carrying the observed routes + injection targets (pure).
+    Query params and form/JSON body keys become targets; `host` (when given) filters to the target."""
+    data = har if isinstance(har, dict) else _loads(har)
+    entries = (data.get("log") or {}).get("entries") or []
+    routes, targets, sr, st = [], [], set(), set()
+
+    def add_route(m, p):
+        if p and (m, p) not in sr:
+            sr.add((m, p))
+            routes.append((m, p))
+
+    def add_target(m, p, v, n):
+        if n and (m, p, v, n) not in st:
+            st.add((m, p, v, n))
+            targets.append((m, p, v, n))
+
+    for e in entries:
+        req = e.get("request") or {}
+        m = (req.get("method") or "GET").upper()
+        pr = urlparse(req.get("url") or "")
+        if host and pr.hostname and pr.hostname != host:
+            continue
+        path = pr.path or "/"
+        add_route(m, path)
+        for q in (req.get("queryString") or []):
+            add_target(m, path, "query", q.get("name"))
+        pd = req.get("postData") or {}
+        params = pd.get("params") or []
+        for p in params:
+            add_target(m, path, "body", p.get("name"))
+        if not params and pd.get("text"):
+            try:
+                body = json.loads(pd["text"])
+                if isinstance(body, dict):
+                    for k in body:
+                        add_target(m, path, "body", k)
+            except Exception:
+                pass
+    if not (routes or targets):
+        return []
+    return [{"tool": "mitmproxy", "class": "capture", "cwe": "", "severity": "info", "tier": "fact",
+             "evidence": f"captured {len(routes)} routes, {len(targets)} params from HAR",
+             "provenance": "mitmproxy:har", "routes": routes, "targets": targets}]
+
+
+def run_mitmproxy(target, authorized=False, delay=0.0, timeout=600):
+    """Import a captured HAR (WAVE_HAR), or -- if WAVE_MITM_SECS is set and mitmdump is present -- run a
+    live timed capture while the operator drives traffic through the printed proxy. Guarded."""
+    import os
+    if not authorized:
+        return []
+    host = urlparse(target).hostname if target else None
+    har_path = os.environ.get("WAVE_HAR")
+    if har_path and os.path.isfile(har_path):
+        try:
+            with open(har_path, encoding="utf-8") as f:
+                return parse_har(f.read(), host=host)
+        except Exception:
+            return []
+    secs = os.environ.get("WAVE_MITM_SECS")
+    if secs and _which("mitmdump"):
+        try:
+            return _mitm_capture(target, host, int(secs))
+        except Exception:
+            return []
+    return []
+
+
+def _mitm_capture(target, host, secs):
+    import os
+    import subprocess
+    import tempfile
+    import time
+    port = _free_port()
+    har = tempfile.NamedTemporaryFile(suffix=".har", delete=False)
+    har.close()
+    proc = None
+    try:
+        proc = subprocess.Popen(["mitmdump", "-p", str(port), "-q", "--set", f"hardump={har.name}"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"[mitmproxy] proxy on 127.0.0.1:{port} -- route your browser/app through it and exercise "
+              f"{target}; capturing {secs}s...", flush=True)
+        time.sleep(secs)
+    finally:
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+    try:
+        with open(har.name, encoding="utf-8") as f:
+            return parse_har(f.read(), host=host)
+    except Exception:
+        return []
+    finally:
+        try:
+            os.unlink(har.name)
+        except OSError:
+            pass
+
+
 # ================================ registry / orchestration ================================
 
 PLUGINS = {
     "nuclei": (nuclei_available, run_nuclei),
     "ffuf": (ffuf_available, run_ffuf),
     "zap": (zap_available, run_zap),
+    "mitmproxy": (mitmproxy_available, run_mitmproxy),
 }
 
 

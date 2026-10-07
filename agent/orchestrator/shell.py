@@ -184,9 +184,12 @@ def _cmd_dast(arg):
     delay = _ask("politeness delay between requests in seconds (blank = none)")
     if delay:
         argv += ["--delay", delay]
-    plugins = _ask("external tools to run (nuclei,ffuf or all; blank = none)")
+    plugins = _ask("external tools to run (nuclei,ffuf,zap,mitmproxy or all; blank = none)")
     if plugins:
         argv += ["--plugins", plugins]
+    har = _ask("import a captured HAR for surface/recall (path, blank = none)")
+    if har:
+        argv += ["--har", har]
     seed = _ask("seed endpoint as 'METHOD route vector param' (blank to skip)")
     if seed:
         argv += ["--target-param", seed]
@@ -295,14 +298,15 @@ _HELP_DAST = """
             an API needs no manual seeding. AUTH: pass a real session with --cookie / --header to test
             logged-in areas (otherwise a dummy login is synthesized).
     One-shot:  wave dast <url> --authorized [--cookie "sid=.."] [--header "Authorization: Bearer .."]
-                              [--no-auth] [--timing] [--stored] [--delay SECONDS] [--plugins nuclei,ffuf]
-                              [--no-recon] [--no-ports] [--target-param "METHOD route vector param"] [--out f]
+                              [--no-auth] [--timing] [--stored] [--delay SECONDS]
+                              [--plugins nuclei,ffuf,zap,mitmproxy] [--har capture.har] [--no-recon]
+                              [--no-ports] [--target-param "METHOD route vector param"] [--out f]
     POLITENESS: --delay SECONDS throttles ALL outbound requests (recon, battery, writes, renders) to
                 avoid hammering / tripping rate limits on a live target.
-    TOOLS:      --plugins nuclei,ffuf,zap (or all) runs free external tools as PERCEPTION -- their output
-                is ingested as leads/surface (wave's oracle still owns every `confirmed`). ZAP spiders +
-                passive-scans by default; set WAVE_ZAP_ACTIVE=1 for its (slow) active scan. Caido is
-                intentionally not an autonomous plugin (use mitmproxy for a programmatic proxy).
+    TOOLS:      --plugins nuclei,ffuf,zap,mitmproxy (or all) runs free external tools as PERCEPTION --
+                output is ingested as leads/surface (wave's oracle still owns every `confirmed`). ZAP
+                spiders + passive-scans (WAVE_ZAP_ACTIVE=1 for its slow active scan). --har <file> imports
+                captured traffic (mitmproxy/browser/proxy HAR) -> routes+params for recall.
 """
 
 _HELP_SETUP = """

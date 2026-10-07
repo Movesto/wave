@@ -83,6 +83,13 @@ def cmd_dast(args):
             extra_headers[k.strip()] = v.strip()
     if args.cookie:
         extra_headers["Cookie"] = args.cookie
+    plugins_sel = args.plugins
+    if args.har:                                            # import captured traffic -> auto-enable mitmproxy
+        os.environ["WAVE_HAR"] = args.har
+        if not plugins_sel:
+            plugins_sel = "mitmproxy"
+        elif "mitmproxy" not in plugins_sel:
+            plugins_sel += ",mitmproxy"
     seed_targets = []
     for s in (args.target_param or []):              # "METHOD route vector param", e.g. "GET /search query q"
         parts = s.split()
@@ -93,7 +100,7 @@ def cmd_dast(args):
                           timing=args.timing, oast=not args.no_oast, oast_host=args.oast_host,
                           recon=not args.no_recon, ports=not args.no_ports,
                           auth_headers=extra_headers or None, stored=args.stored, delay=args.delay,
-                          plugins=args.plugins)
+                          plugins=plugins_sel)
     print(f"\n=== BLACK-BOX DAST on {args.url} ===")
     c = case.counts()
     print(f"  confirmed={c['confirmed']} anomalous={c['anomalous_state']} blocked={c['blocked']} "
@@ -803,7 +810,9 @@ def main(argv=None):
     da.add_argument("--delay", type=float, default=0.0, metavar="SECONDS",
                     help="minimum seconds between requests (politeness / rate-limit avoidance; default 0)")
     da.add_argument("--plugins", metavar="LIST",
-                    help="run external tools as perception (comma list: nuclei,ffuf  or  all); leads only")
+                    help="run external tools as perception (comma list: nuclei,ffuf,zap,mitmproxy  or  all)")
+    da.add_argument("--har", metavar="PATH",
+                    help="import captured traffic (HAR) as surface -- routes+params for recall (enables mitmproxy)")
     da.add_argument("--no-recon", action="store_true",
                     help="skip external recon (DNS/TLS/ports/headers/content) -- app-layer tests only")
     da.add_argument("--no-ports", action="store_true", help="skip the port scan within recon")

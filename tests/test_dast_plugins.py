@@ -97,6 +97,57 @@ def test_zap_delay_ms():
     assert pl.zap_delay_ms(0) == 0 and pl.zap_delay_ms(1.5) == 1500
 
 
+# ---------- mitmproxy / HAR ----------
+
+_HAR = """{"log":{"entries":[
+ {"request":{"method":"GET","url":"http://t/search?q=hi&page=2",
+   "queryString":[{"name":"q","value":"hi"},{"name":"page","value":"2"}]}},
+ {"request":{"method":"POST","url":"http://t/login","postData":{
+   "mimeType":"application/x-www-form-urlencoded","params":[{"name":"user","value":"a"},{"name":"pw","value":"b"}]}}},
+ {"request":{"method":"POST","url":"http://t/api","postData":{
+   "mimeType":"application/json","text":"{\\"term\\":\\"x\\",\\"limit\\":5}"}}},
+ {"request":{"method":"GET","url":"http://other/z?e=1","queryString":[{"name":"e","value":"1"}]}}
+]}}"""
+
+
+def test_parse_har_routes_targets_and_host_filter():
+    out = pl.parse_har(_HAR, host="t")
+    assert len(out) == 1 and out[0]["tier"] == "fact"
+    routes, targets = out[0]["routes"], out[0]["targets"]
+    assert ("GET", "/search") in routes and ("POST", "/login") in routes and ("POST", "/api") in routes
+    assert ("GET", "/z") not in routes                        # other host filtered out
+    assert ("GET", "/search", "query", "q") in targets
+    assert ("POST", "/login", "body", "user") in targets      # form body param
+    assert ("POST", "/api", "body", "term") in targets        # JSON body key
+    assert all(t[3] != "e" for t in targets)                  # other-host param excluded
+
+
+def test_parse_har_empty():
+    assert pl.parse_har('{"log":{"entries":[]}}') == []
+    assert pl.parse_har("junk") == []
+
+
+def test_mitmproxy_available_with_har_env(monkeypatch):
+    monkeypatch.setenv("WAVE_HAR", "/some/path.har")
+    assert pl.mitmproxy_available() is True
+
+
+def test_run_mitmproxy_imports_har(tmp_path, monkeypatch):
+    f = tmp_path / "cap.har"
+    f.write_text(_HAR, encoding="utf-8")
+    monkeypatch.setenv("WAVE_HAR", str(f))
+    out = pl.run_mitmproxy("http://t", authorized=True)
+    assert out and out[0]["provenance"] == "mitmproxy:har"
+    assert ("POST", "/api", "body", "limit") in out[0]["targets"]
+
+
+def test_run_mitmproxy_requires_authorization(tmp_path, monkeypatch):
+    f = tmp_path / "cap.har"
+    f.write_text(_HAR, encoding="utf-8")
+    monkeypatch.setenv("WAVE_HAR", str(f))
+    assert pl.run_mitmproxy("http://t", authorized=False) == []
+
+
 # ---------- collect (stubbed registry) ----------
 
 def test_collect_runs_available_skips_missing(monkeypatch):

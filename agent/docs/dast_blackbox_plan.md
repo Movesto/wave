@@ -5,6 +5,21 @@ Scope: **pure black-box** (URL only, never source), **full loop** in one pass. O
 canary by default; `--oast-host` for a remote-reachable host/tunnel). Verified live on VAmPI: SQLi
 (confirmed) + missing rate-limit (anomalous_state) in one run.
 
+Fourth increment (2026-10-06, user: "make dast complete -- more than web; think like a red teamer given
+only a URL, any angle"): added an EXTERNAL RECON layer (dast_recon.py + dast_web.py) that runs before the
+app stage and widens the surface:
+  - NETWORK/INFRA: DNS (A/AAAA/CNAME/MX/NS/TXT; dnspython optional), email spoofing (SPF/DMARC ->
+    spoofable?), subdomain takeover (dangling CNAME to a known provider), TLS cert (expiry/self-signed/
+    hostname-mismatch + SANs as extra surface), port/service exposure scan (curated ~25 ports, flags
+    externally-reachable DB/cache/admin, CWE-668).
+  - HTTP POSTURE: stack fingerprint; missing security headers (HSTS/CSP/XFO/XCTO/Referrer); weak cookie
+    flags (HttpOnly/Secure/SameSite); CORS misconfig (origin reflection +/- credentials, CWE-942);
+    dangerous methods (TRACE/PUT/..); sensitive-path/content discovery with CONTENT-SIGNATURE gating
+    (/.git, /.env, /actuator, swagger, phpinfo, backups, admin -- a 200 only counts if the body matches).
+  - Tiers: recon FACTS -> entity; posture weaknesses -> anomalous_state; concrete exposures/leaks
+    (.git/.env/takeover/dir-listing) -> confirmed. Flags `--no-recon`, `--no-ports`. All analyzers are
+    PURE + unit-tested offline (24 tests); network fetchers guarded. Nothing run live (user's own site).
+
 Second increment (2026-10-06, user: "add idor, authz; integrate ssrf, blind rce; make dast work like
 sast"): the driver now runs ALL oracle classes in one pass with honest verdict tiers --
   - CONFIRMED (tool-witnessed): sqli / xss / path / redirect (response-diff/DOM) + ssrf / blind-RCE (OAST callback).

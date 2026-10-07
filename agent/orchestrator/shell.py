@@ -268,13 +268,19 @@ _HELP_SAST = """
 """
 
 _HELP_DAST = """
-  /dast [url] -- black-box dynamic testing of a LIVE URL (no source needed)
-    Proves vulnerabilities from responses alone. Classes with a client-only witness:
-      sqli, xss (DOM-execution), path traversal, open redirect, SSTI, eval, NoSQLi,
-      SSRF & blind RCE (via an OAST callback), plus differential IDOR / broken-access /
-      missing-rate-limit (reported as anomalous_state -- an observed effect, severity is a judgment).
-    SAFETY: active traffic -- only run against systems you own or are authorized to test.
-    One-shot:  wave dast <url> --authorized [--no-auth] [--timing]
+  /dast [url] -- black-box dynamic testing of a LIVE URL (red-team view: any angle, no source)
+    RECON (network/infra):   DNS + email-spoofing (SPF/DMARC) + subdomain-takeover, TLS cert
+                             (expiry/self-signed/mismatch + SANs), port/service exposure scan.
+    POSTURE (http):          stack fingerprint, missing security headers, weak cookie flags,
+                             CORS misconfig, dangerous methods, sensitive-path discovery
+                             (/.git, /.env, /actuator, swagger, admin, backups, ...).
+    APP (injection):         sqli, xss (DOM-execution), path, open redirect, SSTI, eval, NoSQLi,
+                             SSRF & blind RCE (OAST callback).
+    JUDGMENT (differential): IDOR, broken access control, missing rate-limit / old-password
+                             (reported as anomalous_state -- observed effect, severity is a judgment).
+    SAFETY: active traffic (scans ports, sends payloads) -- only run against systems you own or are
+    authorized to test. The command refuses without an authorization affirmation.
+    One-shot:  wave dast <url> --authorized [--no-auth] [--timing] [--no-recon] [--no-ports]
                               [--target-param "METHOD route vector param"] [--identities N] [--out f]
 """
 

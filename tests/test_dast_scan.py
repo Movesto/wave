@@ -94,6 +94,38 @@ def test_run_differentials_records_idor_as_anomalous():
     assert case.counts()["confirmed"] == 0           # IDOR is a judgment, never a tool-confirmed finding
 
 
+def test_run_recon_maps_tiers(monkeypatch):
+    from agent.orchestrator import dast_recon, dast_web
+    from agent.orchestrator.recorder import CaseFile
+
+    # mock every network fetcher with canned data exercising all three tiers
+    # a dangling CNAME = points at a provider but no longer resolves (no A records)
+    monkeypatch.setattr(dast_recon, "resolve", lambda h, *a, **k:
+                        {"a": [], "aaaa": [], "cname": "app.herokuapp.com.", "mx": [], "ns": [], "txt": []})
+    monkeypatch.setattr(dast_recon, "tls_info", lambda *a, **k: {"cert": None, "protocol": None, "error": "x"})
+    monkeypatch.setattr(dast_recon, "scan_ports", lambda *a, **k: [80, 443, 6379])
+
+    def fake_fetch(url, method="GET", headers=None, timeout=8):
+        if method == "OPTIONS":
+            return {"status": 200, "headers": {}, "cookies": [], "allow": "GET, TRACE", "body": ""}
+        if url.endswith("/.env"):
+            return {"status": 200, "headers": {}, "cookies": [], "allow": "", "body": "SECRET_KEY=abc123"}
+        if "/" != url[-1] and any(url.endswith(p) for p in dast_web.SENSITIVE_PATHS):
+            return {"status": 404, "headers": {}, "cookies": [], "allow": "", "body": "nope"}
+        return {"status": 200, "headers": {"server": "nginx"}, "cookies": ["sid=x; Path=/"], "allow": "", "body": "hi"}
+    monkeypatch.setattr(dast_recon, "http_fetch", fake_fetch)
+
+    case = CaseFile(target="https://t.example")
+    dast_scan._run_recon(case, "https://t.example", ports=True)
+    confirmed = [e.subject for e in case.by_status("confirmed") if e.kind == "confirmation"]
+    anomalous = [e.data.get("cwe") for e in case.by_status("anomalous_state")]
+    assert any("takeover" in s for s in confirmed)        # dangling CNAME -> confirmed
+    assert any(".env" in s for s in confirmed)            # secret file exposed -> confirmed
+    assert "CWE-668" in anomalous                         # exposed redis -> anomalous
+    assert "CWE-693" in anomalous or "CWE-319" in anomalous  # missing security headers
+    assert any(e.kind == "entity" for e in case.all())    # DNS/ports facts recorded
+
+
 def test_scan_wires_canary_and_tears_it_down():
     recon = {"forms": [], "routes": [], "egress": []}
     stopped = {"n": 0}
@@ -106,7 +138,7 @@ def test_scan_wires_canary_and_tears_it_down():
     with mock.patch.object(dastmod, "reachable", return_value=(True, 200)), \
          mock.patch.object(dast_scan.oastmod, "Canary", return_value=FakeCanary()), \
          mock.patch.object(dast_scan.browser_recon, "recon", return_value=recon):
-        case = dast_scan.scan("http://localhost:8080", identities=0)
+        case = dast_scan.scan("http://localhost:8080", identities=0, recon=False)
     assert stopped["n"] == 1                          # canary always torn down (finally)
     assert any("OAST canary" in (e.data.get("note") or "") for e in case.all())
 
@@ -145,7 +177,7 @@ def test_scan_confirms_a_witnessed_param():
     with mock.patch.object(dastmod, "reachable", return_value=(True, 200)), \
          mock.patch.object(dast_scan.browser_recon, "recon", return_value=recon), \
          mock.patch.object(dast_scan.dast_oracle, "witness", return_value=poc):
-        case = dast_scan.scan("http://localhost:8080", identities=0, oast=False)
+        case = dast_scan.scan("http://localhost:8080", identities=0, oast=False, recon=False)
     findings = case.findings()
     assert len(findings) == 1
     assert findings[0].data["cwe"] == "CWE-89"

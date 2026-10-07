@@ -83,7 +83,8 @@ def cmd_dast(args):
             seed_targets.append((parts[0].upper(), parts[1], parts[2].lower(), parts[3]))
     case = dast_scan.scan(args.url, seeds=tuple(args.seed or ["/"]), max_pages=args.max_pages,
                           identities=0 if args.no_auth else args.identities, seed_targets=seed_targets,
-                          timing=args.timing, oast=not args.no_oast, oast_host=args.oast_host)
+                          timing=args.timing, oast=not args.no_oast, oast_host=args.oast_host,
+                          recon=not args.no_recon, ports=not args.no_ports)
     print(f"\n=== BLACK-BOX DAST on {args.url} ===")
     c = case.counts()
     print(f"  confirmed={c['confirmed']} anomalous={c['anomalous_state']} blocked={c['blocked']} "
@@ -785,6 +786,9 @@ def main(argv=None):
     da.add_argument("--no-auth", action="store_true", help="skip the auth-synthesizer (unauthenticated scan)")
     da.add_argument("--identities", type=int, default=2, help="auth identities to synthesize (>=2 for IDOR)")
     da.add_argument("--timing", action="store_true", help="enable blind time-based probes (slow, intrusive)")
+    da.add_argument("--no-recon", action="store_true",
+                    help="skip external recon (DNS/TLS/ports/headers/content) -- app-layer tests only")
+    da.add_argument("--no-ports", action="store_true", help="skip the port scan within recon")
     da.add_argument("--no-oast", action="store_true", help="disable the OAST canary (skip ssrf / blind-rce)")
     da.add_argument("--oast-host", dest="oast_host",
                     help="callback host:port the TARGET can reach (default host.docker.internal; set for remote)")

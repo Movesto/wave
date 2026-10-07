@@ -20,6 +20,8 @@ from . import auth as authmod
 from . import browser_recon
 from . import dast as dastmod
 from . import dast_oracle
+from . import dast_recon
+from . import dast_web
 from . import idor as idormod
 from . import missing_controls as mc
 from . import oast as oastmod
@@ -134,7 +136,8 @@ def _authz_candidates(routes):
 
 
 def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
-         battery=INJECTION_BATTERY, timing=False, oast=True, oast_host=None):
+         battery=INJECTION_BATTERY, timing=False, oast=True, oast_host=None,
+         recon=True, ports=True):
     """Run the black-box loop against `url`. Returns a CaseFile (the investigation record / report)."""
     case = CaseFile(target=url)
 
@@ -144,6 +147,13 @@ def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
                     note=f"target not reachable: {info}")
         return case
     case.record("entity", url, "tool", "confirmed", provenance=url, note=f"live (HTTP {info})")
+
+    # ---- external recon (network / infra / posture) -- the red-teamer's map, before touching the app ----
+    if recon:
+        try:
+            _run_recon(case, url, ports=ports)
+        except Exception as e:
+            case.record("hypothesis", "recon", "tool", "blocked", provenance=url, note=f"recon error: {e}")
 
     canary = None
     if oast:
@@ -213,6 +223,109 @@ def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
 def _anom(case, subject, cwe, provenance, evidence):
     case.record("confirmation", subject, "oracle", "anomalous_state",
                 provenance=provenance, cwe=cwe, evidence=evidence)
+
+
+def _find(case, subject, cwe, provenance, evidence):
+    """A concrete confirmed exposure/leak (tool-observed fact, not a judgment)."""
+    case.record("confirmation", subject, "oracle", "confirmed",
+                provenance=provenance, cwe=cwe, evidence=evidence)
+
+
+def _fact(case, subject, note):
+    """A recon FACT (DNS/ports/TLS/fingerprint) -- surface intel, not a finding."""
+    case.record("entity", subject, "tool", "confirmed", provenance=subject, note=note)
+
+
+def _run_recon(case, url, ports=True):
+    """External recon: DNS + email posture + subdomain-takeover, TLS, port/service exposure, HTTP
+    fingerprint, security headers / cookies / CORS / methods, and sensitive-path discovery. Each block
+    is guarded so one failure never aborts the pass. Facts -> entity; posture weaknesses ->
+    anomalous_state; concrete exposures/leaks -> confirmed."""
+    host, port, https = dast_recon.host_port(url)
+    if not host:
+        return
+
+    # --- DNS, email spoofability, subdomain takeover ---
+    try:
+        dns = dast_recon.resolve(host)
+        addrs = (dns.get("a") or []) + (dns.get("aaaa") or [])
+        _fact(case, f"dns {host}", f"A/AAAA={addrs} CNAME={dns.get('cname') or '-'} "
+                                   f"MX={len(dns.get('mx') or [])} NS={dns.get('ns') or '-'}")
+        dmarc = dast_recon.resolve("_dmarc." + host).get("txt", []) if dns.get("txt") is not None else []
+        for issue in dast_recon.email_security(dns.get("txt"), dmarc):
+            _anom(case, f"email spoofing: {host}", "CWE-16", f"DNS {host}", issue)
+        dangle = dast_recon.dangling_cname(dns.get("cname"), addrs)
+        if dangle:
+            _find(case, f"subdomain takeover: {host}", "CWE-350", f"DNS {host}", dangle)
+    except Exception:
+        pass
+
+    # --- TLS certificate ---
+    if https or port == 443:
+        try:
+            tls = dast_recon.tls_info(host, port if port else 443)
+            if tls.get("cert"):
+                a = dast_recon.analyze_cert(tls["cert"], host)
+                _fact(case, f"tls {host}", f"issuer={a.get('issuer') or '-'} proto={tls.get('protocol')} "
+                                           f"SAN={', '.join(a.get('san') or [])[:160] or '-'}")
+                for issue in a.get("issues", []):
+                    _anom(case, f"TLS: {host}", "CWE-295", f"TLS {host}:{port}", issue)
+        except Exception:
+            pass
+
+    # --- open ports / exposed services ---
+    if ports:
+        try:
+            open_ports = dast_recon.scan_ports(host)
+            if open_ports:
+                _fact(case, f"ports {host}", f"open: {open_ports}")
+            for p, name, note in dast_recon.analyze_ports(open_ports):
+                _anom(case, f"exposed service {name}:{p} on {host}", "CWE-668", f"{host}:{p}", note)
+        except Exception:
+            pass
+
+    # --- HTTP posture: fingerprint, headers, cookies, methods, CORS ---
+    try:
+        base = dast_recon.http_fetch(url, "GET")
+        if base.get("status"):
+            fp = dast_web.fingerprint(base["headers"], base["body"])
+            if fp:
+                _fact(case, f"stack {url}", "; ".join(fp))
+            for note, cwe in dast_web.security_headers(base["headers"], is_https=https):
+                _anom(case, note.split(" -- ")[0], cwe, url, note)
+            for note, cwe in dast_web.cookie_flags(base.get("cookies"), is_https=https):
+                _anom(case, note.split(" -- ")[0], cwe, url, note)
+            dl = dast_web.directory_listing(base["body"])
+            if dl:
+                _find(case, dl[0], dl[1], url, dl[0])
+    except Exception:
+        pass
+    try:
+        opt = dast_recon.http_fetch(url, "OPTIONS")
+        for note, cwe in dast_web.http_methods(opt.get("allow")):
+            _anom(case, note, cwe, f"OPTIONS {url}", f"advertised in Allow: {opt.get('allow')}")
+    except Exception:
+        pass
+    try:
+        evil = "https://wave.invalid"
+        c = dast_recon.http_fetch(url, "GET", headers={"Origin": evil})
+        res = dast_web.cors(evil, c.get("headers"))
+        if res:
+            tier = _find if "credentials" in res[0] else _anom
+            tier(case, "CORS misconfiguration", res[1], url, res[0])
+    except Exception:
+        pass
+
+    # --- sensitive-path / content discovery ---
+    try:
+        for path in dast_web.SENSITIVE_PATHS:
+            r = dast_recon.http_fetch(url.rstrip("/") + path, "GET")
+            hit = dast_web.classify_exposure(path, r.get("status"), r.get("body"),
+                                             r.get("headers", {}).get("content-type", ""))
+            if hit:
+                _find(case, f"{hit[0]} ({path})", hit[1], f"GET {path}", hit[0])
+    except Exception:
+        pass
 
 
 def _run_differentials(case, rt, routes, auth):

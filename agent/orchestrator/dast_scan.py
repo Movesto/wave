@@ -20,6 +20,7 @@ from . import auth as authmod
 from . import browser_recon
 from . import dast as dastmod
 from . import dast_oracle
+from . import dast_plugins
 from . import dast_recon
 from . import dast_stored
 from . import dast_web
@@ -198,7 +199,7 @@ def _authz_candidates(routes):
 
 def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
          battery=INJECTION_BATTERY, timing=False, oast=True, oast_host=None,
-         recon=True, ports=True, auth_headers=None, stored=False, delay=0.0):
+         recon=True, ports=True, auth_headers=None, stored=False, delay=0.0, plugins=()):
     """Run the black-box loop against `url`. Returns a CaseFile (the investigation record / report).
     `auth_headers` (a dict) supplies a REAL session (cookie/bearer) to test authenticated areas directly
     -- when given it is used instead of synthesizing a dummy login. `delay` sets a minimum seconds
@@ -249,6 +250,21 @@ def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
         ex_routes, ex_targets = _expand_surface(url)
         for m, p in ex_routes:
             routes.append(routes_mod.Route(m, p, "<surface>", ""))
+        # ---- external-tool plugins (opt-in perception: nuclei/ffuf/...) -- leads + wider surface ----
+        if plugins:
+            try:
+                records, pl_routes, pl_targets, pl_status = dast_plugins.collect(
+                    plugins, url, authorized=True, delay=delay)
+                dast_plugins.ingest(case, records)
+                for m, p in pl_routes:
+                    routes.append(routes_mod.Route(m, p, "<plugin>", ""))
+                ex_targets += pl_targets
+                case.record("entity", "plugins", "tool", "confirmed", provenance=url,
+                            note="; ".join(f"{k}={v}" for k, v in pl_status.items()) or "none ran")
+            except Exception as e:
+                case.record("hypothesis", "plugins", "tool", "blocked", provenance=url,
+                            note=f"plugin error: {e}")
+
         targets = _dedup(targets + ex_targets)
         for r in routes:
             case.record("route", f"{r.method} {r.path}", "tool", "confirmed", provenance=r.file or "")

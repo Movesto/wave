@@ -84,6 +84,21 @@ def test_expand_surface_ingests_openapi(monkeypatch):
     assert ("GET", "/u/{id}", "path", "id") in targets
 
 
+def test_scan_ingests_plugin_findings(monkeypatch):
+    recon = {"forms": [], "routes": [], "links": [], "egress": []}
+    nofetch = {"status": 404, "headers": {}, "cookies": [], "allow": "", "body": ""}
+    records = [{"tool": "nuclei", "class": "http", "cwe": "CWE-200", "tier": "anomalous",
+                "evidence": "exposed panel", "provenance": "nuclei:panel"}]
+    monkeypatch.setattr(dast_scan.dast_plugins, "collect",
+                        lambda sel, url, authorized=False, delay=0.0: (records, [("GET", "/x")], [], {"nuclei": "1"}))
+    with mock.patch.object(dastmod, "reachable", return_value=(True, 200)), \
+         mock.patch.object(dast_scan.dast_recon, "http_fetch", return_value=nofetch), \
+         mock.patch.object(dast_scan.browser_recon, "recon", return_value=recon):
+        case = dast_scan.scan("http://t", recon=False, oast=False, identities=0, plugins="nuclei")
+    assert any(e.data.get("cwe") == "CWE-200" and "nuclei" in e.subject for e in case.by_status("anomalous_state"))
+    assert any("GET /x" in e.subject for e in case.by_kind("route"))   # plugin route added to the table
+
+
 def test_scan_uses_provided_session(monkeypatch):
     # auth_headers given -> used directly, synthesize_multi never called
     recon = {"forms": [], "routes": [], "links": [], "egress": []}

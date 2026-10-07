@@ -5,6 +5,20 @@ Scope: **pure black-box** (URL only, never source), **full loop** in one pass. O
 canary by default; `--oast-host` for a remote-reachable host/tunnel). Verified live on VAmPI: SQLi
 (confirmed) + missing rate-limit (anomalous_state) in one run.
 
+Eighth increment (2026-10-06, user: external-tool plugin layer -- nuclei + ffuf, ZAP stub, skip Caido):
+`dast_plugins.py` -- optional free-tool PERCEPTION plugins. A tool's output is a LEAD (believed /
+anomalous_state) or surface FACT (entity), NEVER a tool-witnessed `confirmed` -- wave's oracles stay the
+sole proof authority, so a tool's unsoundness can widen recall but never mint a false confirm.
+  - nuclei (templated known-issue; `parse_nuclei` -> anomalous leads + CWE), ffuf (content/param
+    discovery; `parse_ffuf` -> entity facts + GET routes that widen our surface). ZAP registered as a
+    STUB (ZAP_IMPLEMENTED=False; daemon+API spider/passive = perception, active = demoted leads -- next).
+    Caido deliberately excluded (GUI/human-in-loop, partly commercial; mitmproxy if a programmatic proxy
+    is wanted later).
+  - PARSERS pure + offline-tested; RUNNERS thin guarded subprocess, no-op when the binary is absent;
+    tools get their NATIVE rate flag from `--delay` (our in-process throttle can't pace a subprocess).
+    Opt-in `--plugins nuclei,ffuf|all`, still behind `--authorized`. `collect()` returns records + extra
+    routes/targets (recall); `ingest()` maps tiers to the CaseFile. Suite 381.
+
 Seventh increment (2026-10-06, user: "do the delay throttle"): GLOBAL POLITENESS THROTTLE
 (dast_throttle.py). A thread-safe min-interval limiter every outbound primitive calls `wait()` before
 sending (dast_oracle._send, exploit.fire, dast_recon.http_fetch + scan_ports, auth._post, dom_oracle

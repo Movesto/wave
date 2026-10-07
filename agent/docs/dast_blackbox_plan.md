@@ -5,6 +5,15 @@ Scope: **pure black-box** (URL only, never source), **full loop** in one pass. O
 canary by default; `--oast-host` for a remote-reachable host/tunnel). Verified live on VAmPI: SQLi
 (confirmed) + missing rate-limit (anomalous_state) in one run.
 
+Sixth increment (2026-10-06, user: "take on stored-XSS"): STORED / second-order XSS (dast_stored.py +
+`_run_stored_xss`, opt-in `--stored`). Two-phase campaign: WRITE a unique-token payload into each
+writable param (the payload both pops alert(token) AND beacons the OAST canary), then OBSERVE by
+re-rendering the surface pages in headless Chromium (dom_oracle.capture_execs, refactored out of
+prove_xss) + polling the canary. A token that FIRES anywhere -> confirmed CWE-79, attributed back to its
+injection point. Browser-less fallback: persisted-reflection check -> anomalous_state (weaker, needs a
+render). Pure core (payloads/plan/observe/match/reflection) unit-tested; wiring tested with stubbed
+Sender/browser/canary. Suite 365.
+
 Fifth increment (2026-10-06, user: "improve the dast in areas it lacks"): closed the two real gaps --
 RECALL and realism.
   - RECALL (recon now FEEDS the attack): `_expand_surface` ingests an OpenAPI/Swagger spec

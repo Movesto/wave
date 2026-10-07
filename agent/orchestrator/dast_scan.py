@@ -21,7 +21,9 @@ from . import browser_recon
 from . import dast as dastmod
 from . import dast_oracle
 from . import dast_recon
+from . import dast_stored
 from . import dast_web
+from . import dom_oracle
 from . import idor as idormod
 from . import missing_controls as mc
 from . import oast as oastmod
@@ -196,7 +198,7 @@ def _authz_candidates(routes):
 
 def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
          battery=INJECTION_BATTERY, timing=False, oast=True, oast_host=None,
-         recon=True, ports=True, auth_headers=None):
+         recon=True, ports=True, auth_headers=None, stored=False):
     """Run the black-box loop against `url`. Returns a CaseFile (the investigation record / report).
     `auth_headers` (a dict) supplies a REAL session (cookie/bearer) to test authenticated areas directly
     -- when given it is used instead of synthesizing a dummy login."""
@@ -284,6 +286,14 @@ def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
                                 provenance=f"{method} {route}  [{vector}:{param}]  payload={got['payload']}",
                                 cwe=got["cwe"], evidence=got["evidence"], payload=got["payload"])
                     break                            # one proven class per param is enough
+
+        # ---- stored / second-order XSS (opt-in: it WRITES payloads + re-renders the surface) ----
+        if stored:
+            try:
+                _run_stored_xss(case, url, targets, routes, auth_hdrs, canary)
+            except Exception as e:
+                case.record("hypothesis", "stored-xss", "tool", "blocked", provenance=url,
+                            note=f"stored-xss error: {e}")
 
         # ---- differential / judgment oracles (anomalous_state -- observed effect, severity is judgment) ----
         if routes:
@@ -404,6 +414,68 @@ def _run_recon(case, url, ports=True):
                 _find(case, f"{hit[0]} ({path})", hit[1], f"GET {path}", hit[0])
     except Exception:
         pass
+
+
+def _run_stored_xss(case, url, targets, routes, auth, canary):
+    """Two-phase stored-XSS campaign. WRITE a unique-token payload into each writable param, then OBSERVE
+    by re-rendering the surface in the headless browser + watching the OAST canary; a token that FIRES
+    anywhere is a confirmed stored XSS attributed back to its injection point. Browser-less: fall back to
+    a 'payload persisted un-encoded in a later page' reflection check (anomalous_state -- weaker)."""
+    writes = dast_stored.plan_writes(targets)
+    if not writes:
+        return
+    injected, written_paths = {}, []
+    for method, route, vector, param in writes:
+        token = dast_stored.new_token()
+        cb = canary.url(token, getattr(canary, "host", None) or oastmod.CONTAINER_TO_HOST) if canary else None
+        payload = dast_stored.write_payload(token, cb)
+        try:
+            sender = dast_oracle.Sender(url, method, route, vector, param, headers=auth)
+            sender.send(payload)
+        except Exception:
+            continue
+        injected[token] = {"source": f"{method} {route} [{vector}:{param}]", "payload": payload}
+        written_paths.append(route.split("?")[0])
+
+    if not injected:
+        return
+    pages = dast_stored.observe_pages(routes, written_paths)
+    reported = set()
+
+    # OBSERVE 1 -- render each surface page; a fired token proves execution and names its source sink.
+    browser_ok = dom_oracle.available()
+    for p in pages:
+        page_url = url.rstrip("/") + "/" + p.lstrip("/")
+        if browser_ok:
+            execs, _err = dom_oracle.capture_execs(page_url, auth)
+            for token, source in dast_stored.match_execs(execs, {t: v["source"] for t, v in injected.items()}):
+                if source in reported:
+                    continue
+                reported.add(source)
+                _find(case, f"stored XSS: {source} executes on {p}", "CWE-79",
+                      f"injected at {source} -> fired at GET {p}",
+                      f"stored payload (token {token}) executed in the DOM of {p}")
+        else:                                               # browser-less: persisted-reflection fallback
+            r = dast_recon.http_fetch(page_url, "GET", headers=auth)
+            for token, v in injected.items():
+                if v["source"] in reported:
+                    continue
+                if dast_stored.stored_reflection(r.get("body"), token, v["payload"]):
+                    reported.add(v["source"])
+                    _anom(case, f"stored reflection: {v['source']} on {p}", "CWE-79",
+                          f"injected at {v['source']} -> reflected at GET {p}",
+                          f"payload (token {token}) persisted un-encoded in {p} (needs a render to confirm execution)")
+
+    # OBSERVE 2 -- out-of-band: a token that beaconed our canary fired SOMEWHERE (incl. an async viewer).
+    if canary:
+        for token, v in injected.items():
+            if v["source"] in reported:
+                continue
+            if canary.hit(token, wait=0.2):
+                reported.add(v["source"])
+                _find(case, f"stored XSS (OAST): {v['source']}", "CWE-79",
+                      f"injected at {v['source']}",
+                      f"stored payload (token {token}) beaconed the OAST canary -- executed out of band")
 
 
 def _run_differentials(case, rt, routes, auth):

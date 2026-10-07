@@ -179,6 +179,8 @@ def _cmd_dast(arg):
         argv.append("--no-auth")
     if _confirm("enable blind time-based probes (slow, more intrusive)?"):
         argv.append("--timing")
+    if _confirm("hunt stored/second-order XSS (writes payloads into the app, re-renders pages)?"):
+        argv.append("--stored")
     seed = _ask("seed endpoint as 'METHOD route vector param' (blank to skip)")
     if seed:
         argv += ["--target-param", seed]
@@ -277,8 +279,8 @@ _HELP_DAST = """
     POSTURE (http):          stack fingerprint, missing security headers, weak cookie flags,
                              CORS misconfig, dangerous methods, sensitive-path discovery
                              (/.git, /.env, /actuator, swagger, admin, backups, ...).
-    APP (injection):         sqli, xss (DOM-execution), path, open redirect, SSTI, eval, NoSQLi,
-                             SSRF & blind RCE (OAST callback).
+    APP (injection):         sqli, xss (reflected DOM-execution), STORED/second-order xss (--stored),
+                             path, open redirect, SSTI, eval, NoSQLi, SSRF & blind RCE (OAST callback).
     JUDGMENT (differential): IDOR, broken access control, missing rate-limit / old-password
                              (reported as anomalous_state -- observed effect, severity is a judgment).
     SAFETY: active traffic (scans ports, sends payloads) -- only run against systems you own or are
@@ -287,7 +289,7 @@ _HELP_DAST = """
             an API needs no manual seeding. AUTH: pass a real session with --cookie / --header to test
             logged-in areas (otherwise a dummy login is synthesized).
     One-shot:  wave dast <url> --authorized [--cookie "sid=.."] [--header "Authorization: Bearer .."]
-                              [--no-auth] [--timing] [--no-recon] [--no-ports]
+                              [--no-auth] [--timing] [--stored] [--no-recon] [--no-ports]
                               [--target-param "METHOD route vector param"] [--identities N] [--out f]
 """
 

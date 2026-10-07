@@ -44,13 +44,14 @@ def available():
         return False
 
 
-def prove_xss(url, headers, marker, timeout=8000, html=None):
-    """Render `url` (or raw `html`) in headless Chromium with the attacker's cookies; PROVEN if the
-    tracer executed in the DOM (alert/confirm/prompt/waveXSS carrying the marker)."""
+def capture_execs(url, headers, timeout=8000, html=None):
+    """Render `url` (or raw `html`) in headless Chromium with the attacker's cookies and return the raw
+    list of script-EXECUTION events observed (alert/confirm/prompt/waveXSS/dialog messages). This is the
+    shared sensor; prove_xss matches one marker against it, the stored-XSS stage matches many tokens."""
     try:
         from playwright.sync_api import sync_playwright
     except Exception as e:
-        return {"status": "not-proven", "cwe": "CWE-79", "notes": f"playwright unavailable: {e}"}
+        return None, f"playwright unavailable: {e}"
     captured = []
     try:
         with sync_playwright() as p:
@@ -74,7 +75,16 @@ def prove_xss(url, headers, marker, timeout=8000, html=None):
                 pass
             b.close()
     except Exception as e:
-        return {"status": "not-proven", "cwe": "CWE-79", "notes": f"browser error: {str(e)[:120]}"}
+        return None, f"browser error: {str(e)[:120]}"
+    return captured, None
+
+
+def prove_xss(url, headers, marker, timeout=8000, html=None):
+    """Render `url` (or raw `html`) in headless Chromium with the attacker's cookies; PROVEN if the
+    tracer executed in the DOM (alert/confirm/prompt/waveXSS carrying the marker)."""
+    captured, err = capture_execs(url, headers, timeout, html)
+    if captured is None:
+        return {"status": "not-proven", "cwe": "CWE-79", "notes": err}
     hits = [c for c in captured if marker in str(c)]
     if hits:
         return {"status": "proven", "cwe": "CWE-79", "oracle": "dom",

@@ -52,6 +52,8 @@ def capture_execs(url, headers, timeout=8000, html=None):
         from playwright.sync_api import sync_playwright
     except Exception as e:
         return None, f"playwright unavailable: {e}"
+    from . import dast_throttle
+    dast_throttle.wait()
     captured = []
     try:
         with sync_playwright() as p:

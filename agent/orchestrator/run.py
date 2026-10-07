@@ -92,7 +92,7 @@ def cmd_dast(args):
                           identities=0 if args.no_auth else args.identities, seed_targets=seed_targets,
                           timing=args.timing, oast=not args.no_oast, oast_host=args.oast_host,
                           recon=not args.no_recon, ports=not args.no_ports,
-                          auth_headers=extra_headers or None, stored=args.stored)
+                          auth_headers=extra_headers or None, stored=args.stored, delay=args.delay)
     print(f"\n=== BLACK-BOX DAST on {args.url} ===")
     c = case.counts()
     print(f"  confirmed={c['confirmed']} anomalous={c['anomalous_state']} blocked={c['blocked']} "
@@ -799,6 +799,8 @@ def main(argv=None):
     da.add_argument("--timing", action="store_true", help="enable blind time-based probes (slow, intrusive)")
     da.add_argument("--stored", action="store_true",
                     help="stored/second-order XSS: write token payloads + re-render the surface (writes data)")
+    da.add_argument("--delay", type=float, default=0.0, metavar="SECONDS",
+                    help="minimum seconds between requests (politeness / rate-limit avoidance; default 0)")
     da.add_argument("--no-recon", action="store_true",
                     help="skip external recon (DNS/TLS/ports/headers/content) -- app-layer tests only")
     da.add_argument("--no-ports", action="store_true", help="skip the port scan within recon")

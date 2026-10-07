@@ -198,16 +198,20 @@ def _authz_candidates(routes):
 
 def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
          battery=INJECTION_BATTERY, timing=False, oast=True, oast_host=None,
-         recon=True, ports=True, auth_headers=None, stored=False):
+         recon=True, ports=True, auth_headers=None, stored=False, delay=0.0):
     """Run the black-box loop against `url`. Returns a CaseFile (the investigation record / report).
     `auth_headers` (a dict) supplies a REAL session (cookie/bearer) to test authenticated areas directly
-    -- when given it is used instead of synthesizing a dummy login."""
+    -- when given it is used instead of synthesizing a dummy login. `delay` sets a minimum seconds
+    between ALL outbound requests (politeness / rate-limit avoidance; 0 = as fast as possible)."""
+    from . import dast_throttle
+    dast_throttle.configure(delay)
     case = CaseFile(target=url)
 
     ok, info = dastmod.reachable(url)
     if not ok:
         case.record("hypothesis", url, "tool", "blocked", provenance=url,
                     note=f"target not reachable: {info}")
+        dast_throttle.configure(0.0)
         return case
     case.record("entity", url, "tool", "confirmed", provenance=url, note=f"live (HTTP {info})")
 
@@ -305,6 +309,7 @@ def scan(url, seeds=("/",), max_pages=10, identities=2, seed_targets=(),
     deferred = sorted(dast_oracle.DEFERRED)
     case.record("hypothesis", "deferred-classes", "tool", "blocked", provenance=url,
                 note=f"no black-box witness yet (payload-shape oracle unbuilt): {', '.join(deferred)}")
+    dast_throttle.configure(0.0)                         # reset so a later in-process SAST run isn't paced
     return case
 
 

@@ -381,6 +381,8 @@ def _send(base_url, method, path, body=None, headers=None, timeout=12) -> Resp:
         hdrs.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=data, headers=hdrs, method=str(method).upper())
     opener = urllib.request.build_opener(_NoRedirect)
+    from . import dast_throttle
+    dast_throttle.wait()
     t0 = time.monotonic()
     try:
         with opener.open(req, timeout=timeout) as r:

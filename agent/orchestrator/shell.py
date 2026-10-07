@@ -181,6 +181,9 @@ def _cmd_dast(arg):
         argv.append("--timing")
     if _confirm("hunt stored/second-order XSS (writes payloads into the app, re-renders pages)?"):
         argv.append("--stored")
+    delay = _ask("politeness delay between requests in seconds (blank = none)")
+    if delay:
+        argv += ["--delay", delay]
     seed = _ask("seed endpoint as 'METHOD route vector param' (blank to skip)")
     if seed:
         argv += ["--target-param", seed]
@@ -289,8 +292,10 @@ _HELP_DAST = """
             an API needs no manual seeding. AUTH: pass a real session with --cookie / --header to test
             logged-in areas (otherwise a dummy login is synthesized).
     One-shot:  wave dast <url> --authorized [--cookie "sid=.."] [--header "Authorization: Bearer .."]
-                              [--no-auth] [--timing] [--stored] [--no-recon] [--no-ports]
-                              [--target-param "METHOD route vector param"] [--identities N] [--out f]
+                              [--no-auth] [--timing] [--stored] [--delay SECONDS] [--no-recon]
+                              [--no-ports] [--target-param "METHOD route vector param"] [--out f]
+    POLITENESS: --delay SECONDS throttles ALL outbound requests (recon, battery, writes, renders) to
+                avoid hammering / tripping rate limits on a live target.
 """
 
 _HELP_SETUP = """

@@ -5,6 +5,13 @@ Scope: **pure black-box** (URL only, never source), **full loop** in one pass. O
 canary by default; `--oast-host` for a remote-reachable host/tunnel). Verified live on VAmPI: SQLi
 (confirmed) + missing rate-limit (anomalous_state) in one run.
 
+Seventh increment (2026-10-06, user: "do the delay throttle"): GLOBAL POLITENESS THROTTLE
+(dast_throttle.py). A thread-safe min-interval limiter every outbound primitive calls `wait()` before
+sending (dast_oracle._send, exploit.fire, dast_recon.http_fetch + scan_ports, auth._post, dom_oracle
+render, browser_recon crawl). Default 0 = no-op (zero behavior change); `scan(delay=)` / CLI `--delay
+SECONDS` / shell prompt turn it on and scan() resets it to 0 on exit so a later in-process SAST run
+isn't paced. Paces the concurrent port scan too (lock-based). Deterministic fake-clock tests. Suite 370.
+
 Sixth increment (2026-10-06, user: "take on stored-XSS"): STORED / second-order XSS (dast_stored.py +
 `_run_stored_xss`, opt-in `--stored`). Two-phase campaign: WRITE a unique-token payload into each
 writable param (the payload both pops alert(token) AND beacons the OAST canary), then OBSERVE by

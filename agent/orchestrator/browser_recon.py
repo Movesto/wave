@@ -38,6 +38,8 @@ def recon(rt, seeds=("/",), max_pages=10):
             if path in seen:
                 continue
             seen.add(path)
+            from . import dast_throttle
+            dast_throttle.wait()
             try:
                 page.goto(base + path, wait_until="load", timeout=8000)
                 page.wait_for_timeout(200)

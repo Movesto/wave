@@ -187,7 +187,10 @@ def scan_ports(host, ports=None, timeout=1.0, workers=16):
     ports = list(ports or PORTS)
     open_ports = []
 
+    from . import dast_throttle
+
     def _probe(p):
+        dast_throttle.wait()
         try:
             with socket.create_connection((host, p), timeout):
                 return p
@@ -240,6 +243,8 @@ def http_fetch(url, method="GET", headers=None, timeout=8):
     import urllib.error
     import urllib.request
     req = urllib.request.Request(url, headers=dict(headers or {}), method=method.upper())
+    from . import dast_throttle
+    dast_throttle.wait()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             pairs, status, body = r.getheaders(), r.status, r.read().decode("utf-8", "replace")

@@ -107,34 +107,68 @@ def _cmd_help(arg):
 
 
 def _cmd_setup(arg):
-    print(BOLD("\n  Setup -- model + API endpoint (written to ~/.wave/config)\n"))
-    cur = _config_view()
-    base = _ask("API base URL (OpenAI-compatible)", cur.get("WAVE_API_BASE", "https://openrouter.ai/api/v1"))
-    model = _ask("model id", cur.get("WAVE_MODEL", "deepseek/deepseek-r1"))
     import getpass
+    print(BOLD("\n  Setup -- your provider + two models. Saved to the repo's .env (see .env.example).\n"))
+    base = _ask("API base URL (OpenAI-compatible; OpenRouter default, or http://localhost:11434/v1 for local ollama)",
+                os.environ.get("WAVE_API_BASE", "https://openrouter.ai/api/v1"))
     try:
-        key = getpass.getpass("  API key (hidden, blank keeps current): ").strip()
+        key = getpass.getpass("  API key for that provider (hidden; blank = keep current / none for local ollama): ").strip()
     except (EOFError, KeyboardInterrupt):
         key = ""
+    first = _ask("FIRST model -- the primary reasoner that finds, proves & patches",
+                 os.environ.get("WAVE_MODEL", "deepseek/deepseek-v4-flash-0731"))
+    second = _ask("SECOND model -- a DIFFERENT model that audits judgment-call findings (blank = reuse the first)",
+                  os.environ.get("WAVE_AUDIT_MODEL", ""))
+    updates = {}
     if base:
-        _run_cli(["config", "set", "base", base])
-    if model:
-        _run_cli(["config", "set", "model", model])
+        updates["WAVE_API_BASE"] = base
     if key:
-        _run_cli(["config", "set", "key", key])
-    from .run import _load_config
-    _load_config()                                   # reload so /status reflects it immediately
-    print(GREEN("  saved.\n"))
+        updates["WAVE_API_KEY"] = key
+    if first:
+        updates["WAVE_MODEL"] = first
+    if second:
+        updates["WAVE_AUDIT_MODEL"] = second
+    path = _write_env(updates)
+    for k, v in updates.items():                     # reflect immediately so /status is right now
+        os.environ[k] = v
+    print(GREEN(f"  saved -> {path}\n"))
     _status_line()
 
 
+def _write_env(updates):
+    """Merge `updates` into the repo's .env (preserving other keys), create it if absent. Returns the path."""
+    from .run import _repo_root
+    env = _repo_root() / ".env"
+    order, existing = [], {}
+    if env.is_file():
+        for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
+            s = line.strip()
+            if s and not s.startswith("#") and "=" in s:
+                k, v = s.split("=", 1)
+                k = k.strip()
+                if k not in existing:
+                    order.append(k)
+                existing[k] = v.strip()
+    for k, v in updates.items():
+        if k not in existing:
+            order.append(k)
+        existing[k] = v
+    body = "# wave config (see .env.example). KEY=value, WAVE_ prefix.\n" + \
+           "\n".join(f"{k}={existing[k]}" for k in order) + "\n"
+    try:
+        env.write_text(body, encoding="utf-8")
+    except OSError as e:
+        print(RED(f"  could not write {env}: {e}"))
+    return env
+
+
 def _cmd_config(arg):
-    cfg = _config_view()
-    if not cfg:
-        print(DIM("  (no config yet -- run /setup)"))
+    vals = {k: v for k, v in os.environ.items() if k.startswith("WAVE_")}
+    if not vals:
+        print(DIM("  (nothing configured yet -- run /setup)"))
         return
-    for k, v in cfg.items():
-        print(f"  {k}={'***' if 'KEY' in k else v}")
+    for k in sorted(vals):                           # the EFFECTIVE config wave will use (any source)
+        print(f"  {k}={'***' if 'KEY' in k else vals[k]}")
 
 
 def _cmd_status(arg):
@@ -142,23 +176,24 @@ def _cmd_status(arg):
 
 
 def _cmd_sast(arg):
-    target = (arg or "").strip() or _ask("target repo path", ".")
+    target = (arg or "").strip().strip('"').strip("'") or _ask("target repo path", ".")
     if not target:
         return
     print(BOLD("\n  SAST depth:"))
-    print("    1) discover  -- fast static candidates, no model")
-    print("    2) all       -- full pipeline (eyes -> detect -> prove), loads the model")
-    print("    3) all --patch -- full pipeline + patch & reverify confirmed findings")
-    choice = _ask("choose 1/2/3", "1")
+    print("    1) discover    -- fast static candidates, no model (a quick look)")
+    print("    2) all         -- FULL scan: find -> prove -> report + deps/secrets/iac/controls")
+    print("    3) all --patch -- the full scan, plus auto-patch & reverify every confirmed finding")
+    choice = _ask("choose 1/2/3", "2")
     if choice == "1":
         argv = ["discover", target]
-    elif choice == "3":
-        argv = ["all", target, "--patch"]
     else:
-        argv = ["all", target]
-    if choice in ("2", "3") and _confirm("this loads the model and may take a while -- run now?") is False:
-        print(DIM("  cancelled."))
-        return
+        # 2 and 3 are the one-and-done SAST run -- the whole pipeline + the deterministic scans + report.
+        argv = ["all", target] + (["--patch"] if choice == "3" else [])
+        if _confirm("include the dependency-CVE scan (sends your package names to OSV.dev over the network)?"):
+            argv.append("--online")
+        if _confirm("this loads the model and may take a while -- run now?") is False:
+            print(DIM("  cancelled."))
+            return
     print(CYAN(f"\n  > wave {' '.join(argv)}\n"))
     _run_cli(argv)
 
@@ -315,9 +350,13 @@ _HELP_DAST = """
 """
 
 _HELP_SETUP = """
-  /setup (alias /env) -- configure the model + API endpoint
-    Prompts for the API base URL (OpenAI-compatible), the model id, and the API key (hidden).
-    Saved to ~/.wave/config so future runs need no env vars. View with /config; one-shot:
-      wave config set base <url> | wave config set model <id> | wave config set key <key>
+  /setup (alias /env) -- configure your provider + two models, written to the repo .env
+    Prompts for: the API base URL (OpenAI-compatible -- OpenRouter, or a local ollama), the API key
+    (hidden), the FIRST model (primary reasoner), and the SECOND model (a different model that audits
+    judgment-call findings; optional). Saved to the repo's .env (copy of .env.example) so future runs
+    need no env vars. View the effective config with /config.
+    Manual: `cp .env.example .env` and edit it. One-shot equivalents:
+      wave config set base <url> | set key <key> | set model <id> | set audit <id>
+    The env var names are WAVE_API_BASE / WAVE_API_KEY / WAVE_MODEL / WAVE_AUDIT_MODEL.
     DAST needs no model; SAST's full pipeline does.
 """

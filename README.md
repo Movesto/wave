@@ -213,24 +213,38 @@ Then add extras for what you actually run:
 
 ### 2. Point it at a model (once)
 
-`wave config set` saves to `~/.wave/config`, so you set it a single time and never pass env again. (An
-existing `WAVE_*` env var or `.env` still wins if present.)
-
-**Local (default, private — the design intent):** an ollama server serving a capable local model.
+**Easiest — copy the template and fill it in:**
 
 ```bash
-wave config set base  "http://localhost:11434/v1"
-wave config set model "hf.co/<your-gguf>:<tag>"     # e.g. a Qwen3-family 27B
+cp .env.example .env      # Windows: copy .env.example .env
 ```
 
-**Cloud (stronger reasoning, off-box — for testing / hard targets):** any OpenAI-compatible endpoint, e.g.
-OpenRouter. This sends code off-box; use it deliberately.
+Then edit `.env` — four lines, exact names (the `WAVE_` prefix matters; `OPENROUTER_API_KEY` etc. are ignored):
+
+```ini
+WAVE_API_BASE=https://openrouter.ai/api/v1      # or http://localhost:11434/v1 for local ollama
+WAVE_API_KEY=sk-or-...your-provider-key...      # blank for local ollama
+WAVE_MODEL=deepseek/deepseek-v4-flash-0731      # FIRST model — the primary reasoner
+WAVE_AUDIT_MODEL=z-ai/glm-5.3-flash             # SECOND model — a different one that audits judgment calls (optional)
+```
+
+**Interactive — let the shell write it for you:** run `wave`, then `/setup`. It asks for the endpoint, key,
+and the first + second models, and writes the `.env` above. `/config` shows the effective settings.
+
+**One-shot / scriptable (saves to `~/.wave/config`):**
 
 ```bash
-wave config set base  "https://openrouter.ai/api/v1"
-wave config set model "deepseek/deepseek-v4-flash-0731"
-wave config set key   "<your OpenRouter key>"
+wave config set base  "https://openrouter.ai/api/v1"   # or set base http://localhost:11434/v1 (local ollama)
+wave config set key   "<your key>"                      # omit for local
+wave config set model "deepseek/deepseek-v4-flash-0731" # first model
+wave config set audit "z-ai/glm-5.3-flash"              # second model (optional)
 ```
+
+wave loads config in this order, first value wins: `~/.wave/config` → the repo's `.env` → `./.env` in your
+current dir → and any `WAVE_*` already in your environment overrides all of them. **Local ollama is the
+private default (no egress); a cloud endpoint sends code off-box — use it deliberately.** The second model
+is a *decorrelated* auditor: for judgment-call findings (IDOR / logic / un-marked effects) two independent
+models must agree, which cuts false positives; leave it blank to reuse the first.
 
 `wave config show` prints the current settings.
 

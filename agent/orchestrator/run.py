@@ -410,44 +410,49 @@ def cmd_all(args):
     survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget, jobs=getattr(args, "jobs", 1))
     print(f"[all] detect DONE: {len(survivors)} survived, {len(refuted)} refuted -> {dpaths['candidates']}",
           flush=True)
-    if not survivors:
-        print("[all] no survivors -- pipeline done.")
-        return
-
-    # Stage 3 -- confirmation ladder (+ reachability gate)
-    _banner(3, "PROOF LOOP: prove the survivors",
-            f"canary + model investigation per survivor (up to {args.prove_budget}) -- watch [prove]/"
-            f"[investigate] below; first XSS builds the browser image once ...")
-    by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online,
-                        enrich_trust=getattr(args, "deep_reconcile", False), jobs=getattr(args, "jobs", 1))
-    print(f"[all] prove DONE: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
-          f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
-
-    # Stage 5 -- Review & Reconcile: dedup by location + resolve contradictions (before patch/report so patch
-    # acts on the reconciled set). Deterministic; never overturns a witnessed verdict. Runs after prove.
-    if not getattr(args, "no_reconcile", False):
-        print("\n" + "=" * 66 + "\n== REVIEW & RECONCILE  — dedup findings + resolve contradictions\n" + "=" * 66,
-              flush=True)
-        from . import reconcile as _reconcile
-        rc_model = model if getattr(args, "deep_reconcile", False) else None   # Phase 2/3 opt-in (adds model cost)
-        reconciled, _rlog = _reconcile.run(t, model=rc_model, online=args.online, jobs=getattr(args, "jobs", 1))
-        by = {v: [] for v in ("confirmed", "anomalous_state", "refuted", "blocked", "believed",
-                              "not_exploitable")}
-        for f in reconciled:                                 # re-derive verdict groups so patch + summary reflect it
-            by.setdefault(f.get("verdict", "believed"), []).append(f)
-
-    # Stage 4 -- patch + reverify (optional)
+    # No survivors only means the model-driven injection/taint pipeline found nothing to PROVE -- it is
+    # NOT a clean bill of health, and it must NOT short-circuit the rest of wave's own coverage. Skip only
+    # Stage 3/5/4 (they need survivors); the deterministic scans (deps/secrets/iac/controls) + report below
+    # always run.
+    by = {v: [] for v in ("confirmed", "anomalous_state", "refuted", "blocked", "believed", "not_exploitable")}
     fixed = []
-    if args.patch and by["confirmed"]:
-        _banner(4, "PATCH + REVERIFY",
-                f"the model writes a fix for each confirmed finding, then the SAME proof re-runs "
-                f"({'writing' if args.write else 'dry-run, source restored'}) ...")
-        from . import patch as patchmod
-        pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write,
-                                 jobs=getattr(args, "jobs", 1))
-        fixed = [r for r in pres if r["status"] == "fixed"]
-        print(f"[all] patch: {len(fixed)} fixed of {len(pres)} confirmed "
-              f"({'wrote' if args.write else 'dry-run'})", flush=True)
+    if not survivors:
+        print("[all] no injection/taint survivors to prove -- running the deterministic scans "
+              "(deps / secrets / iac / controls) + writing the report below.", flush=True)
+    else:
+        # Stage 3 -- confirmation ladder (+ reachability gate)
+        _banner(3, "PROOF LOOP: prove the survivors",
+                f"canary + model investigation per survivor (up to {args.prove_budget}) -- watch [prove]/"
+                f"[investigate] below; first XSS builds the browser image once ...")
+        by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online,
+                            enrich_trust=getattr(args, "deep_reconcile", False), jobs=getattr(args, "jobs", 1))
+        print(f"[all] prove DONE: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
+              f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
+
+        # Stage 5 -- Review & Reconcile: dedup by location + resolve contradictions (before patch/report so
+        # patch acts on the reconciled set). Deterministic; never overturns a witnessed verdict.
+        if not getattr(args, "no_reconcile", False):
+            print("\n" + "=" * 66 + "\n== REVIEW & RECONCILE  — dedup findings + resolve contradictions\n" + "=" * 66,
+                  flush=True)
+            from . import reconcile as _reconcile
+            rc_model = model if getattr(args, "deep_reconcile", False) else None   # Phase 2/3 opt-in (model cost)
+            reconciled, _rlog = _reconcile.run(t, model=rc_model, online=args.online, jobs=getattr(args, "jobs", 1))
+            by = {v: [] for v in ("confirmed", "anomalous_state", "refuted", "blocked", "believed",
+                                  "not_exploitable")}
+            for f in reconciled:                             # re-derive verdict groups so patch + summary reflect it
+                by.setdefault(f.get("verdict", "believed"), []).append(f)
+
+        # Stage 4 -- patch + reverify (optional)
+        if args.patch and by["confirmed"]:
+            _banner(4, "PATCH + REVERIFY",
+                    f"the model writes a fix for each confirmed finding, then the SAME proof re-runs "
+                    f"({'writing' if args.write else 'dry-run, source restored'}) ...")
+            from . import patch as patchmod
+            pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write,
+                                     jobs=getattr(args, "jobs", 1))
+            fixed = [r for r in pres if r["status"] == "fixed"]
+            print(f"[all] patch: {len(fixed)} fixed of {len(pres)} confirmed "
+                  f"({'wrote' if args.write else 'dry-run'})", flush=True)
 
     from . import report as _report                        # the readable, human-facing findings report
     rp = _report.generate(t, model=getattr(model, "model_id", ""))
@@ -576,10 +581,17 @@ def _config_path():
     return Path(os.path.expanduser("~")) / ".wave" / "config"
 
 
+def _repo_root():
+    """The wave repo root (agent/orchestrator/run.py -> up 3). A `.env` here is found no matter which
+    directory the user runs `wave` from -- unlike a bare ./.env, which depends on the cwd."""
+    return Path(__file__).resolve().parents[2]
+
+
 def _load_config():
-    """Load ~/.wave/config then ./.env into the environment (without overriding vars already set), so the
-    CLI behaves like a configured tool -- set the model once, then just `wave all <repo>`."""
-    for path in (_config_path(), Path(".env")):
+    """Load config into the environment (without overriding vars already set), so the CLI behaves like a
+    configured tool -- set it once, then just `wave all <repo>`. Order (first value wins): ~/.wave/config,
+    the repo's .env (copied from .env.example), then ./.env in the current directory."""
+    for path in (_config_path(), _repo_root() / ".env", Path(".env")):
         try:
             if not path.is_file():
                 continue
@@ -598,8 +610,8 @@ def _load_config():
 def cmd_config(args):
     """`wave config set <key> <value>` / `wave config show`. Keys: model, base, key (aliases for
     WAVE_MODEL / WAVE_API_BASE / WAVE_API_KEY) or any WAVE_* name."""
-    alias = {"model": "WAVE_MODEL", "base": "WAVE_API_BASE", "url": "WAVE_API_BASE",
-             "key": "WAVE_API_KEY", "trace": "WAVE_TRACE"}
+    alias = {"model": "WAVE_MODEL", "model2": "WAVE_AUDIT_MODEL", "audit": "WAVE_AUDIT_MODEL",
+             "base": "WAVE_API_BASE", "url": "WAVE_API_BASE", "key": "WAVE_API_KEY", "trace": "WAVE_TRACE"}
     cfg = _config_path()
     cfg.parent.mkdir(parents=True, exist_ok=True)
     existing = {}
@@ -616,7 +628,8 @@ def cmd_config(args):
         return
     key = alias.get((args.key or "").lower(), (args.key or "").upper())
     if not key.startswith("WAVE_"):
-        raise SystemExit(f"unknown config key {args.key!r} (use: model | base | key | trace | a WAVE_* name)")
+        raise SystemExit(f"unknown config key {args.key!r} "
+                         f"(use: model | audit | base | key | trace | a WAVE_* name)")
     existing[key] = args.value or ""
     cfg.write_text("\n".join(f"{k}={v}" for k, v in existing.items()) + "\n", encoding="utf-8")
     print(f"set {key} -> {cfg}")

@@ -180,15 +180,21 @@ def _cmd_sast(arg):
     if not target:
         return
     print(BOLD("\n  SAST depth:"))
-    print("    1) discover    -- fast static candidates, no model (a quick look)")
-    print("    2) all         -- FULL scan: find -> prove -> report + deps/secrets/iac/controls")
-    print("    3) all --patch -- the full scan, plus auto-patch & reverify every confirmed finding")
-    choice = _ask("choose 1/2/3", "2")
+    print("    1) discover        -- fast static candidates, no model (a quick look)")
+    print("    2) all             -- full scan of the security-surface files, NO patch")
+    print("    3) all --all-files -- FULL scan of EVERY source file, NO patch (thorough; slow on big repos)")
+    print("    4) all --patch     -- security-surface scan, plus auto-patch & reverify confirmations")
+    choice = _ask("choose 1/2/3/4", "2")
     if choice == "1":
         argv = ["discover", target]
     else:
-        # 2 and 3 are the one-and-done SAST run -- the whole pipeline + the deterministic scans + report.
-        argv = ["all", target] + (["--patch"] if choice == "3" else [])
+        # 2/3/4 are the one-and-done SAST run -- pipeline + deterministic scans + report. 3 reads every
+        # file (best recall, costly); 4 also patches. Only 4 writes fixes.
+        argv = ["all", target]
+        if choice == "3":
+            argv.append("--all-files")
+        elif choice == "4":
+            argv.append("--patch")
         if _confirm("include the dependency-CVE scan (sends your package names to OSV.dev over the network)?"):
             argv.append("--online")
         if _confirm("this loads the model and may take a while -- run now?") is False:
@@ -312,10 +318,13 @@ _HELP_MAIN = """
 
 _HELP_SAST = """
   /sast [path] -- static analysis (needs the source; loads the model for the full pipeline)
-    discover       fast, deterministic static candidates (no model)        -> wave discover <path>
-    all            eyes -> detect -> prove (clean-room, model-driven)       -> wave all <path>
-    all --patch    the above, plus patch & dual-gate reverify confirmations -> wave all <path> --patch
-  Findings are written under the repo (wave_results / casefile). SAST owns cross-file taint & repair.
+    1 discover         fast, deterministic static candidates (no model)        -> wave discover <path>
+    2 all              eyes -> detect -> prove on the security-surface files   -> wave all <path>
+    3 all --all-files  the full pipeline over EVERY source file (best recall,  -> wave all <path> --all-files
+                       costly; no patch)
+    4 all --patch      surface scan + patch & dual-gate reverify confirmations -> wave all <path> --patch
+  Only option 4 writes fixes. Findings are written under the repo (wave_results / casefile / WAVE_REPORT.md).
+  SAST owns cross-file taint & repair. (On a big repo, --all-files is slow -- scope to a subdir instead.)
 """
 
 _HELP_DAST = """

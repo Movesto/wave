@@ -69,12 +69,21 @@ def test_sast_discover_argv(monkeypatch):
     assert calls == [["discover", "./repo"]]
 
 
-def test_sast_full_with_patch(monkeypatch):
+def test_sast_all_files_no_patch(monkeypatch):
     calls = _capture(monkeypatch)
-    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "3" if "1/2/3" in prompt else "./repo")
+    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "3" if "choose" in prompt else "./repo")
     monkeypatch.setattr(shell, "_confirm", lambda prompt: True)       # yes to online + run-now
     shell._cmd_sast("")
-    assert calls == [["all", "./repo", "--patch", "--online"]]        # depth 3 = one-and-done full scan
+    assert calls == [["all", "./repo", "--all-files", "--online"]]    # depth 3 = full all-files, NO patch
+    assert "--patch" not in calls[0]
+
+
+def test_sast_full_with_patch(monkeypatch):
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "4" if "choose" in prompt else "./repo")
+    monkeypatch.setattr(shell, "_confirm", lambda prompt: True)       # yes to online + run-now
+    shell._cmd_sast("")
+    assert calls == [["all", "./repo", "--patch", "--online"]]        # depth 4 = patch
 
 
 def test_sast_full_without_online(monkeypatch):

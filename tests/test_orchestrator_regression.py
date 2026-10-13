@@ -2606,3 +2606,19 @@ def test_redos_pin_matches_catastrophic_regex_shapes():
         assert rx.search(good), good                       # classic catastrophic shapes are pinned
     for benign in [r"re.compile(r'[a-z]+')", r"/(abc)+/", r"(a|b)*", r"re.compile('foo')", r"x = y + 1"]:
         assert not rx.search(benign), benign               # ordinary regex/code is NOT pinned
+
+
+# ==================== Proof seal 1a: hook load/fail notices must not witness (sast-plan 1a) =========
+
+def test_hook_notice_lines_never_witness():
+    from agent.orchestrator import oracle, registry
+    # a hook LOAD-success or FAILURE notice must NOT read as a sink witness (it fires on EVERY run)
+    assert oracle.scan("WAVE-HOOK:: pg instrumented") == set()
+    assert oracle.scan("WAVE-HOOK-FAIL:: sqlalchemy boom") == set()
+    # a real per-query sink FIRE line still witnesses
+    assert "WAVE-SINK-SQL" in oracle.scan("WAVE-SINK-SQL:: 'SELECT 1' :: PARAMS=()")
+    # and NO hook's source emits a WAVE-SINK-* token on an instrumented/installed/failed notice line
+    for hook in registry.HOOKS:
+        for ln in (hook.code or "").splitlines():
+            if any(k in ln for k in ("instrumented", "installed", "instrumentation failed")):
+                assert "WAVE-SINK-" not in ln, (hook.name, ln.strip())

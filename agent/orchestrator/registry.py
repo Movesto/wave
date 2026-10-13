@@ -39,7 +39,7 @@ try:
     def _wave_log_sql(conn, cursor, statement, parameters, context, executemany):
         print("WAVE-SINK-SQL:: " + repr(statement) + " :: PARAMS=" + repr(parameters), flush=True)
 except Exception as _e:
-    print("WAVE-SINK-SQL:: (instrumentation failed: %r)" % _e, flush=True)
+    print("WAVE-HOOK-FAIL:: (instrumentation failed: %r)" % _e, flush=True)
 ''')
 
 # ---- mongodb (Node): log the query filter object before execution (from Phase-0 NodeGoat) --------
@@ -62,8 +62,8 @@ try {
       return orig.apply(this, arguments);
     };
   });
-  console.log("WAVE-SINK-MONGO:: driver instrumented");
-} catch (e) { console.log("WAVE-SINK-MONGO:: (instrumentation failed) " + e); }
+  console.log("WAVE-HOOK:: driver instrumented");
+} catch (e) { console.log("WAVE-HOOK-FAIL:: (instrumentation failed) " + e); }
 ''')
 
 # ---- node-postgres / TypeORM (Node): log SQL text + params before execution --------------------
@@ -90,8 +90,8 @@ try {
     };
     proto.__wave = true;
   });
-  console.log("WAVE-SINK-SQL:: pg driver instrumented");
-} catch (e) { console.log("WAVE-SINK-SQL:: (pg instrumentation failed) " + e); }
+  console.log("WAVE-HOOK:: pg driver instrumented");
+} catch (e) { console.log("WAVE-HOOK-FAIL:: (pg instrumentation failed) " + e); }
 ''')
 
 # ---- psycopg2 (Python/Postgres, raw): log SQL text + params before execution ------------------
@@ -128,9 +128,9 @@ try:
             _patch(_pool)
     except Exception:
         pass
-    print("WAVE-SINK-SQL:: psycopg2 instrumented", flush=True)
+    print("WAVE-HOOK:: psycopg2 instrumented", flush=True)
 except Exception as _e:
-    print("WAVE-SINK-SQL:: (psycopg2 instrumentation failed) %r" % _e, flush=True)
+    print("WAVE-HOOK-FAIL:: (psycopg2 instrumentation failed) %r" % _e, flush=True)
 ''')
 
 # ---- CORE-LANGUAGE SINKS (always-on: empty detect). eval/exec/child_process/subprocess are language
@@ -160,8 +160,8 @@ try {
       return Reflect.construct(t, args, nt);
     }
   });
-  console.log("WAVE-SINK-EVAL:: eval instrumented");
-} catch (e) { console.log("WAVE-SINK-EVAL:: (instrumentation failed) " + e); }
+  console.log("WAVE-HOOK:: eval instrumented");
+} catch (e) { console.log("WAVE-HOOK-FAIL:: (instrumentation failed) " + e); }
 ''')
 
 # JS OS-command (CWE-78): a tracer in the spawned command/argv proves command injection.
@@ -185,8 +185,8 @@ try {
       return orig.apply(this, arguments);
     };
   });
-  console.log("WAVE-SINK-SHELL:: child_process instrumented");
-} catch (e) { console.log("WAVE-SINK-SHELL:: (instrumentation failed) " + e); }
+  console.log("WAVE-HOOK:: child_process instrumented");
+} catch (e) { console.log("WAVE-HOOK-FAIL:: (instrumentation failed) " + e); }
 ''')
 
 # Python code/command exec (CWE-94/95/78) via PEP 578 audit hook (imported by the wave entry shim).
@@ -211,7 +211,7 @@ def _wave_audit(event, args):
 
 try:
     sys.addaudithook(_wave_audit)
-    print("WAVE-SINK-EXEC:: audit hook installed", flush=True)
+    print("WAVE-HOOK:: audit hook installed", flush=True)
 except Exception as _e:
     print("WAVE-SINK-EXEC:: (audit hook failed) %r" % _e, flush=True)
 ''')
@@ -241,8 +241,8 @@ try {
       return orig.apply(this, arguments);
     };
   });
-  console.log("WAVE-SINK-PATH:: fs instrumented");
-} catch (e) { console.log("WAVE-SINK-PATH:: (instrumentation failed) " + e); }
+  console.log("WAVE-HOOK:: fs instrumented");
+} catch (e) { console.log("WAVE-HOOK-FAIL:: (instrumentation failed) " + e); }
 ''')
 
 # Python filesystem open (CWE-22) via PEP 578 "open" audit event.
@@ -262,7 +262,7 @@ def _wave_fs_audit(event, args):
 
 try:
     sys.addaudithook(_wave_fs_audit)
-    print("WAVE-SINK-PATH:: open audit installed", flush=True)
+    print("WAVE-HOOK:: open audit installed", flush=True)
 except Exception as _e:
     print("WAVE-SINK-PATH:: (audit failed) %r" % _e, flush=True)
 ''')
@@ -301,8 +301,8 @@ try {
       return of.apply(this, arguments);
     };
   }
-  console.log("WAVE-SINK-SSRF:: outbound-http instrumented");
-} catch (e) { console.log("WAVE-SINK-SSRF:: (instrumentation failed) " + e); }
+  console.log("WAVE-HOOK:: outbound-http instrumented");
+} catch (e) { console.log("WAVE-HOOK-FAIL:: (instrumentation failed) " + e); }
 ''')
 
 # Python outbound HTTP (SSRF): wrap http.client (requests/urllib3/urllib all funnel through it).
@@ -322,9 +322,9 @@ try:
             pass
         return _orig(self, method, url, *a, **k)
     _h.HTTPConnection.putrequest = _wave_putrequest
-    print("WAVE-SINK-SSRF:: outbound-http instrumented", flush=True)
+    print("WAVE-HOOK:: outbound-http instrumented", flush=True)
 except Exception as _e:
-    print("WAVE-SINK-SSRF:: (instrumentation failed) %r" % _e, flush=True)
+    print("WAVE-HOOK-FAIL:: (instrumentation failed) %r" % _e, flush=True)
 ''')
 
 # ---- DESERIALIZATION + SSTI (per-engine; dep-gated -- these raise no native audit event) ----------
@@ -350,9 +350,9 @@ try:
         except Exception: pass
         return _oinit(cls)
     jinja2.Template.__new__ = staticmethod(_wave_new)
-    print("WAVE-SINK-TEMPLATE:: jinja2 instrumented", flush=True)
+    print("WAVE-HOOK:: jinja2 instrumented", flush=True)
 except Exception as _e:
-    print("WAVE-SINK-TEMPLATE:: (instrumentation failed) %r" % _e, flush=True)
+    print("WAVE-HOOK-FAIL:: (instrumentation failed) %r" % _e, flush=True)
 ''')
 
 # Node deserialization (CWE-502): node-serialize.unserialize -- a tracer in the deserialized blob
@@ -371,7 +371,7 @@ try {
       return orig.apply(this, arguments);
     };
   }
-  console.log("WAVE-SINK-DESER:: node-serialize instrumented");
+  console.log("WAVE-HOOK:: node-serialize instrumented");
 } catch (e) { console.log("WAVE-SINK-DESER:: (not present) " + e); }
 ''')
 
@@ -389,9 +389,9 @@ try:
         except Exception: pass
         return _load(stream, *a, **k)
     yaml.load = _wave_load
-    print("WAVE-SINK-DESER:: pyyaml instrumented", flush=True)
+    print("WAVE-HOOK:: pyyaml instrumented", flush=True)
 except Exception as _e:
-    print("WAVE-SINK-DESER:: (instrumentation failed) %r" % _e, flush=True)
+    print("WAVE-HOOK-FAIL:: (instrumentation failed) %r" % _e, flush=True)
 ''')
 
 HOOKS = [_SQLALCHEMY, _MONGODB, _PG, _PSYCOPG2, _JS_EVAL, _JS_SHELL, _PY_AUDIT, _JS_FS, _PY_FS,

@@ -133,6 +133,84 @@ def collect(target):
     return out
 
 
+# ---- reachability: does the APP actually import the package? (sast-improvement plan 5) --------------------
+# A lockfile lists every TRANSITIVE dep; most are never imported by first-party code. We scan the source for
+# import statements and rank a CVE by whether its package is actually used. CONSERVATIVE on purpose: we only
+# mark "unused" when the name->import mapping is reliable (npm/crates/Go) and absent; PyPI dist names often
+# differ from the import module (PyYAML->yaml), so a PyPI miss is "unknown" (never hidden), only a hit promotes.
+
+_SRC_EXT = {"PyPI": {".py"}, "npm": {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"},
+            "crates.io": {".rs"}, "Go": {".go"}}
+_ALL_SRC_EXT = {e for exts in _SRC_EXT.values() for e in exts}
+_PY_IMP = re.compile(r"^\s*(?:import|from)\s+([A-Za-z0-9_][\w.]*)", re.M)
+_JS_IMP = re.compile(r"""(?:require\(|from\s+|import\s+)['"]([^'"]+)['"]""")
+_RS_IMP = re.compile(r"\b(?:use|extern\s+crate)\s+([A-Za-z_][A-Za-z0-9_]*)")
+_GO_IMP = re.compile(r'"([A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+)"')
+
+
+def _extract_imports(text, eco):
+    """The set of imported top-level tokens of ecosystem `eco` in one source file (lowercased). Pure."""
+    t = text or ""
+    if eco == "PyPI":
+        return {m.split(".")[0].lower() for m in _PY_IMP.findall(t)}
+    if eco == "npm":
+        out = set()
+        for mod in _JS_IMP.findall(t):
+            if mod.startswith("@"):
+                out.add("/".join(mod.split("/")[:2]).lower())    # @scope/pkg
+            elif not mod.startswith("."):
+                out.add(mod.split("/")[0].lower())               # bare pkg (strip subpath)
+        return out
+    if eco == "crates.io":
+        return {m.lower() for m in _RS_IMP.findall(t)}
+    if eco == "Go":
+        return {m.lower() for m in _GO_IMP.findall(t)}
+    return set()
+
+
+def imported_tokens(target, max_files=6000, max_bytes=40_000_000):
+    """One pass over the repo's source: {ecosystem: set(imported tokens)}. Bounded for huge repos."""
+    toks = {eco: set() for eco in _SRC_EXT}
+    ext_eco = {ext: eco for eco, exts in _SRC_EXT.items() for ext in exts}
+    p = Path(target)
+    files = [p] if p.is_file() else p.rglob("*")
+    n, nbytes = 0, 0
+    for f in files:
+        if n >= max_files or nbytes >= max_bytes:
+            break
+        try:
+            if f.suffix.lower() not in _ALL_SRC_EXT or any(s in f.parts for s in _SKIP):
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        n += 1
+        nbytes += len(text)
+        toks[ext_eco[f.suffix.lower()]] |= _extract_imports(text, ext_eco[f.suffix.lower()])
+    return toks
+
+
+def reach_status(name, eco, toks):
+    """'reachable' | 'unused' | 'unknown' for a (package, ecosystem) given the imported-token sets. Pure.
+    Conservative: 'unused' only where the name maps reliably to an import token and is absent."""
+    imported = toks.get(eco, set())
+    low = (name or "").lower()
+    if eco == "npm":
+        return "reachable" if low in imported else "unused"
+    if eco == "crates.io":
+        return "reachable" if low.replace("-", "_") in imported else "unused"
+    if eco == "Go":
+        return "reachable" if any(low == t or t.endswith("/" + low) or low.endswith("/" + t.split("/")[-1])
+                                  for t in imported) else "unused"
+    if eco == "PyPI":
+        cands = {low.replace("-", "_"), low.replace("-", ""), low.replace("-", "_").split("_")[0]}
+        return "reachable" if cands & imported else "unknown"     # PyPI name!=module -> never hide, only promote
+    return "unknown"
+
+
+_REACH_RANK = {"reachable": 0, "unknown": 1, "unused": 2}
+
+
 # ---- OSV.dev queries --------------------------------------------------------------------------------------
 
 def _post_json(url, payload, timeout):
@@ -197,6 +275,7 @@ def scan(target, online=True, timeout=30, max_details=200):
                 details[vid] = _get_json(_OSV_VULN + vid, timeout)
             except Exception:
                 details[vid] = {}
+    toks = imported_tokens(target)                              # one source pass -> is each package imported?
     out = []
     for f in findings:
         v = details.get(f["id"], {})
@@ -206,22 +285,36 @@ def scan(target, online=True, timeout=30, max_details=200):
             "id": f["id"], "cve": aliases[0] if aliases else "",
             "severity": _severity(v), "fixed": _fixed_version(v, f["name"], f["ecosystem"]),
             "summary": (v.get("summary") or v.get("details", "") or "")[:200], "file": f["file"],
+            "reachable": reach_status(f["name"], f["ecosystem"], toks),   # reachable | unknown | unused
         })
-    out.sort(key=lambda d: (d["ecosystem"], d["package"], d["version"]))
+    # reachable CVEs first (the ones the app actually uses), then unknown, then likely-unused (transitive).
+    out.sort(key=lambda d: (_REACH_RANK.get(d["reachable"], 1), d["ecosystem"], d["package"], d["version"]))
     return out
 
 
 def render(findings, target=""):
-    """Markdown section for the report."""
+    """Markdown section for the report. CVEs the app actually imports are shown FIRST and labelled; the
+    likely-unused (transitive, never imported) ones are grouped at the end so they don't drown the signal."""
     if not findings:
         return "## Dependency vulnerabilities\n\nNo known-vulnerable dependencies found (OSV.dev).\n"
+    n_reach = sum(1 for f in findings if f.get("reachable") == "reachable")
+    n_unused = sum(1 for f in findings if f.get("reachable") == "unused")
     lines = [f"## Dependency vulnerabilities  ({len(findings)})", "",
-             "Known CVEs in third-party packages (OSV.dev). Upgrade to the fixed version.", ""]
+             f"Known CVEs in third-party packages (OSV.dev). Upgrade to the fixed version. "
+             f"**{n_reach} in packages the app imports** (fix these first); "
+             f"{n_unused} in packages not imported by first-party code (likely transitive/unused).", ""]
+    _badge = {"reachable": " `[imported]`", "unused": " `[not imported]`", "unknown": ""}
+    last_group = None
     for f in findings:
+        grp = f.get("reachable", "unknown")
+        if grp == "unused" and last_group != "unused":
+            lines.append("\n### Not imported by first-party code (likely transitive — lower priority)\n")
+        last_group = grp
         fix = f" -> fix in **{f['fixed']}**" if f["fixed"] else " (no fixed version listed)"
         cve = f" ({f['cve']})" if f["cve"] else ""
         sev = f" [{f['severity']}]" if f["severity"] else ""
-        lines.append(f"- **{f['package']} {f['version']}** ({f['ecosystem']}){sev}: {f['id']}{cve}{fix}")
+        lines.append(f"- **{f['package']} {f['version']}** ({f['ecosystem']}){sev}: {f['id']}{cve}{fix}"
+                     f"{_badge.get(grp, '')}")
         if f["summary"]:
             lines.append(f"  - {f['summary']}")
     return "\n".join(lines) + "\n"

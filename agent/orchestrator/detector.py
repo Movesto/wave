@@ -122,6 +122,25 @@ def _rank_key(f):
     return (app_first, _SEV.get(f["class"], 1), 1 if f["confidence"].lower() == "high" else 0)
 
 
+def _budgeted(findings, budget):
+    """Pick up to `budget` findings for Stage 3 WITHOUT one class crowding out the rest (sast-plan 4:
+    authz/sev-5 got starved below path/ssrf/sev-6 on big repos). Round-robin across classes -- strongest
+    class first, rank order preserved within a class -- so every flagged class gets a share of the budget."""
+    from collections import defaultdict, deque
+    by_class = defaultdict(deque)
+    for f in findings:                                     # input is already globally rank-sorted
+        by_class[str(f.get("class", "")).lower()].append(f)
+    order = sorted(by_class, key=lambda c: _rank_key(by_class[c][0]), reverse=True)  # classes by their best
+    out = []
+    while len(out) < budget and any(by_class[c] for c in order):
+        for c in order:
+            if by_class[c]:
+                out.append(by_class[c].popleft())
+                if len(out) >= budget:
+                    break
+    return out
+
+
 def _slice(root, rel, line, pad=30):
     try:
         lines = (Path(root) / rel).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -247,13 +266,8 @@ def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True, j
             except Exception:
                 pass
 
-    todo = []
-    for f in findings:
-        if (f["file"], f["line"], f["class"]) in done:
-            continue
-        if len(todo) >= budget:
-            break
-        todo.append(f)
+    pending = [f for f in findings if (f["file"], f["line"], f["class"]) not in done]
+    todo = _budgeted(pending, budget)                      # class-balanced so authz isn't starved (sast-plan 4)
     n_todo = len(todo)
     if jobs > 1 and not is_cloud_model(model):
         print("[detect] --jobs>1 needs a cloud model -- falsifying serially", flush=True)

@@ -2577,3 +2577,22 @@ def test_falsify_rejects_garbage_corrected_class(tmp_path):
             return '{"reason":"ok","corrected_class":"this is not a class token","verdict":"survives"}'
     out = detector.falsify(FM(), str(tmp_path), {"file": "b.py", "line": 2, "class": "sqli", "sink": "", "input": ""})
     assert out["corrected_class"] == ""                    # prose relabel ignored
+
+
+# ==================== Per-class detect budget: no class starves another (sast-plan 4) ================
+
+def test_budgeted_gives_each_class_a_share():
+    hi = lambda c, i: {"file": f"{c}{i}.py", "line": i, "class": c, "confidence": "high"}
+    findings = [hi("sqli", i) for i in range(5)] + [hi("authz", 9)]      # 5 sqli flood + 1 authz
+    findings.sort(key=detector._rank_key, reverse=True)                   # rank-sort as run() does
+    picked = detector._budgeted(findings, 3)
+    classes = [f["class"] for f in picked]
+    assert len(picked) == 3
+    assert "authz" in classes                                            # authz not starved out of the budget
+    assert classes.count("sqli") <= 2
+
+
+def test_budgeted_respects_budget_and_handles_small_input():
+    f = [{"file": "a.py", "line": 1, "class": "sqli", "confidence": "high"}]
+    assert detector._budgeted(f, 5) == f                                 # fewer findings than budget
+    assert detector._budgeted([], 5) == []

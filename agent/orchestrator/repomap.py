@@ -19,16 +19,32 @@ import re
 # crowd out the real attack surface within a budget on big monorepos (the elasticsearch .buildkite case).
 _LOWPRI_DIRS = {"scripts", "tools", "bin", "ci", ".github", ".buildkite", "packaging", "dev-tools", "devtools",
                 "benchmarks", "benchmark", "test", "tests", "testfixtures", "fixtures", "vendor", "examples",
-                "example", "e2e", "__tests__", "spec", "qa", "docs", "doc"}
+                "example", "e2e", "__tests__", "__mocks__", "spec", "qa", "docs", "doc"}
+
+# Test / fixture files by NAMING CONVENTION, matched on the BASENAME -- the dir rule above misses COLOCATED
+# tests (`src/data/foo.test.mjs`, `src/foo.spec.ts`, `foo_test.py`), which is the dominant JS/TS convention and
+# the exact gap that let 45/60 detect candidates be test fixtures on a real repo. Conservative: a separator
+# (`.`/`_`/`-`) must sit before `test`/`spec`, so `latest.js`/`contest.js`/`fastest_run.py` are NOT matched.
+_TESTNAME_RE = re.compile(
+    r"\.(?:test|spec)\.[a-z0-9]+$"              # foo.test.mjs / foo.spec.ts   (JS/TS dominant)
+    r"|_(?:test|spec)\.[a-z0-9]+$"              # foo_test.py / foo_spec.rb
+    r"|-(?:test|spec)\.[a-z0-9]+$"              # foo-test.js
+    r"|^(?:test|spec)_[a-z0-9]"                  # test_foo.py / spec_foo.rb   (pytest/unittest leading)
+    r"|\.stories\.[a-z0-9]+$"                    # storybook
+    r"|^conftest\.py$",                          # pytest config
+    re.I)
 
 
 def is_low_priority_path(path):
-    """True for an infra/CI/build/test/vendor/docs file -- deprioritized (not dropped) behind app code."""
+    """True for an infra/CI/build/test/vendor/docs file -- deprioritized (and, on a partial scan, dropped)
+    behind app code. Catches both low-priority DIRECTORIES and colocated test/fixture FILENAMES."""
     p = str(path or "").replace("\\", "/").lower()
     if p.endswith((".sh", ".bash", ".ps1", ".bat")):
         return True
     base = p.rsplit("/", 1)[-1]
     if base.startswith("dockerfile") or base.endswith(".dockerfile"):
+        return True
+    if _TESTNAME_RE.search(base):
         return True
     return bool(set(p.strip("/").split("/")) & _LOWPRI_DIRS)
 from pathlib import Path

@@ -52,12 +52,15 @@ _FALSIFY_SYS = (
     "verdict that contradicts your own reason.")
 
 
-def _codemap_pins(root):
+def _codemap_pins(root, include_low_priority=False):
     """Deterministic candidates straight from the codemap's classified sink-pins (the same [SINK:<class>]
     pins repomap renders into wave_map.md). This is the RECALL FLOOR: a notebook whiff -- an empty/failed
     model note on a vulnerable file -- can no longer blank the pipeline, because the sinks codemap already
     found still flow to detect. Same record shape as a notebook finding (confidence '' -> ranked below the
-    model's own high-confidence leads, so notebook findings still get budget priority)."""
+    model's own high-confidence leads, so notebook findings still get budget priority).
+
+    On a partial scan (include_low_priority=False) the low-priority test/fixture/infra files are skipped -- a
+    `foo.test.mjs` fixture's `fetch`/`eval` is not the attack surface and otherwise floods Stage 2/3 budget."""
     from . import codemap, repomap
     out = []
     try:
@@ -66,6 +69,8 @@ def _codemap_pins(root):
         return out
     rootp = Path(root)
     for p, finfo in cmap.files.items():
+        if not include_low_priority and repomap.is_low_priority_path(p):
+            continue
         try:
             _routes, sinks, _dyn = repomap.scan_pins(finfo)
         except Exception:
@@ -80,14 +85,20 @@ def _codemap_pins(root):
     return out
 
 
-def _load_findings(notebook_path, root=None):
+def _load_findings(notebook_path, root=None, include_low_priority=False):
     """Flatten the notebook's per-file findings into deduped candidate records, MERGED with the codemap's
-    deterministic sink-pins (when `root` is given) so detection never depends on the notebook alone."""
+    deterministic sink-pins (when `root` is given) so detection never depends on the notebook alone. On a
+    partial scan (include_low_priority=False) findings in low-priority test/fixture/infra files are dropped
+    from BOTH sources -- consistent with the eyes surface selection, so Stage-2/3 budget goes to real code."""
+    from .repomap import is_low_priority_path
     out, seen = [], set()
     for line in Path(notebook_path).read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             note = json.loads(line)
         except Exception:
+            continue
+        nf = note.get("file", "")
+        if not include_low_priority and is_low_priority_path(nf):
             continue
         for f in note.get("findings", []):
             if not isinstance(f, dict):
@@ -97,15 +108,15 @@ def _load_findings(notebook_path, root=None):
             except (TypeError, ValueError):
                 ln = 0
             cls = str(f.get("class") or "other").lower()
-            key = (note.get("file", ""), ln, cls)
+            key = (nf, ln, cls)
             if key in seen:
                 continue
             seen.add(key)
-            out.append({"file": note.get("file", ""), "line": ln, "class": cls,
+            out.append({"file": nf, "line": ln, "class": cls,
                         "sink": str(f.get("sink") or ""), "input": str(f.get("input") or ""),
                         "why": str(f.get("why") or ""), "confidence": str(f.get("confidence") or "")})
     if root is not None:                                    # recall floor: codemap sink-pins (deduped)
-        for f in _codemap_pins(root):
+        for f in _codemap_pins(root, include_low_priority=include_low_priority):
             key = (f["file"], f["line"], f["class"])
             if key in seen:
                 continue
@@ -244,17 +255,20 @@ def _survived(r):
     return str(r.get("confidence", "")).lower() == "low"
 
 
-def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True, jobs=1):
+def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True, jobs=1,
+        include_low_priority=False):
     """Falsify the notebook's findings (highest severity+confidence first, up to budget). Writes the
     per-finding verdicts to wave_detect.jsonl (resumable) and the SURVIVORS (ranked) to
     wave_candidates.jsonl -- the Stage 3 worklist. `jobs`>1 falsifies CONCURRENTLY (cloud model only).
-    Returns (survivors, refuted)."""
+    `include_low_priority` (set on a full --all-files scan) keeps test/fixture/infra findings; by default
+    they are dropped so the budget proves real application code. Returns (survivors, refuted)."""
     from .parallel import fan_out, is_cloud_model
     out_dir = Path(out_dir or root)
     notebook_path = notebook_path or (out_dir / "wave_notebook.jsonl")
     if not Path(notebook_path).exists():
         raise SystemExit(f"no notebook at {notebook_path} -- run `eyes --notes` first")
-    findings = sorted(_load_findings(notebook_path, root=root), key=_rank_key, reverse=True)
+    findings = sorted(_load_findings(notebook_path, root=root, include_low_priority=include_low_priority),
+                      key=_rank_key, reverse=True)
 
     detect_log = out_dir / "wave_detect.jsonl"
     done = {}

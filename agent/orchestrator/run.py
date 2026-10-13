@@ -196,7 +196,13 @@ def cmd_eyes(args):
     from .model import Model
     model = Model()
     out_dir = str(__import__("pathlib").Path(args.out).parent) if args.out else None
-    pinned, per_file, budget = res["pinned"], res["per_file"], args.notes_budget
+    from . import select as _select
+    per_file, budget = res["per_file"], args.notes_budget
+    pinned, _dropped_lp = _select.partition_surface(res["cmap"], per_file, res["pinned"],
+                                                     partial=not args.all_files)
+    if _dropped_lp:
+        print(f"\nSURFACE: excluded {len(_dropped_lp)} low-priority (test/fixture/infra) file(s) from the "
+              f"partial scan — use --all-files to include them")
 
     pinset = set(pinned)
     all_src = pinned + [p for p in per_file if p not in pinset]   # pinned-first, then the rest
@@ -235,7 +241,9 @@ def cmd_detect(args):
     out_dir = str(Path(args.notebook).parent) if args.notebook else args.target
     model = Model()
     survivors, refuted, paths = detector.run(model, args.target, notebook_path=args.notebook,
-                                             budget=args.budget, out_dir=out_dir, jobs=getattr(args, "jobs", 1))
+                                             budget=args.budget, out_dir=out_dir,
+                                             include_low_priority=getattr(args, "all_files", False),
+                                             jobs=getattr(args, "jobs", 1))
     print(f"\nDETECTOR (clean-room falsification): {len(survivors)} survived, {len(refuted)} refuted")
     print(f"\nSURVIVORS -> {paths['candidates']}  (Stage 3 worklist, most-severe first):")
     for r in survivors:
@@ -369,11 +377,17 @@ def cmd_all(args):
     res = repomap.build_map(t)
     s = res["stats"]
     print(f"[all] map done: {s['files']} files, {s['pinned_files']} pinned, {s['sink_pins']} sink-pins", flush=True)
-    # APP CODE FIRST: stable-sort pinned so infra/CI/build/test files fall behind application code (a stable
-    # sort keeps repomap's pin-density order within each tier). Flows into the model's selection index AND the
-    # density fallback, so on a big repo the model deep-reads the real surface, not pin-dense CI shell scripts.
-    pinned = sorted(res["pinned"], key=repomap.is_low_priority_path)
+    # REACHABILITY-RANKED SURFACE: rank pinned files by whether untrusted input can reach a sink in them
+    # (entry files -- route decorator OR direct request-object access -- and call-graph reachability rank
+    # first), not by raw pin density. On a partial scan (not --all-files) the low-priority test/fixture/infra
+    # files are DROPPED -- they are not the attack surface and are covered by --all-files.
+    from . import select as _select
     per_file = res["per_file"]
+    pinned, _dropped_lp = _select.partition_surface(res["cmap"], per_file, res["pinned"],
+                                                     partial=not args.all_files)
+    if _dropped_lp:
+        print(f"[all] surface: excluded {len(_dropped_lp)} low-priority (test/fixture/infra) file(s) from the "
+              f"partial scan -- use --all-files to include them", flush=True)
     idx = notebook.ledger_index(res["cmap"], t, per_file, pinned)
     pinset = set(pinned)
     all_src = pinned + [p for p in per_file if p not in pinset]   # pinned-first, then the rest
@@ -407,7 +421,8 @@ def cmd_all(args):
     # Stage 2 -- clean-room falsification -> survivors
     _banner(2, "DETECTOR: clean-room falsify each finding",
             f"one fresh model call per finding (up to {args.detect_budget}) -- watch [detect] i/N below ...")
-    survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget, jobs=getattr(args, "jobs", 1))
+    survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget,
+                                              include_low_priority=args.all_files, jobs=getattr(args, "jobs", 1))
     print(f"[all] detect DONE: {len(survivors)} survived, {len(refuted)} refuted -> {dpaths['candidates']}",
           flush=True)
     # No survivors only means the model-driven injection/taint pipeline found nothing to PROVE -- it is
@@ -733,6 +748,9 @@ def main(argv=None):
                     help="path to wave_notebook.jsonl (default <target>/wave_notebook.jsonl)")
     dt.add_argument("--budget", type=int, default=40, metavar="N",
                     help="max findings to falsify this run (severity+confidence order; resumable)")
+    dt.add_argument("--all-files", action="store_true",
+                    help="include low-priority (test/fixture/infra) files too (default: excluded on this "
+                         "partial scan -- they are covered by a full `all --all-files` run)")
     dt.add_argument("--jobs", type=int, default=1, metavar="N", help="falsify in PARALLEL (cloud model only)")
     dt.set_defaults(func=cmd_detect)
 

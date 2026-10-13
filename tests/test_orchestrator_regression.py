@@ -2596,3 +2596,13 @@ def test_budgeted_respects_budget_and_handles_small_input():
     f = [{"file": "a.py", "line": 1, "class": "sqli", "confidence": "high"}]
     assert detector._budgeted(f, 5) == f                                 # fewer findings than budget
     assert detector._budgeted([], 5) == []
+
+
+# ==================== ReDoS library pin (sast-plan 5) ===============================================
+
+def test_redos_pin_matches_catastrophic_regex_shapes():
+    rx = dict(repomap._SINKS_COMMON)["redos"]
+    for good in [r"re.compile(r'(a+)+')", r"/(.*)*/", r"re.compile('([a-z]+)*')", r"(\w+)+$", r"/(\d*)+/"]:
+        assert rx.search(good), good                       # classic catastrophic shapes are pinned
+    for benign in [r"re.compile(r'[a-z]+')", r"/(abc)+/", r"(a|b)*", r"re.compile('foo')", r"x = y + 1"]:
+        assert not rx.search(benign), benign               # ordinary regex/code is NOT pinned

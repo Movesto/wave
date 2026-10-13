@@ -67,6 +67,11 @@ _SINKS_COMMON = [
     ("xss",      re.compile(r"innerHTML|dangerouslySetInnerHTML|document\.write|\bMarkup\s*\(|\.send\s*\(\s*[`\"']?\s*<")),
     ("redirect", re.compile(r"\bredirect\s*\(|res\.redirect\s*\(|sendRedirect")),
     ("deser",    re.compile(r"pickle\.loads?|yaml\.load\s*\(|marshal\.loads?|node-serialize|\bunserialize\s*\(|cPickle")),
+    # ReDoS (CWE-1333): a regex literal with the classic catastrophic-backtracking shape -- a group whose
+    # body itself ends in a quantifier, and the group is quantified ( (a+)+ , (.*)* , ([a-z]+)* , (\w*)+ ).
+    # A lead for behavioral.prove_redos (the differential timing oracle) when the regex is fed request input.
+    # Bounded repetition in our OWN pattern so matching it can't itself backtrack. (sast-improvement plan 5)
+    ("redos",    re.compile(r"\([^()\n]{0,60}[+*][^()\n]{0,30}\)[*+]")),
 ]
 _SINKS_PY = [
     ("SQLi",  re.compile(r"\.execute\w*\s*\(|cursor\.execute|\.raw\s*\(|\btext\s*\(\s*[f\"'(]|\.filter\s*\(\s*[f\"']")),

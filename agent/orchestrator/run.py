@@ -637,9 +637,15 @@ def cmd_config(args):
 
 def main(argv=None):
     _load_config()                                          # set env once via `wave config`; then just run
-    ap = argparse.ArgumentParser(prog="wave",
-                                 description="wave — a local, autonomous vulnerability-discovery & repair agent")
-    sub = ap.add_subparsers(dest="cmd")                     # optional: bare `wave` opens the interactive shell
+    ap = argparse.ArgumentParser(
+        prog="wave",
+        description="wave — a local, autonomous vulnerability-discovery & repair agent.\n\n"
+                    "Just run `wave` (no arguments) to open the interactive shell — the normal way to use "
+                    "wave (guided /setup, /sast, /dast, /help).",
+        epilog="The subcommands below are an ADVANCED / scripting interface (CI, automation); day-to-day "
+               "use goes through the interactive shell (`wave`). `wave <command> -h` for a command's flags.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", metavar="<command>")   # optional: bare `wave` opens the interactive shell
     sh = sub.add_parser("shell", help="launch the interactive wave shell (the default when no command is given)")
     sh.set_defaults(func=cmd_shell)
     d = sub.add_parser("discover", help="SAST front-end: static candidate discovery")
@@ -843,6 +849,17 @@ def main(argv=None):
     cf.add_argument("key", nargs="?", help="model | base | key | trace | a WAVE_* name")
     cf.add_argument("value", nargs="?", help="the value to set")
     cf.set_defaults(func=cmd_config)
+
+    # Shell-first: keep only the few commands a scripting user reaches for in `wave --help`; the rest are
+    # pipeline internals the interactive shell composes for you. All stay CALLABLE (name_parser_map is
+    # untouched) -- they're just hidden from the top-level listing so the CLI reads as "run wave".
+    _shown = {"all", "dast", "config"}
+    try:
+        for _act in list(sub._get_subactions()):
+            if _act.dest not in _shown:
+                sub._choices_actions.remove(_act)
+    except Exception:
+        pass
 
     args = ap.parse_args(argv)
     if getattr(args, "cmd", None) is None:                  # no subcommand

@@ -86,6 +86,13 @@ def test_sast_full_with_patch(monkeypatch):
     assert calls == [["all", "./repo", "--patch", "--online"]]        # depth 4 = patch
 
 
+def test_sast_quick_runs_eyes_detect_deps_no_docker(monkeypatch):
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "5" if "choose" in prompt else "./repo")
+    shell._cmd_sast("")
+    assert calls == [["eyes", "./repo", "--notes"], ["detect", "./repo"], ["deps", "./repo"]]
+
+
 def test_sast_full_without_online(monkeypatch):
     calls = _capture(monkeypatch)
     monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "2" if "1/2/3" in prompt else "./repo")

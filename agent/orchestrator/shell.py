@@ -184,7 +184,17 @@ def _cmd_sast(arg):
     print("    2) all             -- full scan of the security-surface files, NO patch")
     print("    3) all --all-files -- FULL scan of EVERY source file, NO patch (thorough; slow on big repos)")
     print("    4) all --patch     -- security-surface scan, plus auto-patch & reverify confirmations")
-    choice = _ask("choose 1/2/3/4", "2")
+    print("    5) quick           -- eyes + detect + deps, NO prove/Docker (fast; good for a first look)")
+    choice = _ask("choose 1/2/3/4/5", "2")
+    if choice == "5":
+        # Fast, no-Docker pass: notebook + falsifier (the detect verdicts) + the deterministic dep scan.
+        # Skips the slow prove/patch stage entirely -- a quick first look / verification path.
+        print(CYAN(f"\n  > wave eyes {target} --notes  ;  wave detect {target}  ;  wave deps {target}\n"))
+        _run_cli(["eyes", target, "--notes"])
+        _run_cli(["detect", target])
+        _run_cli(["deps", target])
+        print(DIM(f"  detect verdicts -> {target}/wave_detect.jsonl   deps -> {target}/wave_deps.md"))
+        return
     if choice == "1":
         argv = ["discover", target]
     else:
@@ -323,6 +333,8 @@ _HELP_SAST = """
     3 all --all-files  the full pipeline over EVERY source file (best recall,  -> wave all <path> --all-files
                        costly; no patch)
     4 all --patch      surface scan + patch & dual-gate reverify confirmations -> wave all <path> --patch
+    5 quick            eyes + detect + deps, NO prove/Docker (fast first look / verify; detect verdicts
+                       land in wave_detect.jsonl, dep CVEs ranked by reachability in wave_deps.md)
   Only option 4 writes fixes. Findings are written under the repo (wave_results / casefile / WAVE_REPORT.md).
   SAST owns cross-file taint & repair. (On a big repo, --all-files is slow -- scope to a subdir instead.)
 """

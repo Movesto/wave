@@ -37,7 +37,12 @@ _FALSIFY_SYS = (
     "untrusted input, or the value being a constant that is not attacker-controlled. Judge using ONLY the "
     "code shown; do NOT assume a guard exists elsewhere. "
     "Output ONE JSON object and NOTHING else, with the keys in THIS ORDER: "
-    '{"reason": "<work through the code, then state your decision>", "verdict": "refuted"|"survives"}. '
+    '{"reason": "<work through the code, then state your decision>", '
+    '"corrected_class": "<if the finding is REAL but MISLABELLED, the correct class e.g. path/sqli/xss/'
+    'cmd/ssrf/ssti/idor; else empty>", "confidence": "high"|"low", "verdict": "refuted"|"survives"}. '
+    'Set "confidence":"low" if the code is ambiguous or you are NOT sure a refute is right -- a '
+    'low-confidence refute is kept and sent to proof, not dropped. Set "corrected_class" only when the '
+    "bug is real but the class label is wrong (the prover then uses the right recipe). "
     "Write `reason` FIRST -- do your full analysis there -- and write `verdict` LAST, as the single "
     "conclusion that FOLLOWS FROM that analysis. The verdict MUST agree with how the reason ends: if the "
     'reason concludes the code is safe / not exploitable / the input cannot reach the sink -> "refuted"; '
@@ -203,7 +208,21 @@ def falsify(model, root, finding):
     v = str(d.get("verdict", "")).lower()
     if v not in ("refuted", "survives"):
         v = "survives"                                     # unparseable -> keep the lead
-    return {"verdict": v, "reason": str(d.get("reason") or "")}
+    conf = str(d.get("confidence", "")).lower()
+    corrected = str(d.get("corrected_class", "") or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9\-]{0,19}", corrected):   # ignore garbage / prose relabels
+        corrected = ""
+    return {"verdict": v, "reason": str(d.get("reason") or ""),
+            "confidence": conf if conf in ("high", "low") else "",
+            "corrected_class": corrected}
+
+
+def _survived(r):
+    """Confidence-gated (sast-plan 4): a refute is honored ONLY when the model is NOT explicitly unsure.
+    An explicit 'confidence':'low' on a refute keeps the finding as a lead for proof to settle."""
+    if str(r.get("verdict", "")).lower() != "refuted":
+        return True
+    return str(r.get("confidence", "")).lower() == "low"
 
 
 def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True, jobs=1):
@@ -259,8 +278,14 @@ def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True, j
 
     results = [done[(f["file"], f["line"], f["class"])] for f in findings
                if (f["file"], f["line"], f["class"]) in done]
-    survivors = sorted([r for r in results if r["verdict"] == "survives"], key=_rank_key, reverse=True)
-    refuted = [r for r in results if r["verdict"] == "refuted"]
+    survivors = [r for r in results if _survived(r)]
+    refuted = [r for r in results if not _survived(r)]
+    for r in survivors:                                    # class relabel (sast-plan 4): give prove the right recipe
+        cc = r.get("corrected_class")
+        if cc and cc != str(r.get("class", "")).lower():
+            r["orig_class"] = r.get("class")
+            r["class"] = cc
+    survivors.sort(key=_rank_key, reverse=True)            # re-rank after any relabel
     cand = out_dir / "wave_candidates.jsonl"
     cand.write_text("\n".join(json.dumps(r) for r in survivors) + ("\n" if survivors else ""),
                     encoding="utf-8")

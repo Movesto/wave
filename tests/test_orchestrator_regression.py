@@ -2545,3 +2545,35 @@ def test_strip_ai_injection_neutralizes_planted_comments():
 def test_strip_ai_injection_leaves_clean_code_alone():
     src = "a = 1\n// normal comment\nb = exec(x)\n"
     assert detector.strip_ai_injection(src) == src.rstrip("\n")
+
+
+# ==================== Confidence-gated refutes + class relabel (sast-plan 4) =========================
+
+def test_survived_confidence_gates_refutes():
+    assert detector._survived({"verdict": "survives"}) is True
+    assert detector._survived({"verdict": "refuted", "confidence": "high"}) is False   # confident refute dropped
+    assert detector._survived({"verdict": "refuted", "confidence": "low"}) is True      # unsure refute kept
+    assert detector._survived({"verdict": "refuted"}) is False                          # absent -> honor the refute
+
+
+def test_falsify_extracts_confidence_and_corrected_class(tmp_path):
+    (tmp_path / "a.py").write_text("def f(u):\n    return open(u).read()\n", encoding="utf-8")
+
+    class FM:
+        def generate(self, system, user, **k):
+            return ('{"reason":"this is really path traversal, not sqli","corrected_class":"path",'
+                    '"confidence":"low","verdict":"refuted"}')
+    out = detector.falsify(FM(), str(tmp_path),
+                           {"file": "a.py", "line": 2, "class": "sqli", "sink": "open", "input": "u"})
+    assert out["verdict"] == "refuted" and out["confidence"] == "low" and out["corrected_class"] == "path"
+    assert detector._survived(out) is True                 # low-confidence refute is kept as a lead
+
+
+def test_falsify_rejects_garbage_corrected_class(tmp_path):
+    (tmp_path / "b.py").write_text("x=1\ny=2\n", encoding="utf-8")
+
+    class FM:
+        def generate(self, system, user, **k):
+            return '{"reason":"ok","corrected_class":"this is not a class token","verdict":"survives"}'
+    out = detector.falsify(FM(), str(tmp_path), {"file": "b.py", "line": 2, "class": "sqli", "sink": "", "input": ""})
+    assert out["corrected_class"] == ""                    # prose relabel ignored

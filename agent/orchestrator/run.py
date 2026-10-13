@@ -429,6 +429,25 @@ def cmd_all(args):
         print(f"[all] prove DONE: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
               f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
 
+        # Variant hunting (sast-improvement plan 3): a confirmed sink rarely occurs once. Search the repo for
+        # OTHER lines matching a confirmed finding's sink class/shape, queue them as low-confidence candidates,
+        # and re-prove (resumable -> only the new siblings run; the proof stage settles each one).
+        if by["confirmed"] and not getattr(args, "no_variants", False):
+            from . import variants as _variants
+            seen = {(d.get("file"), int(d.get("line") or 0), str(d.get("class") or "").lower())
+                    for grp in by.values() for d in grp}
+            new = _variants.find(by["confirmed"], t, seen)
+            if new:
+                with open(dpaths["candidates"], "a", encoding="utf-8") as fh:
+                    for c in new:
+                        fh.write(json.dumps(c) + "\n")
+                print(f"[all] variant hunting: +{len(new)} sibling candidate(s) of a confirmed sink "
+                      f"-> re-proving", flush=True)
+                by, _pp = prove.run(model, t, budget=args.prove_budget + len(new), gate=not args.no_reach_gate,
+                                    online=args.online, enrich_trust=getattr(args, "deep_reconcile", False),
+                                    jobs=getattr(args, "jobs", 1))
+                print(f"[all] after variants: {len(by['confirmed'])} confirmed", flush=True)
+
         # Stage 5 -- Review & Reconcile: dedup by location + resolve contradictions (before patch/report so
         # patch acts on the reconciled set). Deterministic; never overturns a witnessed verdict.
         if not getattr(args, "no_reconcile", False):
@@ -773,6 +792,8 @@ def main(argv=None):
     al.add_argument("--interactive", action="store_true", help="propose the read set; prune/extend it before reading")
     al.add_argument("--no-reconcile", action="store_true",
                     help="skip Stage 5 (dedup + contradiction resolution) before patch/report")
+    al.add_argument("--no-variants", action="store_true",
+                    help="skip variant hunting (re-proving repo siblings of a confirmed sink)")
     al.add_argument("--deep-reconcile", action="store_true",
                     help="Stage 5 Phase 2/3: also run the model cross-file reconcile + re-investigate (adds cost)")
     al.add_argument("--jobs", type=int, default=1, metavar="N",

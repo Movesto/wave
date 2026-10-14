@@ -152,12 +152,15 @@ def _gate_a(model, target, c, rec, have_docker, max_steps, tag=""):
     return status, f"investigate -> {v.verdict}: {(v.why or '')[:100]}"
 
 
-def run(model, target, findings_path=None, budget=10, out_dir=None, write=False, max_steps=8, jobs=1):
+def run(model, target, findings_path=None, budget=10, out_dir=None, write=False, max_steps=8, jobs=1,
+        run_tests=False):
     """Patch each confirmed finding, reverify with the SAME oracle, restore (unless --write on a pass).
     Returns (results, paths). max_steps matches prove's budget (8): the reverify is at least as hard as the
     original proof -- the model must read the patch AND rebuild the repro -- so it must not be starved of steps.
     `jobs`>1 patches confirmed findings CONCURRENTLY (cloud model only); a per-FILE lock serializes findings in
-    the same file (they edit the same source), so only findings in DIFFERENT files run in parallel."""
+    the same file (they edit the same source), so only findings in DIFFERENT files run in parallel.
+    `run_tests` (plan §5 stronger patch gate) also runs the REPO'S OWN tests on the patched code and rejects a
+    patch that regresses them -- opt-in, since it needs the repo's deps installed and can be slow."""
     import shutil
     import threading
     from collections import defaultdict
@@ -165,6 +168,15 @@ def run(model, target, findings_path=None, budget=10, out_dir=None, write=False,
 
     target = str(target)
     out_dir = Path(out_dir or target)
+    recipe = None
+    if run_tests:
+        from . import runrecipe
+        recipe = runrecipe.load_or_detect(target)
+        if recipe.test:
+            print(f"[patch] stronger gate: will re-run the repo's own tests (`{recipe.test}`) on each patch",
+                  flush=True)
+        else:
+            print("[patch] --run-tests set but no test command detected -- skipping the test gate", flush=True)
     findings_path = findings_path or (out_dir / "wave_findings.jsonl")
     if not Path(findings_path).exists():
         raise SystemExit(f"no findings at {findings_path} -- run `prove` first")
@@ -208,7 +220,8 @@ def run(model, target, findings_path=None, budget=10, out_dir=None, write=False,
             return c, {"status": "no-slice", "note": "could not locate the enclosing function to patch"}
         try:
             with file_locks[c.file]:                         # atomic apply->gate->restore per source file
-                rec = _patch_one(model, target, c, surv, have_docker, max_steps, write, tag=f"p{i}")
+                rec = _patch_one(model, target, c, surv, have_docker, max_steps, write, tag=f"p{i}",
+                                 recipe=recipe)
         except Exception as e:
             rec = {"status": "patch-error", "note": f"{type(e).__name__}: {e}"}
         return c, rec
@@ -224,7 +237,7 @@ def run(model, target, findings_path=None, budget=10, out_dir=None, write=False,
             fh.flush()
             results.append(out)
             print(f"[patch]   -> {rec['status'].upper()}  (gate_a={rec.get('gate_a', '-')}, "
-                  f"gate_b={rec.get('gate_b', '-')})", flush=True)
+                  f"gate_b={rec.get('gate_b', '-')}, gate_c={rec.get('gate_c', '-')})", flush=True)
         fan_out(worklist, _compute, _commit, jobs)
 
     if model is not None:
@@ -235,7 +248,7 @@ def run(model, target, findings_path=None, budget=10, out_dir=None, write=False,
     return results, {"patches": str(patches_log)}
 
 
-def _patch_one(model, target, c, surv, have_docker, max_steps, write, tag=""):
+def _patch_one(model, target, c, surv, have_docker, max_steps, write, tag="", recipe=None, test_runner=None):
     patch = gen_patch(model, c)
     if not patch:
         return {"status": "no-patch", "note": "model produced no code block"}
@@ -248,11 +261,21 @@ def _patch_one(model, target, c, surv, have_docker, max_steps, write, tag=""):
         ok_b, b_note = _gate_b(c.file)
         gate_a = {"still": "STILL-VULNERABLE", "cleared": "cleared", "unproven": "UNPROVEN"}[a_status]
         gate_b = "pass" if ok_b else "regressed"
+        # gate C (plan §5, opt-in): the repo's OWN tests on the patched code. A patch that breaks them
+        # regressed behaviour -> reject. None (no test cmd / couldn't run) does not block. Runs only when the
+        # exploit gate didn't already reject and the file still parses (no point testing a broken file).
+        tests_passed, c_note = (None, "")
+        if recipe is not None and getattr(recipe, "test", "") and ok_b and a_status != "still":
+            from . import runrecipe
+            tests_passed, c_note = runrecipe.run_tests(recipe, target, runner=test_runner)
+        gate_c = {True: "pass", False: "regressed", None: "-"}[tests_passed]
         # A fix is CERTIFIED only when the exploit demonstrably no longer fires (cleared) AND the file still
         # parses. `still` -> rejected. `unproven` (couldn't re-witness / flaky reverify) -> NOT fixed, report
         # patch-unverified -- never certify a fix we could not actually re-prove holds.
         if not ok_b:
             status = "patch-rejected"                       # broke the file
+        elif tests_passed is False:
+            status = "patch-rejected"                       # the repo's own tests regressed
         elif a_status == "cleared":
             status = "fixed"
         elif a_status == "still":
@@ -261,8 +284,8 @@ def _patch_one(model, target, c, surv, have_docker, max_steps, write, tag=""):
             status = "patch-unverified"                     # could not re-witness -> human/re-run needed
         if status == "fixed" and write:
             kept = True                                     # keep only a CERTIFIED patch on disk
-        return {"status": status, "patch": patch, "gate_a": gate_a, "gate_b": gate_b,
-                "gate_a_note": a_note, "gate_b_note": b_note, "written": kept}
+        return {"status": status, "patch": patch, "gate_a": gate_a, "gate_b": gate_b, "gate_c": gate_c,
+                "gate_a_note": a_note, "gate_b_note": b_note, "gate_c_note": c_note, "written": kept}
     finally:
         if not kept:
             Path(c.file).write_text(original, encoding="utf-8")   # restore (gates are transient)

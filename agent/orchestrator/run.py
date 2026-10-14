@@ -285,7 +285,8 @@ def cmd_patch(args):
     out_dir = str(Path(args.findings).parent) if args.findings else args.target
     model = Model()
     results, paths = patchmod.run(model, args.target, findings_path=args.findings, budget=args.budget,
-                                  out_dir=out_dir, write=args.write, jobs=getattr(args, "jobs", 1))
+                                  out_dir=out_dir, write=args.write, jobs=getattr(args, "jobs", 1),
+                                  run_tests=getattr(args, "run_tests", False))
     fixed = [r for r in results if r["status"] == "fixed"]
     unver = [r for r in results if r["status"] == "patch-unverified"]
     rej = [r for r in results if r["status"] not in ("fixed", "patch-unverified")]
@@ -481,7 +482,8 @@ def cmd_all(args):
                     f"({'writing' if args.write else 'dry-run, source restored'}) ...")
             from . import patch as patchmod
             pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write,
-                                     jobs=getattr(args, "jobs", 1))
+                                     jobs=getattr(args, "jobs", 1),
+                                     run_tests=getattr(args, "run_tests", False))
             fixed = [r for r in pres if r["status"] == "fixed"]
             print(f"[all] patch: {len(fixed)} fixed of {len(pres)} confirmed "
                   f"({'wrote' if args.write else 'dry-run'})", flush=True)
@@ -779,6 +781,9 @@ def main(argv=None):
                     help="KEEP a patch that passed both gates (default: dry-run, restore the source)")
     pt.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="patch confirmed findings in PARALLEL (cloud model only; per-file serialized)")
+    pt.add_argument("--run-tests", action="store_true",
+                    help="stronger gate: also re-run the repo's OWN tests on each patch and reject one that "
+                         "regresses them (needs the repo's deps installed; can be slow)")
     pt.set_defaults(func=cmd_patch)
 
     rc = sub.add_parser("reconcile", help="Stage 5: dedup + resolve contradictions (+ --deep: cross-file reconcile)")
@@ -801,6 +806,8 @@ def main(argv=None):
     al.add_argument("--patch", action="store_true", help="also run Stage 4 (patch + reverify) on confirmations")
     al.add_argument("--patch-budget", type=int, default=8, metavar="N", help="confirmed findings to patch")
     al.add_argument("--write", action="store_true", help="keep patches that pass both gates (with --patch)")
+    al.add_argument("--run-tests", action="store_true",
+                    help="stronger patch gate: re-run the repo's own tests on each patch (with --patch)")
     al.add_argument("--no-reach-gate", action="store_true", help="disable the reachability gate in prove")
     al.add_argument("--online", action="store_true", help="give the model opt-in web_search/web_read (egress)")
     al.add_argument("--all-files", action="store_true",

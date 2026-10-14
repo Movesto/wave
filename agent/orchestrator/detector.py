@@ -281,7 +281,19 @@ def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True, j
                 pass
 
     pending = [f for f in findings if (f["file"], f["line"], f["class"]) not in done]
-    todo = _budgeted(pending, budget)                      # class-balanced so authz isn't starved (sast-plan 4)
+    # known-safe pre-filter (improvements-v2 #3): deterministically clear textbook-safe sinks (parameterized
+    # query, argv-array exec, guarded fetch, contained path) WITHOUT a model call, so the falsification budget
+    # goes to real candidates. Clears only -- a deterministic refute, never a confirm.
+    from . import safe_patterns
+    safe_cleared, pending_model = [], []
+    for f in pending:
+        reason = safe_patterns.clears(f.get("class", ""), _slice(root, f["file"], f.get("line", 0)))
+        if reason:
+            safe_cleared.append((f, {"verdict": "refuted", "confidence": "high",
+                                     "reason": f"known-safe: {reason}"}))
+        else:
+            pending_model.append(f)
+    todo = _budgeted(pending_model, budget)                # class-balanced so authz isn't starved (sast-plan 4)
     n_todo = len(todo)
     if jobs > 1 and not is_cloud_model(model):
         print("[detect] --jobs>1 needs a cloud model -- falsifying serially", flush=True)
@@ -302,6 +314,11 @@ def run(model, root, notebook_path=None, budget=40, out_dir=None, resume=True, j
             done[(f["file"], f["line"], f["class"])] = rec
             mark = "SURVIVES" if res["verdict"] == "survives" else "refuted"
             print(f"[detect]   -> {mark} ({f['class']}@{f['file']}:{f['line']}): {res['reason'][:80]}", flush=True)
+        for f, res in safe_cleared:                        # deterministic clears recorded first (no model call)
+            _commit(f, res, 0)
+        if safe_cleared:
+            print(f"[detect] known-safe pre-filter cleared {len(safe_cleared)} finding(s) with no model call",
+                  flush=True)
         fan_out(todo, _compute, _commit, jobs)
 
     results = [done[(f["file"], f["line"], f["class"])] for f in findings

@@ -65,8 +65,10 @@ def _func_body(path, func, span=45):
     return ""
 
 
-def _id_handlers(target, routes):
-    """id-param route handlers + whether each shows an ownership guard (the IDOR surface)."""
+def _id_handlers(target, routes, gm=None):
+    """id-param route handlers + whether each shows an ownership guard (the IDOR surface). A handler counts
+    as guarded if its own body checks ownership OR a framework-level scoping guard covers it (guardmap, #2) --
+    the latter fixes the false IDOR lead on routes behind a global/class guard (e.g. NestJS APP_GUARD)."""
     out, seen = [], set()
     for r in routes:
         m = _ID_PARAM.search(r.path or "")
@@ -76,8 +78,10 @@ def _id_handlers(target, routes):
         if key in seen:
             continue
         seen.add(key)
+        framework = bool(gm and gm.covers_idor(r.file))
         out.append({"method": r.method, "path": r.path, "file": r.file, "function": r.function,
-                    "has_guard": _has_ownership_guard(_func_body(r.file, r.function))})
+                    "has_guard": _has_ownership_guard(_func_body(r.file, r.function)) or framework,
+                    "framework_guard": framework})
     return out
 
 
@@ -183,7 +187,12 @@ def scan(target):
                        f"stuffing exposure."),
             "fix": "Add per-IP/per-account rate limiting on login, token, and password-reset routes."})
 
-    for h in _ownership_gaps(_id_handlers(target, routes)):
+    try:
+        from . import guardmap
+        gm = guardmap.build(target)
+    except Exception:
+        gm = None
+    for h in _ownership_gaps(_id_handlers(target, routes, gm=gm)):
         findings.append({
             "control": "authz", "severity": "high",
             "title": f"No ownership/access check on {h['method']} {h['path']}",

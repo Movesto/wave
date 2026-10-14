@@ -1,5 +1,9 @@
 # wave SAST — Improvements v2
 
+**Status: all 5 implemented (Oct 13 2026).** Commits on `corpus-rebuild-and-dpo`:
+571fede (#1 scoreboard) · 3421d52 (#2 guardmap) · 2e7e2e6 (#3 safe-patterns) ·
+25e1ad5 (#4 deterministic notebook) · e07b679 (#5 runrecipe + patch test gate). 525 tests.
+
 Oct 13 2026 · derived from live runs on **OpenWA** (NestJS/TS) and **gods-eye-view** (Node/JS),
 following the Oct 12 Improvement Plan. Those runs validated the file-pinning + report-noise work
 (PR #6, merged) but exposed a deeper pattern:

@@ -209,11 +209,10 @@ def cmd_eyes(args):
     if args.all_files:                                     # completeness: read EVERY source file
         targets = all_src
         print(f"\nALL-FILES: reading every source file ({len(targets)}); pinning is priority order only")
-    elif len(pinned) > budget:                             # large repo: let the model pick what to deep-read
-        print(f"\nSELECTION: {len(pinned)} pinned files > budget {budget} — model picks the "
-              f"{budget} worth deep-reading ...")
-        picks = notebook.select_targets(model, args.target, per_file, pinned, budget, index=idx)
-        targets = [pk["path"] for pk in picks]
+    elif len(pinned) > budget:                             # large repo: DETERMINISTIC reachability-ranked top-N
+        print(f"\nSELECTION: {len(pinned)} pinned > budget {budget} — deep-reading the top {budget} by "
+              f"reachability rank (deterministic; raise --notes-budget or use --all-files for more)")
+        targets = pinned[:budget]                          # pinned is already ranked by select.partition_surface
     else:
         targets = pinned                                   # read every pinned file (budget covers it)
     if args.interactive:                                   # propose the read set; user prunes/extends
@@ -396,10 +395,9 @@ def cmd_all(args):
         print(f"[all] ALL-FILES: reading every source file ({len(targets)}); pinning is priority order only",
               flush=True)
     elif len(pinned) > args.notes_budget:
-        print(f"[all] {len(pinned)} pinned > budget {args.notes_budget} -- MODEL is selecting which files to "
-              f"deep-read (one model call) ...", flush=True)
-        picks = notebook.select_targets(model, t, per_file, pinned, args.notes_budget, index=idx)
-        targets = [pk["path"] for pk in picks]
+        print(f"[all] {len(pinned)} pinned > budget {args.notes_budget} -- deep-reading the top "
+              f"{args.notes_budget} by reachability rank (deterministic) ...", flush=True)
+        targets = pinned[:args.notes_budget]               # pinned is already ranked by select.partition_surface
         print(f"[all] selected {len(targets)} of {len(pinned)} pinned files to deep-read", flush=True)
     else:
         targets = pinned                                     # read every pinned file (budget covers it)
@@ -728,10 +726,10 @@ def main(argv=None):
     e.add_argument("--notes", action="store_true",
                    help="the local model reads each pinned file into a persistent notebook "
                         "(wave_notebook.jsonl/.md) -- resumable; loads the model")
-    e.add_argument("--notes-budget", type=int, default=40, metavar="N",
-                   help="how many files the notebook reads (default 40); at or below this, ALL pinned files "
-                        "are read (full coverage); only when pinned EXCEEDS this does the model SELECT the N "
-                        "worth deep-reading")
+    e.add_argument("--notes-budget", type=int, default=60, metavar="N",
+                   help="how many files the notebook reads (default 60); at or below this, ALL pinned files "
+                        "are read (full coverage); only when pinned EXCEEDS this are the top N by reachability "
+                        "rank read (deterministic)")
     e.add_argument("--all-files", action="store_true",
                    help="deep-read EVERY parsed source file, not just pinned ones (full coverage; pinning "
                         "becomes priority order). Best for small/medium repos; costs scale with repo size")
@@ -795,9 +793,9 @@ def main(argv=None):
 
     al = sub.add_parser("all", help="one-shot pipeline: eyes(notebook) -> detect -> prove [-> patch]")
     al.add_argument("target")
-    al.add_argument("--notes-budget", type=int, default=40, metavar="N",
-                    help="files the notebook deep-reads; at/below this ALL pinned are read, above it the "
-                         "model selects N (default 40)")
+    al.add_argument("--notes-budget", type=int, default=60, metavar="N",
+                    help="files the notebook deep-reads; at/below this ALL pinned are read, above it the top "
+                         "N by reachability rank are read, deterministically (default 60)")
     al.add_argument("--detect-budget", type=int, default=60, metavar="N", help="findings to falsify")
     al.add_argument("--prove-budget", type=int, default=12, metavar="N", help="survivors to prove")
     al.add_argument("--patch", action="store_true", help="also run Stage 4 (patch + reverify) on confirmations")

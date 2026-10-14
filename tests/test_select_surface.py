@@ -117,6 +117,15 @@ def test_codemap_pins_respects_low_priority(tiny_repo):
     assert any(".test." in f["file"] for f in pins_full)
 
 
+# ---- item 4: selection is DETERMINISTIC (same rank order every run, so the top-N pick is reproducible) ----
+def test_partition_surface_is_deterministic(tiny_repo, tmp_path):
+    res = repomap.build_map(str(tiny_repo), out=str(tmp_path / "m.md"))
+    cmap, per_file, pinned = res["cmap"], res["per_file"], res["pinned"]
+    order1, _ = select.partition_surface(cmap, per_file, pinned, partial=True)
+    order2, _ = select.partition_surface(cmap, per_file, pinned, partial=True)
+    assert order1 == order2          # identical ranked order -> pinned[:budget] is reproducible run-to-run
+
+
 # ---- shell parallelism: fan out on a cloud model, serial on a local one ----
 def test_model_jobs_cloud_vs_local(monkeypatch):
     from agent.orchestrator import parallel, shell

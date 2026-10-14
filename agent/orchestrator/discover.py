@@ -214,13 +214,18 @@ def _norm_cwe(s):
     return f"CWE-{m.group(1)}" if m else ""
 
 
-def _attack_surface_files(target, cap=15):
+def _attack_surface_files(target, cap=15, include_low_priority=False):
     """Deterministic PERCEPTION: which files the model should read = the files the cheap pre-filter
     found ANY candidate in. Only these (not every route handler) -- a file with no flagged sink has
-    nothing to review, and reviewing it is what made a full scan a ~35-min grind."""
+    nothing to review, and reviewing it is what made a full scan a ~35-min grind. Low-priority
+    test/fixture/infra files are skipped (their fixture sinks are not the attack surface) unless
+    include_low_priority is set."""
+    from . import repomap
     files, seen = [], set()
     for f in flag.gather(str(target)):
         try:
+            if not include_low_priority and repomap.is_low_priority_path(str(f)):
+                continue
             if flag.scan_file(f):
                 p = str(f)
                 if p not in seen:

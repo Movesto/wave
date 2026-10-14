@@ -30,6 +30,68 @@ _AUTH_PATH = re.compile(r"login|signin|sign-in|logon|auth|token|password|passwd|
 _COOKIE_SET = re.compile(r"set_cookie\s*\(|\.set_cookie\s*\(|res\.cookie\s*\(|response\.cookie\s*\(|"
                          r"\.cookies\.set\s*\(|new\s+Cookie\s*\(|Set-Cookie", re.I)
 
+# ---- missing ownership/access check (IDOR comparison, sast-improvement plan 3) --------------------
+# A handler that takes an id-like object parameter but -- unlike MOST id-handlers in the same repo --
+# has no visible ownership/auth check is a likely broken-object-level-authorization (IDOR) gap. This is
+# a COMPARISON: it flags the odd one out only when the repo's norm is to check, so a codebase that never
+# checks anywhere isn't spammed per-route.
+_ID_PARAM = re.compile(r"[:{]([A-Za-z_]\w*)\}?")
+_ID_NAME = re.compile(r"(id$|(^|_)(id|user|account|owner|order|invoice|doc|file|record|key|uuid|slug))", re.I)
+_OWNERSHIP = re.compile(
+    r"user_id|current_user|currentuser|request\.user|req\.user|\bg\.user|get_?current_?user"
+    r"|\bowner\b|owned_by|belongs_to|filter_by\s*\([^)]*user|\.where\s*\([^)]*user|\.filter\s*\([^)]*user"
+    r"|require[_ ]?auth|login_required|authorize|authoriz|\bpolicy\b|permission|can\s*\("
+    r"|forbidden|unauthorized|abort\s*\(\s*40[13]|raise\s+PermissionError|Depends\s*\(|scope_"
+    r"|==\s*current_user|session\[", re.I)
+
+
+def _has_ownership_guard(body):
+    """True if the handler body (or its decorators) shows an ownership / access check. Pure."""
+    return bool(_OWNERSHIP.search(body or ""))
+
+
+def _func_body(path, func, span=45):
+    """The handler's source window (a few lines before the def, for decorators, through ~span lines). Coarse."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    if not func or func in ("<handler>", "<module>"):
+        return "\n".join(lines[:span])
+    pat = re.compile(r"\b" + re.escape(func) + r"\b\s*[\(=:]")
+    for i, ln in enumerate(lines):
+        if pat.search(ln):
+            return "\n".join(lines[max(0, i - 3):i + span])
+    return ""
+
+
+def _id_handlers(target, routes):
+    """id-param route handlers + whether each shows an ownership guard (the IDOR surface)."""
+    out, seen = [], set()
+    for r in routes:
+        m = _ID_PARAM.search(r.path or "")
+        if not (m and _ID_NAME.search(m.group(1))):
+            continue
+        key = (r.method, r.path, r.function)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"method": r.method, "path": r.path, "file": r.file, "function": r.function,
+                    "has_guard": _has_ownership_guard(_func_body(r.file, r.function))})
+    return out
+
+
+def _ownership_gaps(handlers, min_group=3, norm=0.6):
+    """The handlers lacking a guard, flagged ONLY when the repo's norm is to check (>= `norm` of >= `min_group`
+    id-handlers are guarded) -- the odd-one-out, not a codebase that never checks anywhere. Pure."""
+    if len(handlers) < min_group:
+        return []
+    guarded = [h for h in handlers if h["has_guard"]]
+    gaps = [h for h in handlers if not h["has_guard"]]
+    if not guarded or len(guarded) < len(handlers) * norm:
+        return []
+    return gaps
+
 
 def _code_files(target, cap=4000):
     p = Path(target)
@@ -64,9 +126,14 @@ def _is_auth_route(r):
 
 
 def _cookie_sites(target, cap=50):
-    """Cookies set without httpOnly / secure / sameSite. Checks the set-cookie call line + a small window."""
+    """Cookies set without httpOnly / secure / sameSite. Checks the set-cookie call line + a small window.
+    Skips test/fixture files -- a cookie set inside a `.spec.ts` is test scaffolding, not a production
+    control gap (these were ~3/4 of the cookie-flags noise on OpenWA)."""
+    from .repomap import is_low_priority_path
     out = []
     for f in _code_files(target):
+        if is_low_priority_path(str(f)):
+            continue
         try:
             lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
@@ -115,6 +182,17 @@ def scan(target):
                        f"throttling mechanism was found anywhere in the source -- brute-force / credential-"
                        f"stuffing exposure."),
             "fix": "Add per-IP/per-account rate limiting on login, token, and password-reset routes."})
+
+    for h in _ownership_gaps(_id_handlers(target, routes)):
+        findings.append({
+            "control": "authz", "severity": "high",
+            "title": f"No ownership/access check on {h['method']} {h['path']}",
+            "detail": (f"{h['function'] or '<handler>'} ({Path(h['file']).name}) takes an id-like parameter "
+                       f"but -- unlike most id-handlers in this repo -- shows no visible ownership/auth check "
+                       f"(user-id scoping, current-user compare, authorize/403). Possible IDOR / broken "
+                       f"object-level authorization; confirm whether the caller may access the object."),
+            "file": h["file"], "cwe": "CWE-639",
+            "fix": "Verify the authenticated caller owns or may access the object BEFORE returning/mutating it."})
 
     for c in _cookie_sites(target):
         findings.append({

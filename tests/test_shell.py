@@ -27,7 +27,7 @@ def test_help_topics_render():
     assert "commands" in shell._HELP_MAIN
     assert "black-box" in shell._HELP_DAST and "--authorized" in shell._HELP_DAST
     assert "eyes -> detect -> prove" in shell._HELP_SAST
-    assert "~/.wave/config" in shell._HELP_SETUP
+    assert ".env" in shell._HELP_SETUP and "WAVE_AUDIT_MODEL" in shell._HELP_SETUP
 
 
 def test_exit_returns_sentinel():
@@ -69,25 +69,59 @@ def test_sast_discover_argv(monkeypatch):
     assert calls == [["discover", "./repo"]]
 
 
+def test_sast_all_files_no_patch(monkeypatch):
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "3" if "choose" in prompt else "./repo")
+    monkeypatch.setattr(shell, "_confirm", lambda prompt: True)       # yes to online + run-now
+    shell._cmd_sast("")
+    assert calls == [["all", "./repo", "--all-files", "--online"]]    # depth 3 = full all-files, NO patch
+    assert "--patch" not in calls[0]
+
+
 def test_sast_full_with_patch(monkeypatch):
     calls = _capture(monkeypatch)
-    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "3" if "1/2/3" in prompt else "./repo")
-    monkeypatch.setattr(shell, "_confirm", lambda prompt: True)       # confirm the model run
+    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "4" if "choose" in prompt else "./repo")
+    monkeypatch.setattr(shell, "_confirm", lambda prompt: True)       # yes to online + run-now
     shell._cmd_sast("")
-    assert calls == [["all", "./repo", "--patch"]]
+    assert calls == [["all", "./repo", "--patch", "--online"]]        # depth 4 = patch
 
 
-def test_setup_writes_each_field(monkeypatch):
+def test_sast_quick_runs_eyes_detect_deps_no_docker(monkeypatch):
     calls = _capture(monkeypatch)
-    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "http://api" if "base" in prompt else "m1")
+    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "5" if "choose" in prompt else "./repo")
+    shell._cmd_sast("")
+    assert calls == [["eyes", "./repo", "--notes"], ["detect", "./repo"], ["deps", "./repo"]]
+
+
+def test_sast_full_without_online(monkeypatch):
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "2" if "1/2/3" in prompt else "./repo")
+    answers = iter([False, True])                                    # no to online, yes to run-now
+    monkeypatch.setattr(shell, "_confirm", lambda prompt: next(answers))
+    shell._cmd_sast("")
+    assert calls == [["all", "./repo"]]
+
+
+def test_setup_writes_env_with_both_models(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(shell, "_write_env", lambda updates: captured.update(updates) or "/tmp/.env")
+
+    def ask(prompt, default=""):
+        if "base URL" in prompt:
+            return "http://api"
+        if prompt.startswith("FIRST"):
+            return "primary-model"
+        if prompt.startswith("SECOND"):
+            return "auditor-model"
+        return default
+    monkeypatch.setattr(shell, "_ask", ask)
     monkeypatch.setattr("getpass.getpass", lambda *a, **k: "secretkey")
-    monkeypatch.setattr(shell, "_load_config_noop", None, raising=False)
-    # _cmd_setup also calls run._load_config(); stub it so no real file is read
-    import agent.orchestrator.run as runmod
-    monkeypatch.setattr(runmod, "_load_config", lambda: None)
+    monkeypatch.setattr(shell.os, "environ", {})                     # isolate from the real env
     shell._cmd_setup("")
-    kinds = [argv[2] for argv in calls]                              # config set <kind> <value>
-    assert "base" in kinds and "model" in kinds and "key" in kinds
+    assert captured["WAVE_API_BASE"] == "http://api"
+    assert captured["WAVE_MODEL"] == "primary-model"
+    assert captured["WAVE_AUDIT_MODEL"] == "auditor-model"           # the SECOND model is now captured
+    assert captured["WAVE_API_KEY"] == "secretkey"
 
 
 def test_ready_reflects_env(monkeypatch):

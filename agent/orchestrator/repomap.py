@@ -19,16 +19,32 @@ import re
 # crowd out the real attack surface within a budget on big monorepos (the elasticsearch .buildkite case).
 _LOWPRI_DIRS = {"scripts", "tools", "bin", "ci", ".github", ".buildkite", "packaging", "dev-tools", "devtools",
                 "benchmarks", "benchmark", "test", "tests", "testfixtures", "fixtures", "vendor", "examples",
-                "example", "e2e", "__tests__", "spec", "qa", "docs", "doc"}
+                "example", "e2e", "__tests__", "__mocks__", "spec", "qa", "docs", "doc"}
+
+# Test / fixture files by NAMING CONVENTION, matched on the BASENAME -- the dir rule above misses COLOCATED
+# tests (`src/data/foo.test.mjs`, `src/foo.spec.ts`, `foo_test.py`), which is the dominant JS/TS convention and
+# the exact gap that let 45/60 detect candidates be test fixtures on a real repo. Conservative: a separator
+# (`.`/`_`/`-`) must sit before `test`/`spec`, so `latest.js`/`contest.js`/`fastest_run.py` are NOT matched.
+_TESTNAME_RE = re.compile(
+    r"\.(?:test|spec)\.[a-z0-9]+$"              # foo.test.mjs / foo.spec.ts   (JS/TS dominant)
+    r"|_(?:test|spec)\.[a-z0-9]+$"              # foo_test.py / foo_spec.rb
+    r"|-(?:test|spec)\.[a-z0-9]+$"              # foo-test.js
+    r"|^(?:test|spec)_[a-z0-9]"                  # test_foo.py / spec_foo.rb   (pytest/unittest leading)
+    r"|\.stories\.[a-z0-9]+$"                    # storybook
+    r"|^conftest\.py$",                          # pytest config
+    re.I)
 
 
 def is_low_priority_path(path):
-    """True for an infra/CI/build/test/vendor/docs file -- deprioritized (not dropped) behind app code."""
+    """True for an infra/CI/build/test/vendor/docs file -- deprioritized (and, on a partial scan, dropped)
+    behind app code. Catches both low-priority DIRECTORIES and colocated test/fixture FILENAMES."""
     p = str(path or "").replace("\\", "/").lower()
     if p.endswith((".sh", ".bash", ".ps1", ".bat")):
         return True
     base = p.rsplit("/", 1)[-1]
     if base.startswith("dockerfile") or base.endswith(".dockerfile"):
+        return True
+    if _TESTNAME_RE.search(base):
         return True
     return bool(set(p.strip("/").split("/")) & _LOWPRI_DIRS)
 from pathlib import Path
@@ -58,8 +74,12 @@ _ROUTE = re.compile(
 # Language-specific tables avoid the exec()/eval() ambiguity between Python (code-eval) and JS (child_process).
 _SINKS_COMMON = [
     # .find(<callback>) is Array.prototype.find, NOT a Mongo query -- require an object filter `{` (or
-    # $-operators / findOne / aggregate) so JS array methods don't false-pin as NoSQLi.
-    ("NoSQLi",   re.compile(r"\$where\b|\.findOne\s*\(|\.find\s*\(\s*\{|\$regex\b|\.aggregate\s*\(")),
+    # $-operators / aggregate) so JS array methods don't false-pin. A RELATIONAL ORM's `.findOne({ where:
+    # {id} })` / `.find({ select: ... })` (TypeORM/Prisma) is SQL, not NoSQL -- the `{ where|select|...` key
+    # tells it apart from a Mongo bare-object filter, so exclude it (OpenWA: 3 TypeORM findOne false-leads).
+    # A bare `.findOne(id)` string call is likewise not operator-injectable -> require the object `{`.
+    ("NoSQLi",   re.compile(r"\$where\b|\$regex\b|\$ne\b|\$gt\b|\$lt\b|\.aggregate\s*\("
+                            r"|\.find(?:One)?\s*\(\s*\{(?!\s*(?:where|select|relations|order|take|skip|include)\b)")),
     ("ssrf",     re.compile(r"\bfetch\s*\(|\baxios\b|\.urlopen\s*\(|requests\.(get|post|put|request|head)\b|urllib\.request|http\.(get|request)\s*\(|\bgot\s*\(")),
     # server-side TEMPLATE injection (a template ENGINE compiling user input) -- distinct from xss (raw
     # HTML output). Proven by evaluation ({{7*7}}->49), not by DOM render.
@@ -67,6 +87,11 @@ _SINKS_COMMON = [
     ("xss",      re.compile(r"innerHTML|dangerouslySetInnerHTML|document\.write|\bMarkup\s*\(|\.send\s*\(\s*[`\"']?\s*<")),
     ("redirect", re.compile(r"\bredirect\s*\(|res\.redirect\s*\(|sendRedirect")),
     ("deser",    re.compile(r"pickle\.loads?|yaml\.load\s*\(|marshal\.loads?|node-serialize|\bunserialize\s*\(|cPickle")),
+    # ReDoS (CWE-1333): a regex literal with the classic catastrophic-backtracking shape -- a group whose
+    # body itself ends in a quantifier, and the group is quantified ( (a+)+ , (.*)* , ([a-z]+)* , (\w*)+ ).
+    # A lead for behavioral.prove_redos (the differential timing oracle) when the regex is fed request input.
+    # Bounded repetition in our OWN pattern so matching it can't itself backtrack. (sast-improvement plan 5)
+    ("redos",    re.compile(r"\([^()\n]{0,60}[+*][^()\n]{0,30}\)[*+]")),
 ]
 _SINKS_PY = [
     ("SQLi",  re.compile(r"\.execute\w*\s*\(|cursor\.execute|\.raw\s*\(|\btext\s*\(\s*[f\"'(]|\.filter\s*\(\s*[f\"']")),

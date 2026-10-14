@@ -196,7 +196,13 @@ def cmd_eyes(args):
     from .model import Model
     model = Model()
     out_dir = str(__import__("pathlib").Path(args.out).parent) if args.out else None
-    pinned, per_file, budget = res["pinned"], res["per_file"], args.notes_budget
+    from . import select as _select
+    per_file, budget = res["per_file"], args.notes_budget
+    pinned, _dropped_lp = _select.partition_surface(res["cmap"], per_file, res["pinned"],
+                                                     partial=not args.all_files)
+    if _dropped_lp:
+        print(f"\nSURFACE: excluded {len(_dropped_lp)} low-priority (test/fixture/infra) file(s) from the "
+              f"partial scan — use --all-files to include them")
 
     pinset = set(pinned)
     all_src = pinned + [p for p in per_file if p not in pinset]   # pinned-first, then the rest
@@ -235,7 +241,9 @@ def cmd_detect(args):
     out_dir = str(Path(args.notebook).parent) if args.notebook else args.target
     model = Model()
     survivors, refuted, paths = detector.run(model, args.target, notebook_path=args.notebook,
-                                             budget=args.budget, out_dir=out_dir, jobs=getattr(args, "jobs", 1))
+                                             budget=args.budget, out_dir=out_dir,
+                                             include_low_priority=getattr(args, "all_files", False),
+                                             jobs=getattr(args, "jobs", 1))
     print(f"\nDETECTOR (clean-room falsification): {len(survivors)} survived, {len(refuted)} refuted")
     print(f"\nSURVIVORS -> {paths['candidates']}  (Stage 3 worklist, most-severe first):")
     for r in survivors:
@@ -369,11 +377,17 @@ def cmd_all(args):
     res = repomap.build_map(t)
     s = res["stats"]
     print(f"[all] map done: {s['files']} files, {s['pinned_files']} pinned, {s['sink_pins']} sink-pins", flush=True)
-    # APP CODE FIRST: stable-sort pinned so infra/CI/build/test files fall behind application code (a stable
-    # sort keeps repomap's pin-density order within each tier). Flows into the model's selection index AND the
-    # density fallback, so on a big repo the model deep-reads the real surface, not pin-dense CI shell scripts.
-    pinned = sorted(res["pinned"], key=repomap.is_low_priority_path)
+    # REACHABILITY-RANKED SURFACE: rank pinned files by whether untrusted input can reach a sink in them
+    # (entry files -- route decorator OR direct request-object access -- and call-graph reachability rank
+    # first), not by raw pin density. On a partial scan (not --all-files) the low-priority test/fixture/infra
+    # files are DROPPED -- they are not the attack surface and are covered by --all-files.
+    from . import select as _select
     per_file = res["per_file"]
+    pinned, _dropped_lp = _select.partition_surface(res["cmap"], per_file, res["pinned"],
+                                                     partial=not args.all_files)
+    if _dropped_lp:
+        print(f"[all] surface: excluded {len(_dropped_lp)} low-priority (test/fixture/infra) file(s) from the "
+              f"partial scan -- use --all-files to include them", flush=True)
     idx = notebook.ledger_index(res["cmap"], t, per_file, pinned)
     pinset = set(pinned)
     all_src = pinned + [p for p in per_file if p not in pinset]   # pinned-first, then the rest
@@ -407,47 +421,72 @@ def cmd_all(args):
     # Stage 2 -- clean-room falsification -> survivors
     _banner(2, "DETECTOR: clean-room falsify each finding",
             f"one fresh model call per finding (up to {args.detect_budget}) -- watch [detect] i/N below ...")
-    survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget, jobs=getattr(args, "jobs", 1))
+    survivors, refuted, dpaths = detector.run(model, t, budget=args.detect_budget,
+                                              include_low_priority=args.all_files, jobs=getattr(args, "jobs", 1))
     print(f"[all] detect DONE: {len(survivors)} survived, {len(refuted)} refuted -> {dpaths['candidates']}",
           flush=True)
-    if not survivors:
-        print("[all] no survivors -- pipeline done.")
-        return
-
-    # Stage 3 -- confirmation ladder (+ reachability gate)
-    _banner(3, "PROOF LOOP: prove the survivors",
-            f"canary + model investigation per survivor (up to {args.prove_budget}) -- watch [prove]/"
-            f"[investigate] below; first XSS builds the browser image once ...")
-    by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online,
-                        enrich_trust=getattr(args, "deep_reconcile", False), jobs=getattr(args, "jobs", 1))
-    print(f"[all] prove DONE: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
-          f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
-
-    # Stage 5 -- Review & Reconcile: dedup by location + resolve contradictions (before patch/report so patch
-    # acts on the reconciled set). Deterministic; never overturns a witnessed verdict. Runs after prove.
-    if not getattr(args, "no_reconcile", False):
-        print("\n" + "=" * 66 + "\n== REVIEW & RECONCILE  — dedup findings + resolve contradictions\n" + "=" * 66,
-              flush=True)
-        from . import reconcile as _reconcile
-        rc_model = model if getattr(args, "deep_reconcile", False) else None   # Phase 2/3 opt-in (adds model cost)
-        reconciled, _rlog = _reconcile.run(t, model=rc_model, online=args.online, jobs=getattr(args, "jobs", 1))
-        by = {v: [] for v in ("confirmed", "anomalous_state", "refuted", "blocked", "believed",
-                              "not_exploitable")}
-        for f in reconciled:                                 # re-derive verdict groups so patch + summary reflect it
-            by.setdefault(f.get("verdict", "believed"), []).append(f)
-
-    # Stage 4 -- patch + reverify (optional)
+    # No survivors only means the model-driven injection/taint pipeline found nothing to PROVE -- it is
+    # NOT a clean bill of health, and it must NOT short-circuit the rest of wave's own coverage. Skip only
+    # Stage 3/5/4 (they need survivors); the deterministic scans (deps/secrets/iac/controls) + report below
+    # always run.
+    by = {v: [] for v in ("confirmed", "anomalous_state", "refuted", "blocked", "believed", "not_exploitable")}
     fixed = []
-    if args.patch and by["confirmed"]:
-        _banner(4, "PATCH + REVERIFY",
-                f"the model writes a fix for each confirmed finding, then the SAME proof re-runs "
-                f"({'writing' if args.write else 'dry-run, source restored'}) ...")
-        from . import patch as patchmod
-        pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write,
-                                 jobs=getattr(args, "jobs", 1))
-        fixed = [r for r in pres if r["status"] == "fixed"]
-        print(f"[all] patch: {len(fixed)} fixed of {len(pres)} confirmed "
-              f"({'wrote' if args.write else 'dry-run'})", flush=True)
+    if not survivors:
+        print("[all] no injection/taint survivors to prove -- running the deterministic scans "
+              "(deps / secrets / iac / controls) + writing the report below.", flush=True)
+    else:
+        # Stage 3 -- confirmation ladder (+ reachability gate)
+        _banner(3, "PROOF LOOP: prove the survivors",
+                f"canary + model investigation per survivor (up to {args.prove_budget}) -- watch [prove]/"
+                f"[investigate] below; first XSS builds the browser image once ...")
+        by, _pp = prove.run(model, t, budget=args.prove_budget, gate=not args.no_reach_gate, online=args.online,
+                            enrich_trust=getattr(args, "deep_reconcile", False), jobs=getattr(args, "jobs", 1))
+        print(f"[all] prove DONE: {len(by['confirmed'])} confirmed, {len(by['anomalous_state'])} anomalous-state, "
+              f"{len(by['refuted'])} refuted, {len(by['blocked'])} blocked, {len(by['believed'])} believed", flush=True)
+
+        # Variant hunting (sast-improvement plan 3): a confirmed sink rarely occurs once. Search the repo for
+        # OTHER lines matching a confirmed finding's sink class/shape, queue them as low-confidence candidates,
+        # and re-prove (resumable -> only the new siblings run; the proof stage settles each one).
+        if by["confirmed"] and not getattr(args, "no_variants", False):
+            from . import variants as _variants
+            seen = {(d.get("file"), int(d.get("line") or 0), str(d.get("class") or "").lower())
+                    for grp in by.values() for d in grp}
+            new = _variants.find(by["confirmed"], t, seen)
+            if new:
+                with open(dpaths["candidates"], "a", encoding="utf-8") as fh:
+                    for c in new:
+                        fh.write(json.dumps(c) + "\n")
+                print(f"[all] variant hunting: +{len(new)} sibling candidate(s) of a confirmed sink "
+                      f"-> re-proving", flush=True)
+                by, _pp = prove.run(model, t, budget=args.prove_budget + len(new), gate=not args.no_reach_gate,
+                                    online=args.online, enrich_trust=getattr(args, "deep_reconcile", False),
+                                    jobs=getattr(args, "jobs", 1))
+                print(f"[all] after variants: {len(by['confirmed'])} confirmed", flush=True)
+
+        # Stage 5 -- Review & Reconcile: dedup by location + resolve contradictions (before patch/report so
+        # patch acts on the reconciled set). Deterministic; never overturns a witnessed verdict.
+        if not getattr(args, "no_reconcile", False):
+            print("\n" + "=" * 66 + "\n== REVIEW & RECONCILE  — dedup findings + resolve contradictions\n" + "=" * 66,
+                  flush=True)
+            from . import reconcile as _reconcile
+            rc_model = model if getattr(args, "deep_reconcile", False) else None   # Phase 2/3 opt-in (model cost)
+            reconciled, _rlog = _reconcile.run(t, model=rc_model, online=args.online, jobs=getattr(args, "jobs", 1))
+            by = {v: [] for v in ("confirmed", "anomalous_state", "refuted", "blocked", "believed",
+                                  "not_exploitable")}
+            for f in reconciled:                             # re-derive verdict groups so patch + summary reflect it
+                by.setdefault(f.get("verdict", "believed"), []).append(f)
+
+        # Stage 4 -- patch + reverify (optional)
+        if args.patch and by["confirmed"]:
+            _banner(4, "PATCH + REVERIFY",
+                    f"the model writes a fix for each confirmed finding, then the SAME proof re-runs "
+                    f"({'writing' if args.write else 'dry-run, source restored'}) ...")
+            from . import patch as patchmod
+            pres, _xp = patchmod.run(model, t, budget=args.patch_budget, write=args.write,
+                                     jobs=getattr(args, "jobs", 1))
+            fixed = [r for r in pres if r["status"] == "fixed"]
+            print(f"[all] patch: {len(fixed)} fixed of {len(pres)} confirmed "
+                  f"({'wrote' if args.write else 'dry-run'})", flush=True)
 
     from . import report as _report                        # the readable, human-facing findings report
     rp = _report.generate(t, model=getattr(model, "model_id", ""))
@@ -576,10 +615,17 @@ def _config_path():
     return Path(os.path.expanduser("~")) / ".wave" / "config"
 
 
+def _repo_root():
+    """The wave repo root (agent/orchestrator/run.py -> up 3). A `.env` here is found no matter which
+    directory the user runs `wave` from -- unlike a bare ./.env, which depends on the cwd."""
+    return Path(__file__).resolve().parents[2]
+
+
 def _load_config():
-    """Load ~/.wave/config then ./.env into the environment (without overriding vars already set), so the
-    CLI behaves like a configured tool -- set the model once, then just `wave all <repo>`."""
-    for path in (_config_path(), Path(".env")):
+    """Load config into the environment (without overriding vars already set), so the CLI behaves like a
+    configured tool -- set it once, then just `wave all <repo>`. Order (first value wins): ~/.wave/config,
+    the repo's .env (copied from .env.example), then ./.env in the current directory."""
+    for path in (_config_path(), _repo_root() / ".env", Path(".env")):
         try:
             if not path.is_file():
                 continue
@@ -598,8 +644,8 @@ def _load_config():
 def cmd_config(args):
     """`wave config set <key> <value>` / `wave config show`. Keys: model, base, key (aliases for
     WAVE_MODEL / WAVE_API_BASE / WAVE_API_KEY) or any WAVE_* name."""
-    alias = {"model": "WAVE_MODEL", "base": "WAVE_API_BASE", "url": "WAVE_API_BASE",
-             "key": "WAVE_API_KEY", "trace": "WAVE_TRACE"}
+    alias = {"model": "WAVE_MODEL", "model2": "WAVE_AUDIT_MODEL", "audit": "WAVE_AUDIT_MODEL",
+             "base": "WAVE_API_BASE", "url": "WAVE_API_BASE", "key": "WAVE_API_KEY", "trace": "WAVE_TRACE"}
     cfg = _config_path()
     cfg.parent.mkdir(parents=True, exist_ok=True)
     existing = {}
@@ -616,7 +662,8 @@ def cmd_config(args):
         return
     key = alias.get((args.key or "").lower(), (args.key or "").upper())
     if not key.startswith("WAVE_"):
-        raise SystemExit(f"unknown config key {args.key!r} (use: model | base | key | trace | a WAVE_* name)")
+        raise SystemExit(f"unknown config key {args.key!r} "
+                         f"(use: model | audit | base | key | trace | a WAVE_* name)")
     existing[key] = args.value or ""
     cfg.write_text("\n".join(f"{k}={v}" for k, v in existing.items()) + "\n", encoding="utf-8")
     print(f"set {key} -> {cfg}")
@@ -624,9 +671,15 @@ def cmd_config(args):
 
 def main(argv=None):
     _load_config()                                          # set env once via `wave config`; then just run
-    ap = argparse.ArgumentParser(prog="wave",
-                                 description="wave — a local, autonomous vulnerability-discovery & repair agent")
-    sub = ap.add_subparsers(dest="cmd")                     # optional: bare `wave` opens the interactive shell
+    ap = argparse.ArgumentParser(
+        prog="wave",
+        description="wave — a local, autonomous vulnerability-discovery & repair agent.\n\n"
+                    "Just run `wave` (no arguments) to open the interactive shell — the normal way to use "
+                    "wave (guided /setup, /sast, /dast, /help).",
+        epilog="The subcommands below are an ADVANCED / scripting interface (CI, automation); day-to-day "
+               "use goes through the interactive shell (`wave`). `wave <command> -h` for a command's flags.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", metavar="<command>")   # optional: bare `wave` opens the interactive shell
     sh = sub.add_parser("shell", help="launch the interactive wave shell (the default when no command is given)")
     sh.set_defaults(func=cmd_shell)
     d = sub.add_parser("discover", help="SAST front-end: static candidate discovery")
@@ -695,6 +748,9 @@ def main(argv=None):
                     help="path to wave_notebook.jsonl (default <target>/wave_notebook.jsonl)")
     dt.add_argument("--budget", type=int, default=40, metavar="N",
                     help="max findings to falsify this run (severity+confidence order; resumable)")
+    dt.add_argument("--all-files", action="store_true",
+                    help="include low-priority (test/fixture/infra) files too (default: excluded on this "
+                         "partial scan -- they are covered by a full `all --all-files` run)")
     dt.add_argument("--jobs", type=int, default=1, metavar="N", help="falsify in PARALLEL (cloud model only)")
     dt.set_defaults(func=cmd_detect)
 
@@ -754,6 +810,8 @@ def main(argv=None):
     al.add_argument("--interactive", action="store_true", help="propose the read set; prune/extend it before reading")
     al.add_argument("--no-reconcile", action="store_true",
                     help="skip Stage 5 (dedup + contradiction resolution) before patch/report")
+    al.add_argument("--no-variants", action="store_true",
+                    help="skip variant hunting (re-proving repo siblings of a confirmed sink)")
     al.add_argument("--deep-reconcile", action="store_true",
                     help="Stage 5 Phase 2/3: also run the model cross-file reconcile + re-investigate (adds cost)")
     al.add_argument("--jobs", type=int, default=1, metavar="N",
@@ -831,6 +889,17 @@ def main(argv=None):
     cf.add_argument("value", nargs="?", help="the value to set")
     cf.set_defaults(func=cmd_config)
 
+    # Shell-first: keep only the few commands a scripting user reaches for in `wave --help`; the rest are
+    # pipeline internals the interactive shell composes for you. All stay CALLABLE (name_parser_map is
+    # untouched) -- they're just hidden from the top-level listing so the CLI reads as "run wave".
+    _shown = {"all", "dast", "config"}
+    try:
+        for _act in list(sub._get_subactions()):
+            if _act.dest not in _shown:
+                sub._choices_actions.remove(_act)
+    except Exception:
+        pass
+
     args = ap.parse_args(argv)
     if getattr(args, "cmd", None) is None:                  # no subcommand
         if sys.stdin.isatty():                              # interactive -> the shell (Claude-CLI style)
@@ -838,7 +907,21 @@ def main(argv=None):
             return shell.run()
         ap.print_help()                                     # piped / CI -> don't block on input
         return 0
+    for _attr in ("target", "url", "out", "har", "findings"):  # strip stray surrounding quotes a user/
+        _v = getattr(args, _attr, None)                        # paste/shell may leave on a path (Errno 22
+        if isinstance(_v, str):                                # on Windows: `"` is illegal in a filename)
+            setattr(args, _attr, _unquote(_v))
     args.func(args)
+
+
+def _unquote(s):
+    """Strip surrounding whitespace and a matching pair of wrapping quotes from a path/arg. The
+    interactive shell reads with input() (which, unlike a terminal, keeps quotes), and pasted Windows
+    paths often arrive quoted -- a literal `"` in the path then makes every file op fail with Errno 22."""
+    s = (s or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    return s
 
 
 if __name__ == "__main__":

@@ -1,357 +1,133 @@
-# wave — a local, autonomous vulnerability-discovery & repair agent
+# wave
 
-You point it at a codebase; it **finds** real vulnerabilities, **proves** them by making the bug actually
-happen in a sandbox, and proposes a **fix** that it then **re-verifies** — running on one workstation GPU, with
-no dependence on a frontier cloud model for the parts that matter.
+A local, autonomous agent that finds, **proves**, and fixes vulnerabilities — in a code repo (SAST) or against a live URL (DAST).
 
-> This README is the honest project log. wave began as a chain-of-thought *scanner* (fine-tuning an 8B model
-> to emit reasoned verdicts — that history and its central finding live in
-> [`docs/TECHNICAL_REPORT.md`](docs/TECHNICAL_REPORT.md)). It has since **pivoted** to the neuro-symbolic
-> agent described below: the model reasons, deterministic tools prove. The full design is in
-> [`agent/docs/wave_architecture_plan.md`](agent/docs/wave_architecture_plan.md).
+Its one rule keeps it honest:
+
+> **A finding is `confirmed` only when the model caused an effect a tool actually observed.**
+> Reasoning alone can only *propose* (`believed`). Only a witnessed effect confirms. Every false positive we ever saw came from a model concluding without acting — so acting is mandatory.
+
+You run everything from one interactive CLI: type `wave`, then pick from a menu.
 
 ---
 
-## Quickstart
+## 1. Install
+
+Needs **Python 3.11+**. From the repo root:
 
 ```bash
-# 1. install as a CLI (Docker must also be running -- proofs run in throwaway containers)
-pip install -e .                     # gives you the `wave` command
-
-# 2. point at a model ONCE (saved to ~/.wave/config -- no need to re-set it each run)
-wave config set base  "http://localhost:11434/v1"        # LOCAL via ollama (private, the design intent)
-wave config set model "hf.co/<your-gguf>:<tag>"
-#    ...or a CLOUD OpenAI-compatible endpoint (stronger, off-box -- sends code out):
-# wave config set base  "https://openrouter.ai/api/v1"
-# wave config set model "deepseek/deepseek-v4-flash-0731"
-# wave config set key   "<your key>"
-
-# 3. run the whole pipeline on a repo (find -> prove -> patch)
-wave all /path/to/target-repo --patch
+pip install -e .
 ```
 
-Then read **`target-repo/wave_results/wave_report.md`** — a human-readable report of what the model found:
-what it **proved** (with the cited evidence), what **needs review**, what it **cleared as safe**, and any
-**fixes**. A `confirmed` was witnessed by a tool; `anomalous_state` needs human judgment; `believed`/`blocked`
-are unproven leads. (`wave report <repo>` regenerates it; the raw machine artifacts are `wave_findings.jsonl`
-+ `casefile.json`.)
+Add extras for what you'll run:
 
-It's resumable — re-run to continue. The first run pulls a couple of Docker images (and, for XSS, a chromium
-image — a one-time download).
+| To run… | Also install |
+|---|---|
+| **DAST** (`/dast`) — live-URL scanning, XSS, recon crawl | `pip install -e ".[dast]"` then `playwright install chromium` |
+| A **local** model via transformers + LoRA | `pip install -e ".[local-model]"` |
 
-<details><summary>No model yet? Fastest path with ollama</summary>
+- **Docker** is only needed for the white-box **proof** loop (it runs each exploit/patch check in a throwaway container). **DAST needs no Docker.**
+
+---
+
+## 2. Point it at a model
+
+Copy the template and fill in four lines:
 
 ```bash
-# install ollama (https://ollama.com), then serve a capable local model, e.g.:
-ollama pull <a-qwen3-family-model>
-ollama serve            # exposes the OpenAI-compatible API on :11434
+cp .env.example .env        # Windows: copy .env.example .env
 ```
-Then set `WAVE_API_BASE`/`WAVE_MODEL` as above. A stronger model proves more; see **Models** below.
-</details>
+
+```ini
+WAVE_API_BASE=http://localhost:11434/v1          # local ollama (private) — or a cloud URL below
+WAVE_API_KEY=                                    # blank for local ollama
+WAVE_MODEL=<your-model>                           # the primary reasoner (finds / proves / patches)
+WAVE_AUDIT_MODEL=<a-different-model>              # optional: a 2nd model that audits judgment calls
+```
+
+Cloud instead of local (stronger, but sends code off-box):
+
+```ini
+WAVE_API_BASE=https://openrouter.ai/api/v1
+WAVE_API_KEY=sk-or-...
+WAVE_MODEL=deepseek/deepseek-v4-flash-0731
+```
+
+Or just run `wave` → `/setup` and it writes the `.env` for you. (DAST needs no model.)
 
 ---
 
-## The one idea
+## 3. Run it
 
-> **The model DECIDES and TRANSLATES. Deterministic tools PERCEIVE and PROVE.**
+```bash
+wave
+```
 
-The model reads code, forms a hypothesis, writes a payload or a patch, and renders the verdict. The tools hold
-the codebase's structure and run whatever the model asks in a sandbox, reporting **what actually happened** —
-facts the model cannot fabricate. The rule that keeps it honest:
+That opens the interactive shell. The menu:
 
-> **A verdict of `confirmed` requires an effect the model actually caused and a tool actually observed.**
-> Reasoning alone can only *propose* (`believed`); only an observed effect can *confirm*.
+| Command | What it does |
+|---|---|
+| `/setup` | configure the model + endpoint |
+| `/sast` | scan a **code repo** — paste the path, pick a depth (below) |
+| `/dast` | scan a **live URL** — black-box, requires you confirm you're authorized |
+| `/both` | SAST then DAST |
+| `/help` | help, per feature: `/help sast`, `/help dast` |
+| `/status`, `/config` | show readiness / current settings |
 
-Every false positive we ever saw came from a model concluding without acting. This makes acting mandatory for
-a confirmation.
+**`/sast` depths:**
+
+```
+1) discover        fast static candidates, no model (a quick look)
+2) all             full scan of the security-surface files, NO patch      ← default
+3) all --all-files full scan of EVERY source file, NO patch (thorough)
+4) all --patch     full scan, plus auto-patch & re-verify confirmations
+5) quick           eyes + detect + deps, no prove/Docker (fast first look)
+```
+
+Read the result in **`<repo>/WAVE_REPORT.md`** — what it **proved** (with evidence), what **needs review**, what it **cleared as safe**, and any **fixes**. Runs are resumable — re-run to continue.
+
+> You never need to type a subcommand or a flag. The shell runs them for you. (Subcommands still exist as an advanced/scripting interface — `wave <command> -h` — but day-to-day use is just the menu.)
 
 ---
 
-## The pipeline — four stages
+## What it finds
 
-```
-TARGET REPO
-   │
-   ▼  STAGE 1  EYES        tree-sitter whole-repo map + call graph + security pins;
-   │                       a model "notebook" reads the pinned files into per-file notes
-   ▼  STAGE 2  DETECTOR    clean-room asymmetric falsification: a fresh model instance,
-   │                       shown only the slice, tries to DISPROVE each candidate. Candidates
-   │                       come from the notebook AND the map's sink-pins, so a missed note
-   │                       can't blank a file (a blank note on a pinned file is retried once)
-   ▼  STAGE 3  PROOF LOOP  the model drives a sandbox to make the exploit happen; the HARNESS
-   │                       WITNESSES the effect (marker in a sink, ASan report, state delta)
-   ▼  STAGE 4  PATCH       the model writes a fix; the SAME proof re-runs; certified `fixed`
-                           only if the exploit demonstrably no longer fires
-```
-
-Between the stages sit **honesty gates** that keep verdicts trustworthy — a `confirmed` requires **both** that
-the dangerous effect was *witnessed* **and** that an attacker can *reach* it:
-
-- **Reachability — witnessed, not guessed** — wave doesn't just check a *path exists* on the call graph. For a
-  web route it drives the **real HTTP route** through the framework's in-process test client (Flask/FastAPI,
-  Express, NestJS, Spring, ASP.NET, Go, Rails, Laravel, Rust…), so the attacker value is *seen* reaching the
-  sink. Each confirm records `reach_proof: witnessed | inferred`. A sink reachable only via a local/CLI entry,
-  or only through an ambiguous name-based call edge, is human-review — not a false confirm.
-- **Context gate** — a browser/frontend file can't host a server-side vuln (a client `fetch` is not SSRF).
-- **Value-taint** — does the *specific* untrusted value actually reach the sink, or a sanitized copy?
-- **Tool-grounded witness** — the **harness itself** reads its planted markers from the sandbox output
-  (`wave_HIT`, the instrumented-sink markers, the headless-browser canary) and grades the class, so a confirm
-  rests on the *tape*, not the model's account. Classes with no deterministic marker (IDOR / business logic)
-  stay human-review by design.
-- **Evidence audit** — a `confirmed` with **no** harness marker is re-checked by a fresh clean-room skeptic;
-  set `WAVE_AUDIT_MODEL` to a **different** model (e.g. GLM auditing deepseek) for a *decorrelated* second
-  opinion. It upholds only what it can ground — and it's never even called on a harness-witnessed confirm.
-
----
-
-## What it can do today
-
-**Languages mapped** (tree-sitter): Python, JavaScript/TypeScript, Ruby, PHP, Go, Java, C#, Rust, C, C++.
-
-**Vulnerability classes it can *prove* (a tool witnesses the effect):**
+**SAST — vulnerability classes it can *prove* (a tool witnesses the effect):**
 
 | Class | How it's witnessed |
 |---|---|
-| Command injection | injected `; touch /work/wave_HIT` runs → the marker file appears |
-| SQL / NoSQL injection | the marker reaches the query in an unsafe (unparameterized / operator) position |
-| SSRF | the marker controls the outbound request host |
+| SQL / NoSQL injection | the payload reaches the query unparameterized |
+| Command injection / eval | the injected command/code runs |
+| SSRF | the payload controls the outbound request |
 | Path traversal | a `../` payload survives to the file open |
-| XSS | rendered in headless chromium (DOM) **or** a sanitizer's return still yields a `javascript:` URL |
-| SSTI / eval | `{{7*7}}` evaluates to `49` |
-| Prototype pollution | a `__proto__` payload pollutes a fresh object |
-| Deserialization | a crafted object fires a marker side-effect on load |
-| **C/C++ memory safety** | compiled with **AddressSanitizer** → a crafted input trips a sanitizer report |
-| **IDOR / broken access control** | a synthetic 2-identity harness: user A's call returns user B's data |
+| XSS | it executes in a headless browser |
+| SSTI | `{{7*7}}` evaluates to `49` |
+| Prototype pollution · Deserialization · ReDoS | a crafted input trips the specific effect |
+| **C/C++ memory safety** | AddressSanitizer reports on a crafted input |
+| **IDOR / broken access control** | a 2-identity differential: user A reads user B's data |
 
-Classes it can't yet witness (missing deps, business logic beyond IDOR, gadget chains) are reported as
-`believed` (a reasoned lead) or `blocked` — never a false `confirmed`.
+Classes it can't yet witness are reported as `believed` (a reasoned lead) — never a false `confirmed`.
 
----
+**Also included in a full scan** (deterministic, no model): known-CVE **dependencies** (OSV.dev, ranked by whether the app actually imports them), **missing controls** (CSRF / rate-limit / cookie flags), **IaC** misconfig (Dockerfile / Compose / CI), and **secrets** in git history.
 
-## Black-box DAST — testing a live URL
-
-Everything above is the **white-box** path: it reads the source, provisions the app in a container, and
-instruments the sink. The second mode, `wave dast <url>`, is **pure black-box** — given only a live URL
-and no source, it works like an external red-teamer: map the surface from any angle, then prove what it
-can from the client alone.
-
-```
-wave dast https://staging.example.com --authorized
-```
-
-Active scanning sends real attack traffic, so it **refuses to run without `--authorized`** — only point
-it at systems you own or are authorized to test.
-
-One pass covers four layers:
-
-- **Recon / infra** — DNS, email-spoofing posture (SPF/DMARC), subdomain takeover, TLS certificate
-  (expiry / self-signed / mismatch + the SANs it leaks), and a port/service exposure scan.
-- **HTTP posture** — stack fingerprint, missing security headers, weak cookie flags, CORS misconfig,
-  dangerous methods, and sensitive-path discovery (`/.git`, `/.env`, `/actuator`, swagger, backups…)
-  gated on a content signature so a soft-404 can't false-fire.
-- **Surface expansion (recall)** — ingests an OpenAPI/Swagger spec, `robots.txt`, `sitemap.xml`, and
-  crawled query params, so a JSON API becomes a full target list with no manual seeding.
-- **Injection** — SQLi (error / boolean / blind-timing), reflected **and stored** XSS (proven by actual
-  execution in headless Chromium), path traversal, open redirect, SSTI, eval, NoSQLi, and **SSRF + blind
-  RCE** via an out-of-band (OAST) callback to a listener we control.
-- **Differential** — IDOR, broken access control, and missing controls (rate-limit, old-password check).
-
-The same honesty rule holds: a tool-witnessed injection or an OAST callback is `confirmed`; a behavioral
-differential is `anomalous_state` (a real observed effect whose severity is a judgment); everything else
-is a `believed` lead — never a false `confirmed`. The output is a replayable HTTP PoC, not a patch (there
-is no source to fix).
-
-Useful flags:
-
-```
-wave dast <url> --authorized \
-  --cookie "session=…"            # or --header "Authorization: Bearer …" — test as a logged-in user
-  --delay 1.0                     # politeness: min seconds between ALL requests (recon, battery, renders)
-  --stored                        # hunt stored / second-order XSS (writes payloads, re-renders pages)
-  --har capture.har               # import captured traffic (any proxy/browser HAR) as surface
-  --plugins nuclei,ffuf,zap,mitmproxy   # run free external tools as perception (leads only)
-  --target-param "GET /users/v1/:id path id"   # seed a known endpoint
-```
-
-**External tools are perception, never the proof authority.** `--plugins` runs free tools —
-[nuclei](https://github.com/projectdiscovery/nuclei) (known-issue templates),
-[ffuf](https://github.com/ffuf/ffuf) (content discovery), [ZAP](https://www.zaproxy.org/) (spider +
-passive, opt-in active via `WAVE_ZAP_ACTIVE=1`), and [mitmproxy](https://mitmproxy.org/) (HAR traffic
-import) — and ingests their output as leads and extra surface. wave's own oracles still own every
-`confirmed`, so a noisy tool widens recall but can never manufacture a false positive.
-
-Prefer a guided experience? Just run `wave` with no command to drop into an interactive shell
-(`/setup`, `/sast`, `/dast`, `/both`, `/help`).
+**DAST (`/dast <url>`)** — from a single URL, like an external pentester: DNS/TLS/port recon, HTTP posture (headers/cookies/CORS), OpenAPI/robots ingestion, injection (sqli/xss/stored-xss/path/redirect/ssti/eval/nosqli, + SSRF/RCE via an out-of-band callback), and differential IDOR / broken-access / rate-limit. It sends live attack traffic, so it refuses to run without you confirming authorization.
 
 ---
 
-## How to run it
+## Honest limits
 
-### 1. Prerequisites
-
-- **Python** 3.11+; install the CLI with `pip install -e .` (pulls `tree-sitter-language-pack`, `requests`,
-  `PyYAML`). This gives you the `wave` command.
-- **Docker** running (the proof loop executes everything in throwaway containers — never on your host).
-- **A model** (pick one, next section).
-
-### 2. Point it at a model (once)
-
-`wave config set` saves to `~/.wave/config`, so you set it a single time and never pass env again. (An
-existing `WAVE_*` env var or `.env` still wins if present.)
-
-**Local (default, private — the design intent):** an ollama server serving a capable local model.
-
-```bash
-wave config set base  "http://localhost:11434/v1"
-wave config set model "hf.co/<your-gguf>:<tag>"     # e.g. a Qwen3-family 27B
-```
-
-**Cloud (stronger reasoning, off-box — for testing / hard targets):** any OpenAI-compatible endpoint, e.g.
-OpenRouter. This sends code off-box; use it deliberately.
-
-```bash
-wave config set base  "https://openrouter.ai/api/v1"
-wave config set model "deepseek/deepseek-v4-flash-0731"
-wave config set key   "<your OpenRouter key>"
-```
-
-`wave config show` prints the current settings.
-
-**Optional — a decorrelated second opinion (recommended for cloud runs):** set a **different** model as the
-evidence auditor via `WAVE_AUDIT_MODEL`. It judges only the `confirmed` findings that lack a deterministic
-harness marker (the judgment calls — IDOR, business logic, or an observed-but-un-marked effect), so two
-*independent* models must agree before such a finding stands. It costs **nothing** on the marker-witnessed
-confirms (the harness tape settles those with no model call), and falls back to the primary model when unset.
-
-```bash
-export WAVE_AUDIT_MODEL="z-ai/glm-5.3-flash"   # GLM audits the primary (e.g. deepseek) on the no-marker confirms
-```
-
-### 3. Run the whole pipeline
-
-```bash
-wave all /path/to/target-repo --patch
-```
-
-Useful flags:
-- `--all-files` — deep-read **every** parsed source file, not just the ones with a recognized sink pin.
-  Pinning becomes a priority *order* rather than a filter, so a vuln in a file with no matched sink pattern is
-  still read. Best for small/medium repos; cost scales with repo size (this is the "scan everything" mode).
-- `--interactive` — before deep-reading, wave proposes the file set and lets you **prune or extend** it
-  (`drop N,M` / `add <substr>` / `list` / `quit`); tree-sitter effectively proposes the file list and you
-  curate it. Without it, wave auto-proceeds.
-- `--notes-budget N` / `--detect-budget N` / `--prove-budget N` — bound each stage. For the notebook: **at or
-  below N, ALL pinned files are read** (full coverage, default 40); only when pinned files *exceed* N does the
-  model select the N worth deep-reading. Lower it on a monorepo, raise it for full small-repo coverage.
-- `--online` — give the model opt-in `web_search`/`web_read` (network egress) for unfamiliar APIs; off by
-  default (the box stays local).
-- `--jobs N` — run **N model tasks at the same time** across every model-heavy stage — the **notebook**
-  (Stage 1b, the slow one on big repos), **detect**, **prove**, **patch**, and deep-reconcile (default **1** =
-  serial). You must give a **number** — there is no "use all cores" mode; `N` is the max concurrency.
-  - **Cloud model only.** Parallelism runs N model calls + N docker sandboxes at once. That's fine for a cloud
-    model (deepseek/OpenRouter), so it's enabled there. A **local** single-GPU model can't generate in
-    parallel, so wave **auto-falls back to `--jobs 1`** and prints a note.
-  - **Sizing (per box, not cores):** each proof uses a light container (~0.5 GB) but a *compiled build*
-    (cargo/gradle/npm) can spike ~2 GB + 2 CPUs. On a **32 GB / 6-core** box, **`--jobs 4`** is the sweet spot;
-    drop to `2` for repos full of compiled-language builds, go up to `6` for light Python/JS. **Dependency
-    installs** (`pip install <bigpkg>` / `npm install`) are serialized across jobs by default (they're
-    memory-heavy — 4 at once can OOM the box); raise with `WAVE_INSTALL_JOBS=2` if you have RAM to spare.
-  - It's a **speed** knob only (turns the ~45-min serial runs / timeouts into ~4× faster) — it does **not**
-    change *which* findings you get. Distinct from the `--*-budget` flags below, which set *how many* items each
-    stage looks at.
-- `--patch` — run Stage 4 (dry-run by default; add `--write` to keep a patch that passed both gates).
-- `--no-reach-gate` — disable the reachability gate (use on libraries with public-API entry points, no routes).
-
-Read **`<repo>/wave_results/wave_report.md`** — the human-readable findings (regenerate anytime with
-`wave report <repo>`). The machine artifacts also land in the repo: `wave_findings.jsonl` (verdicts) and
-`casefile.json` (full investigation report). Every stage is **resumable** — re-run to continue; a terminal
-verdict is skipped, a `believed`/`blocked` lead is retried.
-
-### 4. Or run a single stage
-
-```bash
-wave eyes   <repo> [--notes] [--all-files] [--interactive]  # map + index; --notes runs the notebook
-wave detect <repo>                                          # clean-room falsify the notebook's findings
-wave prove  <repo> [--online]                               # the confirmation ladder
-wave patch  <repo> [--write]                                # patch + reverify the confirmed findings
-wave report <repo>                                          # (re)generate the readable report
-wave deps   <repo>                                          # known-CVE dependency scan (OSV.dev; needs network)
-wave controls <repo>                                        # missing-control advisories (CSRF/rate-limit/cookies)
-wave iac    <repo>                                          # Dockerfile/Compose/GitHub-Actions config issues
-wave secrets <repo>                                         # secrets committed to git history (redacted)
-wave replay <repo> [--online]                               # re-verify confirmed findings (regression suite)
-```
-
-`wave replay` re-runs the proof on every previously-**confirmed** finding and reports whether each exploit
-**still fires** (still-vulnerable) or **no longer does** (resolved) — a security regression suite for CI: run
-it after changes to catch a reintroduced vuln, or to confirm a fix actually landed.
-
-**Deterministic add-ons** (no model): `wave all --online` also appends these sections to the report —
-**dependency vulnerabilities** (known CVEs via OSV.dev — PyPI/npm/crates.io/Go), **missing security controls**
-(state-changing routes with no CSRF, auth routes with no rate limiting, cookies without httpOnly/secure/
-sameSite), **config/infra issues** (Dockerfile runs-as-root / `curl|sh` / baked secrets, Compose privileged /
-host-network / exposed DB ports, GitHub Actions `pull_request_target` untrusted checkout / script injection),
-and **secrets in git history** (committed-then-removed credentials, redacted). Run any standalone with
-`wave deps` / `wave controls` / `wave iac` / `wave secrets`.
-
-`wave eyes <repo>` with no flags is instant (deterministic map + attack-surface index, no model). Add
-`--notes` to run the model's per-file notebook; combine with `--all-files` to read the whole repo or
-`--interactive` to curate the file set first. Model/endpoint settings live under `wave config set`/`wave config show`.
-
----
-
-## Models & the local-model plan
-
-Detection and exploitation are meant to stay **local**; a strong cloud model is supported for capability
-testing and hard targets. A measured experiment (see the docs) showed a stronger reasoner turning the local
-model's *timeouts* into real, tool-witnessed confirms — so the harness is mature and the model is the ceiling.
-
-The path back to a capable *local* model is **trace distillation**: use a strong model to drive the harness,
-let the harness **certify** which drives ended in a real observed effect, and fine-tune the local model to
-imitate only those. The trace-logger and a plain-language guide are built:
-
-- turn capture on with `WAVE_TRACE=1` (or `WAVE_TRACE_DIR=<path>`) and run normally — every *verified* drive
-  is banked to `traces/wave_traces.jsonl`;
-- see [`agent/docs/trace_training.md`](agent/docs/trace_training.md) for the how and why.
+- **SAST recall is sink- and route-driven.** Apps with routes and recognized sinks work well; a vuln in a function with no classic sink pattern can be missed. "No findings" means *wave didn't surface a provable one* — not a guarantee of safety.
+- **The model is the ceiling.** A stronger reasoner proves more; a weak one leaves leads unproven. That's what the local-model trace-distillation path (see `agent/docs/`) is for.
+- **DAST is black-box.** The output is a replayable HTTP PoC, not a patch; auth/IDOR/logic classes need the running app, and a WAF in front will mask app findings.
 
 ---
 
 ## Repo layout
 
 ```
-agent/orchestrator/     the pipeline
-  codemap.py  repomap.py       Stage 1  structure map + security pins (11 languages)
-  notebook.py                  Stage 1b per-file model notes
-  detector.py                  Stage 2  clean-room falsification
-  prove.py  rung1.py           Stage 3  driver + deterministic canary observer
-  investigate.py  execute.py   Stage 3  model tool-use loop + sandboxed executor
-  briefs.py  repro.py js_env.py Stage 3 per-class proof recipes + scaffolds
-  reachability.py  taint.py    the honesty gates
-  audit.py                     Stage 3  the fresh-auditor evidence audit
-  patch.py                     Stage 4  patch + reverify
-  traces.py                    trace-logger (training data)
-  model.py                     local/cloud model interface
-  run.py                       CLI entry
-agent/bench/ghsa_bench.py      the real-CVE benchmark harness
-agent/docs/                    the architecture plan + design docs
-tests/                         `pytest tests/ -q`  (deterministic; no GPU/docker/model)
-```
-
----
-
-## Status & honest limits
-
-- **Proven end-to-end on real code and fixtures:** command injection, IDOR (differential), C/C++ buffer
-  overflow (ASan), deserialization — each a real, grounded, tool-witnessed confirmation.
-- **Detection is the current recall bottleneck for libraries** — the map is sink-driven, so a library whose
-  vuln lives in an exported function with no classic sink can go unsurfaced (the proof engine never gets a
-  shot). Apps with routes/sinks work well.
-- **No deterministic canary for non-Python/JS languages** — they prove via the model-driven path.
-- **The local model is the ceiling.** The harness is mature; a weak reasoner thrashes where a strong one
-  drives straight to a proof. That's what trace distillation is for.
-
-Run the tests to see what's verified:
-
-```
-pytest tests/ -q
+agent/orchestrator/   the agent: the CLI (run.py), the interactive shell (shell.py),
+                      the SAST pipeline (codemap/detector/prove/investigate/patch/…),
+                      and the DAST engine (dast_*.py)
+agent/docs/           the architecture plan + design notes
+tests/                deterministic test suite  (pytest tests/ -q)
 ```

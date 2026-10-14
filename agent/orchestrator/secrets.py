@@ -33,10 +33,24 @@ _PLACEHOLDER = re.compile(r"(?i)example|changeme|change_me|your[_-]?|placeholder
 _TEST_PATH = re.compile(r"(?i)(^|/)(tests?|testfixtures|fixtures|__tests__|specs?|e2e|qa|examples?|"
                         r"javaresttest|benchmarks?)(/|$)|[._-]test[._-]|\.spec\.|conftest")
 _DOWNRANK = {"high": "medium", "medium": "low", "low": "low"}
+# Non-code locations where a "secret" is almost always an EXAMPLE, not a production credential: docs, API
+# specs, and i18n/translation strings (every `Credentials in URL` hit on OpenWA's docs/06-*.md and
+# dashboard/src/i18n/locales/*.json was a sample URL). Grouped BELOW real-code hits, never dropped.
+_LOWVALUE_PATH = re.compile(r"(?i)(^|/)(i18n|locales?|translations?|lang)(/|$)|(^|/)docs?/|"
+                            r"\.(md|rst|txt|adoc)$|openapi|swagger")
 
 
 def _sev(base, path):
     return _DOWNRANK.get(base, base) if _TEST_PATH.search(str(path or "").replace("\\", "/")) else base
+
+
+def _is_low_value(path):
+    """True when a secret here is almost certainly a test fixture / doc example, not a production leak.
+    Combines the test-path rule, the repo's shared low-priority-path rule, and the docs/i18n rule -- such
+    hits are grouped lower in the report (a real key in a test file is still a finding, so never dropped)."""
+    from .repomap import is_low_priority_path
+    p = str(path or "").replace("\\", "/")
+    return bool(_TEST_PATH.search(p)) or is_low_priority_path(p) or bool(_LOWVALUE_PATH.search(p))
 
 
 def _redact(s):
@@ -93,13 +107,25 @@ def scan(target, max_commits=3000, timeout=120):
     return scan_diff(p.stdout or "")
 
 
+def _line(f):
+    loc = f"{f['file']}@{f['commit']}" if f["file"] else f["commit"]
+    return f"- **{f['type']}** _[{f['severity']}]_ — {loc}: `{f['match']}`"
+
+
 def render(findings):
     if not findings:
         return "## Secrets in git history\n\nNo secrets found in git history.\n"
+    primary = [f for f in findings if not _is_low_value(f.get("file", ""))]
+    lowval = [f for f in findings if _is_low_value(f.get("file", ""))]
     lines = [f"## Secrets in git history  ({len(findings)})", "",
              "Credentials committed at some point (still in the log even if later removed). "
              "**Rotate every exposed credential** -- deleting the file does not un-expose it.", ""]
-    for f in findings:
-        loc = f"{f['file']}@{f['commit']}" if f["file"] else f["commit"]
-        lines.append(f"- **{f['type']}** _[{f['severity']}]_ — {loc}: `{f['match']}`")
+    if primary:
+        lines += [_line(f) for f in primary]
+    else:
+        lines.append("_No secrets in first-party application code._")
+    if lowval:
+        # test fixtures, docs/API-spec examples, i18n sample URLs -- almost always examples, not real leaks.
+        lines += ["", f"### In tests / docs / examples — likely not production secrets  ({len(lowval)})", ""]
+        lines += [_line(f) for f in lowval]
     return "\n".join(lines) + "\n"

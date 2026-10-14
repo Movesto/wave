@@ -64,6 +64,20 @@ def _run_cli(argv):
         print(RED(f"  error: {e}"))
 
 
+def _model_jobs(n=4):
+    """How many files the model stages (notebook/detect/prove) should read CONCURRENTLY from the shell.
+    A CLOUD model is safe to call in parallel -> n (the interactive serial notebook was ~2 min/file, so a
+    40-file read took ~80 min); a LOCAL single-GPU model must stay serial -> 1 (the stages enforce this too,
+    so passing n is harmless either way -- this just avoids the "reading serially" notice for local users).
+    n=4 is the documented sweet spot for a ~32GB/6-core box. Falls back to 1 on any config hiccup."""
+    try:
+        from .model import Model
+        from .parallel import is_cloud_model
+        return n if is_cloud_model(Model()) else 1
+    except Exception:
+        return 1
+
+
 # -------- config / readiness -----------------------------------------------------------------------
 
 def _config_view():
@@ -107,34 +121,68 @@ def _cmd_help(arg):
 
 
 def _cmd_setup(arg):
-    print(BOLD("\n  Setup -- model + API endpoint (written to ~/.wave/config)\n"))
-    cur = _config_view()
-    base = _ask("API base URL (OpenAI-compatible)", cur.get("WAVE_API_BASE", "https://openrouter.ai/api/v1"))
-    model = _ask("model id", cur.get("WAVE_MODEL", "deepseek/deepseek-r1"))
     import getpass
+    print(BOLD("\n  Setup -- your provider + two models. Saved to the repo's .env (see .env.example).\n"))
+    base = _ask("API base URL (OpenAI-compatible; OpenRouter default, or http://localhost:11434/v1 for local ollama)",
+                os.environ.get("WAVE_API_BASE", "https://openrouter.ai/api/v1"))
     try:
-        key = getpass.getpass("  API key (hidden, blank keeps current): ").strip()
+        key = getpass.getpass("  API key for that provider (hidden; blank = keep current / none for local ollama): ").strip()
     except (EOFError, KeyboardInterrupt):
         key = ""
+    first = _ask("FIRST model -- the primary reasoner that finds, proves & patches",
+                 os.environ.get("WAVE_MODEL", "deepseek/deepseek-v4-flash-0731"))
+    second = _ask("SECOND model -- a DIFFERENT model that audits judgment-call findings (blank = reuse the first)",
+                  os.environ.get("WAVE_AUDIT_MODEL", ""))
+    updates = {}
     if base:
-        _run_cli(["config", "set", "base", base])
-    if model:
-        _run_cli(["config", "set", "model", model])
+        updates["WAVE_API_BASE"] = base
     if key:
-        _run_cli(["config", "set", "key", key])
-    from .run import _load_config
-    _load_config()                                   # reload so /status reflects it immediately
-    print(GREEN("  saved.\n"))
+        updates["WAVE_API_KEY"] = key
+    if first:
+        updates["WAVE_MODEL"] = first
+    if second:
+        updates["WAVE_AUDIT_MODEL"] = second
+    path = _write_env(updates)
+    for k, v in updates.items():                     # reflect immediately so /status is right now
+        os.environ[k] = v
+    print(GREEN(f"  saved -> {path}\n"))
     _status_line()
 
 
+def _write_env(updates):
+    """Merge `updates` into the repo's .env (preserving other keys), create it if absent. Returns the path."""
+    from .run import _repo_root
+    env = _repo_root() / ".env"
+    order, existing = [], {}
+    if env.is_file():
+        for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
+            s = line.strip()
+            if s and not s.startswith("#") and "=" in s:
+                k, v = s.split("=", 1)
+                k = k.strip()
+                if k not in existing:
+                    order.append(k)
+                existing[k] = v.strip()
+    for k, v in updates.items():
+        if k not in existing:
+            order.append(k)
+        existing[k] = v
+    body = "# wave config (see .env.example). KEY=value, WAVE_ prefix.\n" + \
+           "\n".join(f"{k}={existing[k]}" for k in order) + "\n"
+    try:
+        env.write_text(body, encoding="utf-8")
+    except OSError as e:
+        print(RED(f"  could not write {env}: {e}"))
+    return env
+
+
 def _cmd_config(arg):
-    cfg = _config_view()
-    if not cfg:
-        print(DIM("  (no config yet -- run /setup)"))
+    vals = {k: v for k, v in os.environ.items() if k.startswith("WAVE_")}
+    if not vals:
+        print(DIM("  (nothing configured yet -- run /setup)"))
         return
-    for k, v in cfg.items():
-        print(f"  {k}={'***' if 'KEY' in k else v}")
+    for k in sorted(vals):                           # the EFFECTIVE config wave will use (any source)
+        print(f"  {k}={'***' if 'KEY' in k else vals[k]}")
 
 
 def _cmd_status(arg):
@@ -142,23 +190,46 @@ def _cmd_status(arg):
 
 
 def _cmd_sast(arg):
-    target = (arg or "").strip() or _ask("target repo path", ".")
+    target = (arg or "").strip().strip('"').strip("'") or _ask("target repo path", ".")
     if not target:
         return
     print(BOLD("\n  SAST depth:"))
-    print("    1) discover  -- fast static candidates, no model")
-    print("    2) all       -- full pipeline (eyes -> detect -> prove), loads the model")
-    print("    3) all --patch -- full pipeline + patch & reverify confirmed findings")
-    choice = _ask("choose 1/2/3", "1")
+    print("    1) discover        -- fast static candidates, no model (a quick look)")
+    print("    2) all             -- full scan of the security-surface files, NO patch")
+    print("    3) all --all-files -- FULL scan of EVERY source file, NO patch (thorough; slow on big repos)")
+    print("    4) all --patch     -- security-surface scan, plus auto-patch & reverify confirmations")
+    print("    5) quick           -- eyes + detect + deps, NO prove/Docker (fast; good for a first look)")
+    choice = _ask("choose 1/2/3/4/5", "2")
+    # Parallelism: the model stages read one file per call, so on a CLOUD model reading serially is the whole
+    # reason a 40-file notebook took ~80 min. Fan out on a cloud model (no-op/serial on a local one).
+    jobs = _model_jobs()
+    jflag = ["--jobs", str(jobs)] if jobs > 1 else []
+    if jobs > 1:
+        print(DIM(f"  (cloud model -> reading {jobs} files in parallel)"))
+    if choice == "5":
+        # Fast, no-Docker pass: notebook + falsifier (the detect verdicts) + the deterministic dep scan.
+        # Skips the slow prove/patch stage entirely -- a quick first look / verification path.
+        print(CYAN(f"\n  > wave eyes {target} --notes  ;  wave detect {target}  ;  wave deps {target}\n"))
+        _run_cli(["eyes", target, "--notes"] + jflag)
+        _run_cli(["detect", target] + jflag)
+        _run_cli(["deps", target])
+        print(DIM(f"  detect verdicts -> {target}/wave_detect.jsonl   deps -> {target}/wave_deps.md"))
+        return
     if choice == "1":
         argv = ["discover", target]
-    elif choice == "3":
-        argv = ["all", target, "--patch"]
     else:
-        argv = ["all", target]
-    if choice in ("2", "3") and _confirm("this loads the model and may take a while -- run now?") is False:
-        print(DIM("  cancelled."))
-        return
+        # 2/3/4 are the one-and-done SAST run -- pipeline + deterministic scans + report. 3 reads every
+        # file (best recall, costly); 4 also patches. Only 4 writes fixes.
+        argv = ["all", target] + jflag
+        if choice == "3":
+            argv.append("--all-files")
+        elif choice == "4":
+            argv.append("--patch")
+        if _confirm("include the dependency-CVE scan (sends your package names to OSV.dev over the network)?"):
+            argv.append("--online")
+        if _confirm("this loads the model and may take a while -- run now?") is False:
+            print(DIM("  cancelled."))
+            return
     print(CYAN(f"\n  > wave {' '.join(argv)}\n"))
     _run_cli(argv)
 
@@ -277,10 +348,15 @@ _HELP_MAIN = """
 
 _HELP_SAST = """
   /sast [path] -- static analysis (needs the source; loads the model for the full pipeline)
-    discover       fast, deterministic static candidates (no model)        -> wave discover <path>
-    all            eyes -> detect -> prove (clean-room, model-driven)       -> wave all <path>
-    all --patch    the above, plus patch & dual-gate reverify confirmations -> wave all <path> --patch
-  Findings are written under the repo (wave_results / casefile). SAST owns cross-file taint & repair.
+    1 discover         fast, deterministic static candidates (no model)        -> wave discover <path>
+    2 all              eyes -> detect -> prove on the security-surface files   -> wave all <path>
+    3 all --all-files  the full pipeline over EVERY source file (best recall,  -> wave all <path> --all-files
+                       costly; no patch)
+    4 all --patch      surface scan + patch & dual-gate reverify confirmations -> wave all <path> --patch
+    5 quick            eyes + detect + deps, NO prove/Docker (fast first look / verify; detect verdicts
+                       land in wave_detect.jsonl, dep CVEs ranked by reachability in wave_deps.md)
+  Only option 4 writes fixes. Findings are written under the repo (wave_results / casefile / WAVE_REPORT.md).
+  SAST owns cross-file taint & repair. (On a big repo, --all-files is slow -- scope to a subdir instead.)
 """
 
 _HELP_DAST = """
@@ -315,9 +391,13 @@ _HELP_DAST = """
 """
 
 _HELP_SETUP = """
-  /setup (alias /env) -- configure the model + API endpoint
-    Prompts for the API base URL (OpenAI-compatible), the model id, and the API key (hidden).
-    Saved to ~/.wave/config so future runs need no env vars. View with /config; one-shot:
-      wave config set base <url> | wave config set model <id> | wave config set key <key>
+  /setup (alias /env) -- configure your provider + two models, written to the repo .env
+    Prompts for: the API base URL (OpenAI-compatible -- OpenRouter, or a local ollama), the API key
+    (hidden), the FIRST model (primary reasoner), and the SECOND model (a different model that audits
+    judgment-call findings; optional). Saved to the repo's .env (copy of .env.example) so future runs
+    need no env vars. View the effective config with /config.
+    Manual: `cp .env.example .env` and edit it. One-shot equivalents:
+      wave config set base <url> | set key <key> | set model <id> | set audit <id>
+    The env var names are WAVE_API_BASE / WAVE_API_KEY / WAVE_MODEL / WAVE_AUDIT_MODEL.
     DAST needs no model; SAST's full pipeline does.
 """

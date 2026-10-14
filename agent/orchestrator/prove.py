@@ -134,6 +134,16 @@ def _said_witnessed(text):
     return any(p in t for p in _DRIVE_PHRASES)
 
 
+def _reach_proof(reach_witnessed, reach):
+    """Half-B honesty. A reach counts as 'witnessed' ONLY on the model's STRUCTURED reach_witnessed flag
+    AND a real reach path. The model's PROSE (_said_witnessed) is NO LONGER authoritative: phrases like
+    'test client' / 'issued a get' / 'via the route' trip on almost any HTTP write-up, so prose flipped
+    Half-B to witnessed far too easily -- a fakeable proof (sast-improvement plan 1b). Prose is kept only
+    as a diagnostic note. 'inferred' = a static path exists but was not driven; 'none' = no entry path."""
+    witnessed = bool(reach_witnessed) and reach is not None
+    return "witnessed" if witnessed else ("inferred" if reach else "none")
+
+
 def _reach_of(cmap, c):
     """The untrusted entry Func + path to this sink, or (None, None). The entry's name+file let us
     scaffold the ENTRY (Half B); the path drives the brief's instruction."""
@@ -238,8 +248,9 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     # model's own account of DRIVING THE ROUTE (it often proves the reach but forgets the boolean -- pyvuln
     # cmd/sqli/path did exactly this and got falsely downgraded by the static value-taint gate).
     meth = (getattr(v, "methodology", "") or "") + " " + (v.why or "")
-    said_witnessed = (bool(getattr(v, "reach_witnessed", False)) or _said_witnessed(meth)) and reach is not None
-    reach_proof = "witnessed" if said_witnessed else ("inferred" if reach else "none")
+    reach_in_prose = _said_witnessed(meth)                # DIAGNOSTIC only -- not authoritative (gameable)
+    reach_proof = _reach_proof(getattr(v, "reach_witnessed", False), reach)
+    said_witnessed = reach_proof == "witnessed"
     driven_trust = reachability.entry_trust(entry_fn) if (said_witnessed and entry_fn is not None) else None
     # DIFFERENTIAL (IDOR/access-control): a witnessed boundary crossing is a business-logic JUDGMENT anchored
     # to an observed state change -- always human-review, never a tool-witnessed `confirmed` (design + §10.7).
@@ -254,6 +265,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     return {"verdict": verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
             "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
             "reach_proof": reach_proof,                       # witnessed | inferred | none (Half-B honesty)
+            "reach_in_prose": reach_in_prose,                 # model CLAIMED driving it in prose (diagnostic only)
             "driven_trust": driven_trust,                     # trust tier of the entry the model DROVE from
             "witness": sorted(markers), "harness_witnessed": hw, "harness_marker": hmarker,
             "oracle_tier": htier,                             # 'marker' (tape-gradable) | 'judgment' (2nd-model)

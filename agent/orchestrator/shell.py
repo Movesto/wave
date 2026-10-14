@@ -64,6 +64,20 @@ def _run_cli(argv):
         print(RED(f"  error: {e}"))
 
 
+def _model_jobs(n=4):
+    """How many files the model stages (notebook/detect/prove) should read CONCURRENTLY from the shell.
+    A CLOUD model is safe to call in parallel -> n (the interactive serial notebook was ~2 min/file, so a
+    40-file read took ~80 min); a LOCAL single-GPU model must stay serial -> 1 (the stages enforce this too,
+    so passing n is harmless either way -- this just avoids the "reading serially" notice for local users).
+    n=4 is the documented sweet spot for a ~32GB/6-core box. Falls back to 1 on any config hiccup."""
+    try:
+        from .model import Model
+        from .parallel import is_cloud_model
+        return n if is_cloud_model(Model()) else 1
+    except Exception:
+        return 1
+
+
 # -------- config / readiness -----------------------------------------------------------------------
 
 def _config_view():
@@ -186,12 +200,18 @@ def _cmd_sast(arg):
     print("    4) all --patch     -- security-surface scan, plus auto-patch & reverify confirmations")
     print("    5) quick           -- eyes + detect + deps, NO prove/Docker (fast; good for a first look)")
     choice = _ask("choose 1/2/3/4/5", "2")
+    # Parallelism: the model stages read one file per call, so on a CLOUD model reading serially is the whole
+    # reason a 40-file notebook took ~80 min. Fan out on a cloud model (no-op/serial on a local one).
+    jobs = _model_jobs()
+    jflag = ["--jobs", str(jobs)] if jobs > 1 else []
+    if jobs > 1:
+        print(DIM(f"  (cloud model -> reading {jobs} files in parallel)"))
     if choice == "5":
         # Fast, no-Docker pass: notebook + falsifier (the detect verdicts) + the deterministic dep scan.
         # Skips the slow prove/patch stage entirely -- a quick first look / verification path.
         print(CYAN(f"\n  > wave eyes {target} --notes  ;  wave detect {target}  ;  wave deps {target}\n"))
-        _run_cli(["eyes", target, "--notes"])
-        _run_cli(["detect", target])
+        _run_cli(["eyes", target, "--notes"] + jflag)
+        _run_cli(["detect", target] + jflag)
         _run_cli(["deps", target])
         print(DIM(f"  detect verdicts -> {target}/wave_detect.jsonl   deps -> {target}/wave_deps.md"))
         return
@@ -200,7 +220,7 @@ def _cmd_sast(arg):
     else:
         # 2/3/4 are the one-and-done SAST run -- pipeline + deterministic scans + report. 3 reads every
         # file (best recall, costly); 4 also patches. Only 4 writes fixes.
-        argv = ["all", target]
+        argv = ["all", target] + jflag
         if choice == "3":
             argv.append("--all-files")
         elif choice == "4":

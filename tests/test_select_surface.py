@@ -115,3 +115,12 @@ def test_codemap_pins_respects_low_priority(tiny_repo):
     assert all(".test." not in f["file"] for f in pins_partial)
     pins_full = detector._codemap_pins(str(tiny_repo), include_low_priority=True)
     assert any(".test." in f["file"] for f in pins_full)
+
+
+# ---- shell parallelism: fan out on a cloud model, serial on a local one ----
+def test_model_jobs_cloud_vs_local(monkeypatch):
+    from agent.orchestrator import parallel, shell
+    monkeypatch.setattr(parallel, "is_cloud_model", lambda m: True)
+    assert shell._model_jobs(4) == 4
+    monkeypatch.setattr(parallel, "is_cloud_model", lambda m: False)
+    assert shell._model_jobs(4) == 1

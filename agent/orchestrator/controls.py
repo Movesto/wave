@@ -126,9 +126,14 @@ def _is_auth_route(r):
 
 
 def _cookie_sites(target, cap=50):
-    """Cookies set without httpOnly / secure / sameSite. Checks the set-cookie call line + a small window."""
+    """Cookies set without httpOnly / secure / sameSite. Checks the set-cookie call line + a small window.
+    Skips test/fixture files -- a cookie set inside a `.spec.ts` is test scaffolding, not a production
+    control gap (these were ~3/4 of the cookie-flags noise on OpenWA)."""
+    from .repomap import is_low_priority_path
     out = []
     for f in _code_files(target):
+        if is_low_priority_path(str(f)):
+            continue
         try:
             lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:

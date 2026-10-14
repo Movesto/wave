@@ -74,8 +74,12 @@ _ROUTE = re.compile(
 # Language-specific tables avoid the exec()/eval() ambiguity between Python (code-eval) and JS (child_process).
 _SINKS_COMMON = [
     # .find(<callback>) is Array.prototype.find, NOT a Mongo query -- require an object filter `{` (or
-    # $-operators / findOne / aggregate) so JS array methods don't false-pin as NoSQLi.
-    ("NoSQLi",   re.compile(r"\$where\b|\.findOne\s*\(|\.find\s*\(\s*\{|\$regex\b|\.aggregate\s*\(")),
+    # $-operators / aggregate) so JS array methods don't false-pin. A RELATIONAL ORM's `.findOne({ where:
+    # {id} })` / `.find({ select: ... })` (TypeORM/Prisma) is SQL, not NoSQL -- the `{ where|select|...` key
+    # tells it apart from a Mongo bare-object filter, so exclude it (OpenWA: 3 TypeORM findOne false-leads).
+    # A bare `.findOne(id)` string call is likewise not operator-injectable -> require the object `{`.
+    ("NoSQLi",   re.compile(r"\$where\b|\$regex\b|\$ne\b|\$gt\b|\$lt\b|\.aggregate\s*\("
+                            r"|\.find(?:One)?\s*\(\s*\{(?!\s*(?:where|select|relations|order|take|skip|include)\b)")),
     ("ssrf",     re.compile(r"\bfetch\s*\(|\baxios\b|\.urlopen\s*\(|requests\.(get|post|put|request|head)\b|urllib\.request|http\.(get|request)\s*\(|\bgot\s*\(")),
     # server-side TEMPLATE injection (a template ENGINE compiling user input) -- distinct from xss (raw
     # HTML output). Proven by evaluation ({{7*7}}->49), not by DOM render.

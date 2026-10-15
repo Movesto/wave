@@ -1,0 +1,9 @@
+{
+  "name": "nodesafe",
+  "version": "1.0.0",
+  "description": "SECURE control twin of nodevuln for the wave benchmark (flagged-but-defended Express sinks)",
+  "main": "server.js",
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

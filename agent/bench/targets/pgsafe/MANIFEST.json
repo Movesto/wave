@@ -1,0 +1,8 @@
+{
+  "name": "pgsafe",
+  "stack": "python/flask",
+  "safe": true,
+  "vulns": [],
+  "twin_of": "pgvuln",
+  "note": "Secure control twin of pgvuln (Postgres-backed). Same /search SQL sink, but PARAMETERIZED (bound value), so no injection. Verifies the DB-sidecar path AND that a bound query on a booted DB is not flagged. Any finding here is a FALSE POSITIVE."
+}

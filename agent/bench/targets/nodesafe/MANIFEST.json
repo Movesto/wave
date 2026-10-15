@@ -1,0 +1,8 @@
+{
+  "name": "nodesafe",
+  "stack": "node/express",
+  "safe": true,
+  "vulns": [],
+  "twin_of": "nodevuln",
+  "note": "Secure control twin of nodevuln: the same Express routes/sinks (eval/exec/fs/http/deser/reflect), each correctly defended (arithmetic-only eval, argv-array exec, basename path, host allowlist, JSON.parse, HTML escape). The detector flags them; every oracle must DEFER. Any finding here is a FALSE POSITIVE."
+}

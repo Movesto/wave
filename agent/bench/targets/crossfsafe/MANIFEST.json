@@ -1,0 +1,8 @@
+{
+  "name": "crossfsafe",
+  "stack": "python/flask",
+  "safe": true,
+  "vulns": [],
+  "twin_of": "crossfsql",
+  "note": "Secure control twin of crossfsql: the same cross-function shape (raw execute in a helper, user input in the caller), but the SQL is PARAMETERIZED across the boundary (bound value). Tests that cross-function taint does not false-positive on a bound query. Any finding here is a FALSE POSITIVE."
+}

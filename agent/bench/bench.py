@@ -12,14 +12,19 @@ from pathlib import Path
 
 from agent.orchestrator import state
 
+from . import stage
+
 BENCH = Path(__file__).resolve().parent / "targets"
 
 
 def run_target(tdir, fix=False):
+    # Read the ground truth from the ORIGINAL folder, then scan a MANIFEST-free staged copy so the model
+    # can't `cat MANIFEST.json` / a prior wave_findings.jsonl in the sandbox (answer-key leak, 1a->3).
     man = json.loads((tdir / "MANIFEST.json").read_text(encoding="utf-8"))
     truth = {v["cwe"] for v in man["vulns"]}
     t0 = time.time()
-    res = state.run_loop(str(tdir), fix=fix, dynamic=True)   # the bench measures the FULL capability (boot + all oracles)
+    with stage.staged(tdir) as appdir:                       # app code only; truth + outputs stay outside
+        res = state.run_loop(appdir, fix=fix, dynamic=True)  # the bench measures the FULL capability (boot + all oracles)
     dt = time.time() - t0
     findings = res["findings"]
     found = {f.candidate.cwe for f in findings}

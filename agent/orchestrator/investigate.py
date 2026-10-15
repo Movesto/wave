@@ -498,13 +498,18 @@ _WEB_READ_TOOL = {"type": "function", "function": {
 
 def _investigate_native(model, brief, *, image, mount, container, network, max_steps, step_timeout,
                         online=False, deps=None, dep_kind="py", install_budget=6, repro_expected=True,
-                        write_tag="", hit_marker="", sink_secret="", reach_id=""):
+                        write_tag="", hit_marker="", sink_secret="", reach_id="", sink_env=None,
+                        sink_hooks_dir=None):
     """Tool-calling loop over the model's NATIVE tools interface (structured tool_calls)."""
     import json as _json
     # The PER-RUN witness seal (oracle 1a): the instrumented sink hooks read this from $WAVE_WITNESS and
     # emit `WAVE-SINK-<KIND>#<secret>`; the model is never told it, so a cat'd hook / memorized / injected
     # BARE marker cannot forge a harness witness. Set on every sandbox run in this investigation.
+    # `sink_env` (NODE_OPTIONS/PYTHONPATH) AUTO-LOADS the instrumented hooks so a reached sink actually
+    # EMITS that sealed marker -- the piece that makes a green tape-grade confirm reachable from here.
     wit_env = {oracle.WITNESS_ENV: sink_secret} if sink_secret else None
+    if sink_env:
+        wit_env = {**(wit_env or {}), **sink_env}
     messages = [{"role": "system", "content": _NATIVE_SYS}, {"role": "user", "content": brief}]
     tools = [_RUN_TOOL, _WRITE_TOOL, _GREP_TOOL, _TAIL_TOOL, _CONCLUDE_TOOL]
     if deps:                                                # let the model fetch what THIS test needs
@@ -605,7 +610,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
             cmd = str(args.get("command", "")).strip()      # run_command
             res = execute(cmd, image=str(args.get("image") or image), mount=mount, container=container,
                           network=str(args.get("network") or network), timeout=step_timeout, deps=deps,
-                          env=wit_env)
+                          env=wit_env, hooks=sink_hooks_dir)
             ran += 1
             if _is_repro_attempt(cmd):                       # built/ran code, not just read it
                 repro_attempted = True
@@ -707,7 +712,7 @@ def _dep_kind_for(image):
 def investigate(model, brief, *, image="python:3.12-slim", mount=None, container=None,
                 network="none", max_steps=6, step_timeout=60, max_new_tokens=2000, online=False,
                 deps=None, install_budget=6, repro_expected=True, write_tag="", hit_marker="",
-                sink_secret="", reach_id="") -> Verdict:
+                sink_secret="", reach_id="", sink_env=None, sink_hooks_dir=None) -> Verdict:
     """Let the model investigate `brief` (a hypothesis + the relevant code) by running commands in a
     sandbox, until it concludes or the step budget is spent. `mount` binds the target dir into the box;
     `container` runs inside the app's own container instead. `online=True` adds the opt-in web_search /
@@ -728,7 +733,8 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
                             max_steps=max_steps, step_timeout=step_timeout, max_new_tokens=max_new_tokens,
                             online=online, deps=deps, install_budget=install_budget,
                             repro_expected=repro_expected, write_tag=write_tag, hit_marker=hit_marker,
-                            sink_secret=sink_secret, reach_id=reach_id)
+                            sink_secret=sink_secret, reach_id=reach_id, sink_env=sink_env,
+                            sink_hooks_dir=sink_hooks_dir)
     finally:
         if own_deps and deps:
             shutil.rmtree(deps, ignore_errors=True)
@@ -736,16 +742,19 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
 
 def _investigate(model, brief, *, image, mount, container, network, max_steps, step_timeout,
                  max_new_tokens, online, deps, install_budget, repro_expected=True, write_tag="", hit_marker="",
-                 sink_secret="", reach_id=""):
+                 sink_secret="", reach_id="", sink_env=None, sink_hooks_dir=None):
     dep_kind = _dep_kind_for(image)
     wit_env = {oracle.WITNESS_ENV: sink_secret} if sink_secret else None   # per-run sink-marker seal (1a)
+    if sink_env:                                           # auto-load the instrumented hooks in the sandbox
+        wit_env = {**(wit_env or {}), **sink_env}
     reach_tape = False                                      # the per-run reach tracer reached a SEALED sink (1b)
     if getattr(model, "supports_tools", False):
         return _investigate_native(model, brief, image=image, mount=mount, container=container,
                                    network=network, max_steps=max_steps, step_timeout=step_timeout,
                                    online=online, deps=deps, dep_kind=dep_kind, install_budget=install_budget,
                                    write_tag=write_tag, hit_marker=hit_marker, sink_secret=sink_secret,
-                                   reach_id=reach_id, repro_expected=repro_expected)
+                                   reach_id=reach_id, repro_expected=repro_expected, sink_env=sink_env,
+                                   sink_hooks_dir=sink_hooks_dir)
     inst_state = {"installs": 0, "budget": install_budget, "done": set()}
     trail = []
     ran = 0
@@ -780,7 +789,7 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
                 continue
             res = execute(cmd, image=str(act.get("image") or image), mount=mount, container=container,
                           network=str(act.get("network") or network), timeout=step_timeout, deps=deps,
-                          env=wit_env)
+                          env=wit_env, hooks=sink_hooks_dir)
             ran += 1
             if _is_repro_attempt(cmd):
                 repro_attempted = True

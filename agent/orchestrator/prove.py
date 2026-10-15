@@ -25,7 +25,7 @@ import secrets
 import shutil
 from pathlib import Path
 
-from . import briefs, codemap, oracle, reachability, recorder, repro, routes, rung1, taint, xtaint
+from . import briefs, codemap, oracle, provision, reachability, recorder, repro, routes, rung1, taint, xtaint
 from . import investigate as invmod
 from .models import Candidate
 
@@ -135,13 +135,18 @@ def _said_witnessed(text):
 
 
 def _reach_proof(reach_tape, reach_witnessed, reach):
-    """Half-B honesty, graded FROM THE TAPE (remaining-work 1b). A reach counts as 'witnessed' ONLY when the
-    HARNESS saw the per-run reach tracer arrive at a SEALED sink (`reach_tape`) along a real reach path --
-    tape-grade, not the model's word. The model's own STRUCTURED `reach_witnessed` flag is NO LONGER
-    authoritative (it is the model grading itself, as fakeable as the prose that was already dropped in
-    5e841ce): with a real reach path it yields 'claimed' -- a visible, SECOND-CLASS signal the gate does NOT
-    promote. 'inferred' = a static path exists but nothing drove it; 'none' = no entry path."""
-    if bool(reach_tape) and reach is not None:
+    """Half-B honesty, graded FROM THE TAPE (remaining-work 1b). A reach counts as 'witnessed' when the
+    HARNESS saw the per-run reach tracer arrive at a SEALED sink (`reach_tape`) -- tape-grade, not the
+    model's word. The tape is EMPIRICAL and self-validating (the attacker's tracer is literally logged at a
+    real instrumented sink), so it does NOT depend on the STATIC `reach` tuple: on JS the route->handler
+    bind is routinely unresolved (`reach is None`) yet the model still drove the real chain, and gating the
+    tape on that static inference threw away genuine proof (nv2 CWE-78: reach_tape True but downgraded).
+    The model's own STRUCTURED `reach_witnessed` flag is NOT authoritative (it is the model grading itself,
+    as fakeable as the prose dropped in 5e841ce): with a real static path it yields 'claimed' -- a visible,
+    SECOND-CLASS signal the gate does NOT promote. 'inferred' = a static path exists but nothing drove it;
+    'none' = no tape and no entry path. (Remote-vs-local exploitability stays the gate's job: driven_trust /
+    module-context still downgrade a tape-witnessed reach from a local/CLI or test/internal entry.)"""
+    if bool(reach_tape):
         return "witnessed"
     if bool(reach_witnessed) and reach is not None:
         return "claimed"
@@ -242,6 +247,14 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     step_to = (300 if mode in briefs.COMPILED_MODES               # build/fetch a standalone repro
                else (120 if mode in ("render", "asan")
                      else (90 if briefs._is_js(c.file) else 45)))
+    # AUTO-LOAD the instrumented sink hooks in the investigate sandbox (NODE_OPTIONS/PYTHONPATH): when the
+    # model's repro drives the real chain and a payload reaches a sink, the hook EMITS the sealed marker
+    # (and, carrying reach_id, the reach tape) -> a green tape-grade confirm is reachable from here, not only
+    # from a whole-app `--dynamic`/bench boot. Best-effort: a hiccup just leaves investigate as it was.
+    try:
+        sink_env, hooks_dir = provision.sink_hook_env(target, briefs._is_js(c.file))
+    except Exception:
+        sink_env, hooks_dir = {}, None
     try:
         # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
         # controlled egress point when online, not blanket container network access.
@@ -250,9 +263,12 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
                                                         reach_id=reach_id),
                                image=img, mount=target, network="none", max_steps=max_steps,
                                step_timeout=step_to, online=online, write_tag=tag, hit_marker=hit,
-                               sink_secret=sink_secret, reach_id=reach_id)
+                               sink_secret=sink_secret, reach_id=reach_id, sink_env=sink_env,
+                               sink_hooks_dir=hooks_dir)
     finally:
         repro.remove(target, tag)
+        if hooks_dir:
+            shutil.rmtree(hooks_dir, ignore_errors=True)   # throwaway hooks dir -- never left in the target
     verdict = v.verdict
     # Half-B honesty (A1): did the model witness the reach path, or only exercise the sink? Read its own
     # stated conclusion; default to 'inferred' (a path exists but was not driven) / 'none' (no entry path).

@@ -430,6 +430,58 @@ def _provision_js(prof, hooks, host_port):
     return RunningTarget(prof, [out], build_svc, host), [out]
 
 
+INVEST_HOOK_MOUNT = "/wave_hooks"   # the hooks dir is bind-mounted here (OUTSIDE the scanned tree)
+
+
+def _invest_deps_text(target, lang):
+    """Best-effort dependency/import text for sink-hook selection in the investigate sandbox (no compose
+    needed -- unlike profile(), this works on a plain repo the way a /sast scan sees it)."""
+    root = Path(target)
+    names = ["package.json"] if lang == "js" else ["requirements.txt", "pyproject.toml", "setup.py", "Pipfile"]
+    parts = []
+    for n in names:
+        p = root / n
+        if p.exists():
+            try:
+                parts.append(p.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                pass
+    return "\n".join(parts)
+
+
+def sink_hook_env(target, is_js):
+    """Write the matching instrumented sink hooks to a THROWAWAY dir and return (env, hooks_dir) so the
+    investigate sandbox AUTO-LOADS them -- when the model's own repro (`node server.js`, `python app.py`, a
+    `node -e` driver) drives the real chain and a payload reaches a sink, the hook fires the SEALED
+    `WAVE-SINK-*` marker (and, carrying reach_id, the reach tape). THIS is what makes a green tape-grade
+    confirm reachable from the investigate path (and so from `/sast`), not only from a whole-app
+    `--dynamic`/bench boot.
+
+    The hooks live in their OWN dir, bind-mounted at `INVEST_HOOK_MOUNT` -- NOT written into the target, so
+    no later stage (variant hunt / reconcile / re-scan) ever mistakes wave's own instrumentation for target
+    source, and nothing is left behind in a customer repo. JS: `NODE_OPTIONS=--require <hook>` (execute adds
+    the app's node_modules to NODE_PATH so driver hooks like node-serialize/pg still resolve). PY: a
+    `sitecustomize.py` on `PYTHONPATH` imports each hook (entrypoint-agnostic; app modules import from the
+    image's site-packages). The hook SOURCE reads the per-run secret from `$WAVE_WITNESS` at runtime (never
+    baked in). Returns ({}, None) when no hook matches the stack (investigate proceeds as before). Caller
+    owns the returned dir and removes it when the investigation is done."""
+    import tempfile
+
+    lang = "js" if is_js else "py"
+    hooks = registry.select(_invest_deps_text(target, lang), lang)
+    if not hooks:
+        return {}, None
+    hdir = Path(tempfile.mkdtemp(prefix="wave-hooks-"))
+    for h in hooks:
+        (hdir / h.filename).write_text(h.code, encoding="utf-8")
+    m = INVEST_HOOK_MOUNT
+    if lang == "js":
+        return {"NODE_OPTIONS": " ".join(f"--require {m}/{h.filename}" for h in hooks)}, str(hdir)
+    imports = "\n".join(f"    import {h.filename[:-3]}" for h in hooks)
+    (hdir / "sitecustomize.py").write_text(_SITECUSTOMIZE.format(imports=imports or "    pass"), encoding="utf-8")
+    return {"PYTHONPATH": m}, str(hdir)
+
+
 def compose_env():
     """docker-compose env with common defaults so a required-var compose (`${POSTGRES_PASSWORD:?}`)
     doesn't fail variable substitution (used by both boot and per-piece micro-exec)."""

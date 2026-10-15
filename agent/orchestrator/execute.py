@@ -36,6 +36,10 @@ _INSTALL_SEM = threading.Semaphore(max(1, int(os.environ.get("WAVE_INSTALL_JOBS"
 # execution can still import them. Keeps "fetch a dep" (egress) separate from "run the exploit" (no egress).
 _DEPS_MOUNT = "/wave_deps"
 
+# Where the instrumented SEALED sink hooks are bind-mounted (read-only, OUTSIDE the mounted target tree so
+# no scan stage ever mistakes them for target source). Must match provision.INVEST_HOOK_MOUNT.
+_HOOKS_MOUNT = "/wave_hooks"
+
 # A conservative package-name allow-list: PEP 508-ish name + optional extras + optional version pin, and
 # npm's @scope/name. No spaces, quotes, shell metacharacters, flags, or VCS/url installs -- so a model
 # request can never smuggle `-e git+...`, `--find-links`, or `; rm -rf` into the install shell command.
@@ -88,7 +92,8 @@ def _docker_mount(host_path: str) -> str:
 def execute(command: str, *, stdin: str | None = None, image: str = "python:3.12-slim",
             mount: str | None = None, workdir: str = "/work", timeout: int = 60,
             network: str = "none", env: dict | None = None, memory: str = "512m",
-            cpus: str = "1", container: str | None = None, deps: str | None = None) -> ExecResult:
+            cpus: str = "1", container: str | None = None, deps: str | None = None,
+            hooks: str | None = None) -> ExecResult:
     """Run `command` in a sandbox and return the result.
 
     - `image`: the runtime to run in (python/node/gcc/... -- the model picks what its command needs).
@@ -117,10 +122,23 @@ def execute(command: str, *, stdin: str | None = None, image: str = "python:3.12
         if mount:
             cmd += ["-v", _docker_mount(mount) + ":" + workdir]
         eff_env = dict(env or {})
+        py_paths, node_paths = [], []
+        if hooks:                                            # instrumented SEALED sink hooks (read-only, outside /work)
+            cmd += ["-v", _docker_mount(hooks) + ":" + _HOOKS_MOUNT + ":ro"]
+            # a driver hook (node-serialize/pg) requires the APP's modules; from /wave_hooks node won't walk
+            # into the mounted tree, so put the app's node_modules on NODE_PATH as the fallback resolver.
+            if mount:
+                node_paths.append(workdir + "/node_modules")
         if deps:                                             # installed packages -> importable, no egress
             cmd += ["-v", _docker_mount(deps) + ":" + _DEPS_MOUNT]
-            eff_env.setdefault("PYTHONPATH", _DEPS_MOUNT)
-            eff_env.setdefault("NODE_PATH", _DEPS_MOUNT + "/node_modules")
+            py_paths.append(_DEPS_MOUNT)
+            node_paths.append(_DEPS_MOUNT + "/node_modules")
+        # MERGE onto any caller value (e.g. PYTHONPATH=/wave_hooks from sink_hook_env) -- keep BOTH so the
+        # hooks load AND installed deps import. ':' is the container (Linux) separator, not host os.pathsep.
+        for key, adds in (("PYTHONPATH", py_paths), ("NODE_PATH", node_paths)):
+            if adds:
+                cur = eff_env.get(key)
+                eff_env[key] = ":".join(([cur] if cur else []) + adds)
         for k, v in eff_env.items():
             cmd += ["-e", f"{k}={v}"]
         cmd += [image, "sh", "-c", command]

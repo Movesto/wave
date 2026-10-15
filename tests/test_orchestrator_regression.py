@@ -2512,12 +2512,14 @@ def test_desktop_is_scoped_per_module_not_repo_global(tmp_path):
 # ==================== Half-B honesty: prose is no longer a witnessed authority (sast-plan 1b) ========
 
 def test_reach_proof_graded_from_the_tape_not_the_model_flag():
-    # 1b: 'witnessed' requires the HARNESS TAPE signal (the per-run reach tracer reached a sealed sink) AND a
-    # real reach path -- the model's own reach_witnessed flag is no longer an authority.
+    # 1b: 'witnessed' is the HARNESS TAPE signal (the per-run reach tracer reached a sealed sink). The tape is
+    # EMPIRICAL and self-validating, so it does NOT require the static reach tuple -- on JS the route->handler
+    # bind is routinely unresolved (reach None) while the model still drove the real chain (nv2 CWE-78).
     path = "entry->sink path"
     assert prove._reach_proof(True, False, path) == "witnessed"   # tape fired -> tape-grade, even w/o the flag
     assert prove._reach_proof(True, True, path) == "witnessed"
-    assert prove._reach_proof(True, True, None) == "none"         # tape but no entry path -> nothing to witness
+    assert prove._reach_proof(True, False, None) == "witnessed"   # tape fired but static entry unresolved -> STILL witnessed
+    assert prove._reach_proof(True, True, None) == "witnessed"
     # the model's structured flag ALONE no longer reaches 'witnessed' -- it is a visible 'claimed' that the
     # gate does NOT promote (closes the self-grading hole the plan flagged).
     assert prove._reach_proof(False, True, path) == "claimed"

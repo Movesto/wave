@@ -134,14 +134,18 @@ def _said_witnessed(text):
     return any(p in t for p in _DRIVE_PHRASES)
 
 
-def _reach_proof(reach_witnessed, reach):
-    """Half-B honesty. A reach counts as 'witnessed' ONLY on the model's STRUCTURED reach_witnessed flag
-    AND a real reach path. The model's PROSE (_said_witnessed) is NO LONGER authoritative: phrases like
-    'test client' / 'issued a get' / 'via the route' trip on almost any HTTP write-up, so prose flipped
-    Half-B to witnessed far too easily -- a fakeable proof (sast-improvement plan 1b). Prose is kept only
-    as a diagnostic note. 'inferred' = a static path exists but was not driven; 'none' = no entry path."""
-    witnessed = bool(reach_witnessed) and reach is not None
-    return "witnessed" if witnessed else ("inferred" if reach else "none")
+def _reach_proof(reach_tape, reach_witnessed, reach):
+    """Half-B honesty, graded FROM THE TAPE (remaining-work 1b). A reach counts as 'witnessed' ONLY when the
+    HARNESS saw the per-run reach tracer arrive at a SEALED sink (`reach_tape`) along a real reach path --
+    tape-grade, not the model's word. The model's own STRUCTURED `reach_witnessed` flag is NO LONGER
+    authoritative (it is the model grading itself, as fakeable as the prose that was already dropped in
+    5e841ce): with a real reach path it yields 'claimed' -- a visible, SECOND-CLASS signal the gate does NOT
+    promote. 'inferred' = a static path exists but nothing drove it; 'none' = no entry path."""
+    if bool(reach_tape) and reach is not None:
+        return "witnessed"
+    if bool(reach_witnessed) and reach is not None:
+        return "claimed"
+    return "inferred" if reach else "none"
 
 
 def _reach_of(cmap, c):
@@ -202,6 +206,9 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     sink_secret = secrets.token_hex(8)                        # PER-RUN SEAL for harness sink markers (1a): the
     # instrumented hooks read it from $WAVE_WITNESS and emit WAVE-SINK-<KIND>#<secret>; the model is NEVER
     # told it (unlike `hit`), so a cat'd/memorized/injected BARE WAVE-SINK-* can't forge a harness witness.
+    reach_id = "WAVEREACH" + secrets.token_hex(4)             # PER-RUN Half-B tape tracer (1b): the model is told
+    # to carry it in the entry payload; reach is WITNESSED only when it arrives at a SEALED sink (harness-graded,
+    # not the model's self-assessed reach_witnessed flag). Alnum so it survives URL/shell/JSON unmangled.
     mode = briefs._proof_mode(c)                             # sanitizer/ssti/protopoll/deser/render/call
     entry_fn, rpath = _reach_of(cmap, c)                     # untrusted entry + path (Half B)
     reach = (getattr(entry_fn, "name", ""), rpath) if entry_fn is not None else None
@@ -239,10 +246,11 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
         # controlled egress point when online, not blanket container network access.
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode,
-                                                        reach=reach, route=route, flow=xflow, hit_marker=hit),
+                                                        reach=reach, route=route, flow=xflow, hit_marker=hit,
+                                                        reach_id=reach_id),
                                image=img, mount=target, network="none", max_steps=max_steps,
                                step_timeout=step_to, online=online, write_tag=tag, hit_marker=hit,
-                               sink_secret=sink_secret)
+                               sink_secret=sink_secret, reach_id=reach_id)
     finally:
         repro.remove(target, tag)
     verdict = v.verdict
@@ -253,8 +261,8 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     # cmd/sqli/path did exactly this and got falsely downgraded by the static value-taint gate).
     meth = (getattr(v, "methodology", "") or "") + " " + (v.why or "")
     reach_in_prose = _said_witnessed(meth)                # DIAGNOSTIC only -- not authoritative (gameable)
-    reach_proof = _reach_proof(getattr(v, "reach_witnessed", False), reach)
-    said_witnessed = reach_proof == "witnessed"
+    reach_proof = _reach_proof(getattr(v, "reach_tape", False), getattr(v, "reach_witnessed", False), reach)
+    said_witnessed = reach_proof == "witnessed"           # TAPE-grade only now (1b); 'claimed' does NOT promote
     driven_trust = reachability.entry_trust(entry_fn) if (said_witnessed and entry_fn is not None) else None
     # DIFFERENTIAL (IDOR/access-control): a witnessed boundary crossing is a business-logic JUDGMENT anchored
     # to an observed state change -- always human-review, never a tool-witnessed `confirmed` (design + §10.7).
@@ -268,7 +276,8 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     hw, hmarker, htier = oracle.graded(cls_name, markers, cwe=getattr(c, "cwe", ""))
     return {"verdict": verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
             "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
-            "reach_proof": reach_proof,                       # witnessed | inferred | none (Half-B honesty)
+            "reach_proof": reach_proof,                       # witnessed(tape) | claimed(model) | inferred | none
+            "reach_tape": bool(getattr(v, "reach_tape", False)),   # HARNESS saw the reach tracer at a sealed sink (1b)
             "reach_in_prose": reach_in_prose,                 # model CLAIMED driving it in prose (diagnostic only)
             "driven_trust": driven_trust,                     # trust tier of the entry the model DROVE from
             "witness": sorted(markers), "harness_witnessed": hw, "harness_marker": hmarker,
@@ -349,7 +358,8 @@ def _apply_gate(rec, c, cmap, tm=None):
     # reach inside test/CLI/browser code is still not a production surface) and the LOCAL-vs-remote nature of
     # the entry we drove from (a witnessed reach from a CLI main() proves only LOCAL exploitability).
     if rec.get("reach_proof") == "witnessed":
-        rec["reachability"] = "reach WITNESSED: attacker value driven from the untrusted entry to the sink"
+        rec["reachability"] = ("reach WITNESSED from the tape: the per-run reach tracer arrived at a sealed "
+                               "sink (harness-graded, not the model's self-assessment)")
         if rec.get("driven_trust") == "local":               # witnessed, but only via a LOCAL/CLI entry
             rec["verdict"] = "anomalous_state"
             rec["why"] = ("[local-entry] the reach was witnessed but only from a LOCAL/CLI entry (not a remote "

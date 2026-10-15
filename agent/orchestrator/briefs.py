@@ -384,7 +384,19 @@ def _differential_brief(candidate, target, rel, code, fn):
         f"handler to drive it, conclude 'blocked'.")
 
 
-def _reach_block(reach):
+def _reach_tracer_line(reach_id):
+    """Half-B FROM THE TAPE (1b): instruct the model to carry a PER-RUN tracer in the attacker value at the
+    entry, so the harness -- not the model -- grades the reach: it counts as witnessed only when this tracer
+    shows up at a (sealed) sink. Empty reach_id -> nothing (the model's self-assessed flag stays the signal)."""
+    if not reach_id:
+        return ""
+    return (f" To let the HARNESS verify the reach, embed the exact tracer `{reach_id}` INSIDE your attacker "
+            f"payload at the entry (e.g. append it to the injected string / use it as the param value), so if "
+            f"the whole path runs it arrives at the sink -- the harness witnesses the reach from the tape when "
+            f"`{reach_id}` reaches the instrumented sink.")
+
+
+def _reach_block(reach, reach_id=""):
     """Half-B instruction (precision_and_measurement_plan.md): don't stop at proving the SINK fires --
     drive the attacker value IN AT THE UNTRUSTED ENTRY and let it flow down the real chain, so the PATH
     (attacker-reachability) is WITNESSED, not just inferred from the call graph. `reach` = (entry, path)."""
@@ -398,11 +410,12 @@ def _reach_block(reach):
         f"reconstruct this chain and feed your attacker payload IN AT `{entry}`, letting it flow down to "
         f"the sink -- that witnesses an attacker can actually reach it. If a link won't run standalone "
         f"(needs a value/import from elsewhere), pull the real source it needs into your script until the "
-        f"chain runs. When you conclude, set `reach_witnessed: true` ONLY if you drove from `{entry}` and saw "
-        f"the value reach the sink (leave it false if you only exercised the sink function in isolation).")
+        f"chain runs." + _reach_tracer_line(reach_id) + f" When you conclude, set `reach_witnessed: true` "
+        f"ONLY if you drove from `{entry}` and saw the value reach the sink (leave it false if you only "
+        f"exercised the sink function in isolation).")
 
 
-def _route_block(route):
+def _route_block(route, reach_id=""):
     """Half-B via the REAL HTTP route (framework-aware). `route` = (method, path, framework, recipe). Drive an
     actual request to the route with the framework's in-process test client -- NOT a positional handler call
     (handlers read the request object, not positional args -- the pyvuln Flask misfire)."""
@@ -416,8 +429,9 @@ def _route_block(route):
     if recipe:
         body += "\n  " + recipe
     body += (f"\nPut your attacker payload in the relevant query param / path segment / body field, run it in "
-             f"the sandbox, and observe the sink fire. If you drove the value to the sink through this route, "
-             f"set `reach_witnessed: true` when you conclude (else leave it false).")
+             f"the sandbox, and observe the sink fire." + _reach_tracer_line(reach_id) + f" If you drove the "
+             f"value to the sink through this route, set `reach_witnessed: true` when you conclude (else leave "
+             f"it false).")
     return body
 
 
@@ -431,15 +445,18 @@ def _flow_block(flow):
 
 
 def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None, flow=None,
-               hit_marker=""):
+               hit_marker="", reach_id=""):
     """Build the proof brief. `hit_marker` (a PER-RUN random token) replaces the literal `wave_HIT` witness
     everywhere in the brief, so the exec-witness the model plants is unpredictable -- a memorized or
-    prompt-injected bare `wave_HIT` can no longer satisfy the harness (proof-integrity hardening)."""
-    b = _build_brief(candidate, target, reason, scaffold=scaffold, mode=mode, reach=reach, route=route, flow=flow)
+    prompt-injected bare `wave_HIT` can no longer satisfy the harness (proof-integrity hardening). `reach_id`
+    (also per-run) is the Half-B tape tracer the model carries in the entry payload (1b)."""
+    b = _build_brief(candidate, target, reason, scaffold=scaffold, mode=mode, reach=reach, route=route,
+                     flow=flow, reach_id=reach_id)
     return b.replace("wave_HIT", hit_marker) if hit_marker else b
 
 
-def _build_brief(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None, flow=None):
+def _build_brief(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None, flow=None,
+                 reach_id=""):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
     fn = str(candidate.unit).split("(")[0].strip()
@@ -577,4 +594,4 @@ def _build_brief(candidate, target, reason, scaffold=None, mode="call", reach=No
             f"A quick automatic check was inconclusive ({reason}).\n\nCode around the sink:\n{code}\n\n"
             f"The whole repository is mounted at your working directory (/work). Prove or refute whether "
             f"this is a REAL, exploitable {candidate.cwe} by running code.{extra}"
-            f"{_route_block(route) if route else _reach_block(reach)}{_flow_block(flow)}")
+            f"{_route_block(route, reach_id) if route else _reach_block(reach, reach_id)}{_flow_block(flow)}")

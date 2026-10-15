@@ -498,7 +498,7 @@ _WEB_READ_TOOL = {"type": "function", "function": {
 
 def _investigate_native(model, brief, *, image, mount, container, network, max_steps, step_timeout,
                         online=False, deps=None, dep_kind="py", install_budget=6, repro_expected=True,
-                        write_tag="", hit_marker="", sink_secret=""):
+                        write_tag="", hit_marker="", sink_secret="", reach_id=""):
     """Tool-calling loop over the model's NATIVE tools interface (structured tool_calls)."""
     import json as _json
     # The PER-RUN witness seal (oracle 1a): the instrumented sink hooks read this from $WAVE_WITNESS and
@@ -515,6 +515,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
     trail, ran = [], 0
     run_log = ""                                            # the LAST run's full output (grep/tail read it)
     witnessed = set()                                       # harness-planted markers seen across ALL runs (oracle)
+    reach_tape = False                                      # the per-run reach tracer reached a SEALED sink (1b)
     saw_prov = saw_real = False                             # provisioning-failure vs. real target execution
     seen_cmds = set()                                       # to nudge a model re-running the same command
     believed_nudged = False                                 # one-time: a belief must cite evidence
@@ -572,7 +573,8 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 print(f"[investigate:native] concluded: {verdict} after {ran} run(s)", flush=True)
                 return Verdict(verdict, why, evidence, str(args.get("cwe", "")), ran, trail,
                                transcript=list(messages), methodology=str(args.get("methodology", "")),
-                               reach_witnessed=bool(args.get("reach_witnessed")), witness=sorted(witnessed))
+                               reach_witnessed=bool(args.get("reach_witnessed")), reach_tape=reach_tape,
+                               witness=sorted(witnessed))
             if name == "grep_output":
                 content = _grep(run_log, str(args.get("pattern", "")), int(args.get("lines") or 10))
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
@@ -612,6 +614,7 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 recon_streak += 1                            # consecutive read-only (cat/sed/grep) commands
             run_log = _combined(res)                         # full output stays here, not in the prompt
             witnessed |= oracle.scan(run_log, sink_secret)   # HARNESS reads its own SEALED markers (not the model's word)
+            reach_tape = reach_tape or oracle.reach_in_sink(run_log, sink_secret, reach_id)  # Half-B from the tape (1b)
             if hit_marker and hit_marker in run_log:         # the PER-RUN random exec marker actually fired
                 witnessed.add(hit_marker)
             prov = _provision_signal(run_log)
@@ -649,6 +652,8 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
     if fv is not None:
         fv.trail = trail
         fv.transcript = list(messages)
+        fv.reach_tape = reach_tape
+        fv.witness = sorted(witnessed)
         print(f"[investigate:native] forced conclusion: {fv.verdict} after {ran} run(s)", flush=True)
         return fv
     verdict = "blocked" if (saw_prov and not saw_real) or ran == 0 else "believed"
@@ -665,7 +670,8 @@ class Verdict:
     trail: list = field(default_factory=list)   # [(command, result_summary)]
     transcript: list = field(default_factory=list)   # the FULL model conversation (for the trace-logger)
     methodology: str = ""              # the model's documented approach: method used, why, alternatives tried
-    reach_witnessed: bool = False      # the model drove from the untrusted ENTRY to the sink (Half B witnessed)
+    reach_witnessed: bool = False      # the model's OWN claim it drove entry->sink (Half B; self-assessed)
+    reach_tape: bool = False           # HARNESS saw the per-run reach tracer arrive at a SEALED sink (1b)
     witness: list = field(default_factory=list)   # harness-planted markers the HARNESS saw in the sandbox output
 
 
@@ -701,7 +707,7 @@ def _dep_kind_for(image):
 def investigate(model, brief, *, image="python:3.12-slim", mount=None, container=None,
                 network="none", max_steps=6, step_timeout=60, max_new_tokens=2000, online=False,
                 deps=None, install_budget=6, repro_expected=True, write_tag="", hit_marker="",
-                sink_secret="") -> Verdict:
+                sink_secret="", reach_id="") -> Verdict:
     """Let the model investigate `brief` (a hypothesis + the relevant code) by running commands in a
     sandbox, until it concludes or the step budget is spent. `mount` binds the target dir into the box;
     `container` runs inside the app's own container instead. `online=True` adds the opt-in web_search /
@@ -722,7 +728,7 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
                             max_steps=max_steps, step_timeout=step_timeout, max_new_tokens=max_new_tokens,
                             online=online, deps=deps, install_budget=install_budget,
                             repro_expected=repro_expected, write_tag=write_tag, hit_marker=hit_marker,
-                            sink_secret=sink_secret)
+                            sink_secret=sink_secret, reach_id=reach_id)
     finally:
         if own_deps and deps:
             shutil.rmtree(deps, ignore_errors=True)
@@ -730,15 +736,16 @@ def investigate(model, brief, *, image="python:3.12-slim", mount=None, container
 
 def _investigate(model, brief, *, image, mount, container, network, max_steps, step_timeout,
                  max_new_tokens, online, deps, install_budget, repro_expected=True, write_tag="", hit_marker="",
-                 sink_secret=""):
+                 sink_secret="", reach_id=""):
     dep_kind = _dep_kind_for(image)
     wit_env = {oracle.WITNESS_ENV: sink_secret} if sink_secret else None   # per-run sink-marker seal (1a)
+    reach_tape = False                                      # the per-run reach tracer reached a SEALED sink (1b)
     if getattr(model, "supports_tools", False):
         return _investigate_native(model, brief, image=image, mount=mount, container=container,
                                    network=network, max_steps=max_steps, step_timeout=step_timeout,
                                    online=online, deps=deps, dep_kind=dep_kind, install_budget=install_budget,
                                    write_tag=write_tag, hit_marker=hit_marker, sink_secret=sink_secret,
-                                   repro_expected=repro_expected)
+                                   reach_id=reach_id, repro_expected=repro_expected)
     inst_state = {"installs": 0, "budget": install_budget, "done": set()}
     trail = []
     ran = 0
@@ -779,6 +786,7 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
                 repro_attempted = True
             _out = _combined(res)
             witnessed |= oracle.scan(_out, sink_secret)      # HARNESS reads its own SEALED markers (not the model's word)
+            reach_tape = reach_tape or oracle.reach_in_sink(_out, sink_secret, reach_id)   # Half-B from the tape (1b)
             if hit_marker and hit_marker in _out:            # the PER-RUN random exec marker actually fired
                 witnessed.add(hit_marker)
             prov = _provision_signal(_out)
@@ -828,7 +836,8 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
             print(f"[investigate] concluded: {verdict} after {ran} run(s)", flush=True)
             return Verdict(verdict, why, str(act.get("evidence", "")), str(act.get("cwe", "")), ran, trail,
                            methodology=str(act.get("methodology", "")),
-                           reach_witnessed=bool(act.get("reach_witnessed")), witness=sorted(witnessed))
+                           reach_witnessed=bool(act.get("reach_witnessed")), reach_tape=reach_tape,
+                           witness=sorted(witnessed))
         else:
             trail.append((f"(unknown action {kind!r})", "expected run or conclude"))
     verdict = "blocked" if (saw_prov and not saw_real) or ran == 0 else "believed"

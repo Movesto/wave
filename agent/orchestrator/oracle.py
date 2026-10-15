@@ -96,6 +96,21 @@ def scan(text, secret=""):
     return found
 
 
+def reach_in_sink(text, secret, reach_id):
+    """Half-B FROM THE TAPE (remaining-work 1b): did the per-run reach tracer `reach_id` -- which the model
+    was told to carry in its attacker payload AT THE UNTRUSTED ENTRY -- actually arrive AT a sink? True only
+    when a SEALED sink-marker line (1a: emitted by the real instrumented hook, carrying this run's secret)
+    ALSO contains the tracer. That proves the attacker value drove the whole path entry -> sink, graded by
+    the HARNESS -- not the model's self-assessed `reach_witnessed` boolean, and not a line the model could
+    forge (it knows neither the secret nor how to make the real hook fire without a real reach)."""
+    if not (secret and reach_id):
+        return False
+    for line in (text or "").splitlines():
+        if reach_id in line and any(seal(tok, secret) in line for tok in _SINK_TOKENS):
+            return True
+    return False
+
+
 def graded(cls, markers, cwe=""):
     """Did a class-appropriate harness marker fire? `markers` = the token set investigate accumulated
     (oracle.scan over every run). Returns (witnessed, marker, tier):

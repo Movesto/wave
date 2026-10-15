@@ -94,3 +94,35 @@ def test_prove_generates_and_threads_sink_secret():
     src = inspect.getsource(prove._prove_one)
     assert "sink_secret" in src and "secrets.token_hex" in src
     assert "sink_secret=sink_secret" in src           # actually handed to investigate()
+
+
+# --- Half-B from the tape (1b) ------------------------------------------------------------------------
+def test_reach_in_sink_requires_sealed_marker_and_tracer():
+    S, R = "aa11bb22", "WAVEREACHdead"
+    # the tracer arriving at a SEALED sink line -> reach witnessed by the tape
+    assert oracle.reach_in_sink(f"WAVE-SINK-SQL#{S}:: SELECT ... '{R}' ...", S, R) is True
+    # tracer present but the sink line is BARE (cat'd hook / unsealed) -> NOT witnessed
+    assert oracle.reach_in_sink(f"WAVE-SINK-SQL:: ... {R} ...", S, R) is False
+    # sealed sink fired but WITHOUT the tracer (sink proven, reach not driven from the entry) -> NOT witnessed
+    assert oracle.reach_in_sink(f"WAVE-SINK-SQL#{S}:: SELECT 1", S, R) is False
+    # tracer and a sealed marker on DIFFERENT lines -> NOT witnessed (must co-occur at the sink)
+    assert oracle.reach_in_sink(f"echo {R}\nWAVE-SINK-SQL#{S}:: SELECT 1", S, R) is False
+    # no secret / no tracer -> never witnessed
+    assert oracle.reach_in_sink(f"WAVE-SINK-SQL:: {R}", "", R) is False
+    assert oracle.reach_in_sink(f"WAVE-SINK-SQL#{S}::", S, "") is False
+
+
+def test_reach_tracer_in_brief_when_reach_id_given():
+    from agent.orchestrator import briefs
+    reached = briefs._reach_block(("handler", ["entry", "handler", "sink"]), reach_id="WAVEREACHbeef")
+    assert "WAVEREACHbeef" in reached and "reach_witnessed" in reached
+    # no reach_id -> no tracer line (back-compat: the model's self-assessed flag stays the only signal)
+    assert "WAVEREACH" not in briefs._reach_block(("handler", ["entry", "sink"]))
+    routed = briefs._route_block(("GET", "/x", "flask", "client.get('/x')"), reach_id="WAVEREACHbeef")
+    assert "WAVEREACHbeef" in routed
+
+
+def test_verdict_carries_reach_tape_default_false():
+    from agent.orchestrator import investigate as inv
+    assert inv.Verdict("confirmed", "why").reach_tape is False
+    assert inv.Verdict("confirmed", "why", reach_tape=True).reach_tape is True

@@ -2511,17 +2511,23 @@ def test_desktop_is_scoped_per_module_not_repo_global(tmp_path):
 
 # ==================== Half-B honesty: prose is no longer a witnessed authority (sast-plan 1b) ========
 
-def test_reach_proof_requires_structured_flag_not_prose():
-    # 'witnessed' requires the STRUCTURED reach_witnessed flag AND a real reach path.
-    assert prove._reach_proof(True, "entry->sink path") == "witnessed"
-    assert prove._reach_proof(True, None) == "none"               # flag but no entry path -> not witnessed
-    assert prove._reach_proof(False, "entry->sink path") == "inferred"   # path exists, not driven
-    assert prove._reach_proof(False, None) == "none"
-    # the old prose signal still fires as a diagnostic, but it must NOT feed the verdict: a prose-only run
-    # (reach_witnessed=False) stays 'inferred', never 'witnessed' -- closing the fakeable-proof hole.
+def test_reach_proof_graded_from_the_tape_not_the_model_flag():
+    # 1b: 'witnessed' requires the HARNESS TAPE signal (the per-run reach tracer reached a sealed sink) AND a
+    # real reach path -- the model's own reach_witnessed flag is no longer an authority.
+    path = "entry->sink path"
+    assert prove._reach_proof(True, False, path) == "witnessed"   # tape fired -> tape-grade, even w/o the flag
+    assert prove._reach_proof(True, True, path) == "witnessed"
+    assert prove._reach_proof(True, True, None) == "none"         # tape but no entry path -> nothing to witness
+    # the model's structured flag ALONE no longer reaches 'witnessed' -- it is a visible 'claimed' that the
+    # gate does NOT promote (closes the self-grading hole the plan flagged).
+    assert prove._reach_proof(False, True, path) == "claimed"
+    assert prove._reach_proof(False, False, path) == "inferred"   # path exists, nothing drove it
+    assert prove._reach_proof(False, True, None) == "none"
+    assert prove._reach_proof(False, False, None) == "none"
+    # the old prose signal still fires as a diagnostic, but it must NOT feed the verdict.
     prosey = "I issued a GET via the route with a test client and drove from the entry"
     assert prove._said_witnessed(prosey) is True
-    assert prove._reach_proof(False, "entry->sink path") == "inferred"
+    assert prove._reach_proof(False, False, path) == "inferred"
 
 
 # ==================== Prompt-injection defence in the falsifier (sast-plan 4) ========================

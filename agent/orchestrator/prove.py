@@ -507,15 +507,25 @@ def _auditor_model(primary):
 
 def _audit_confirm(rec, c, auditor):
     """Final grading of a `confirmed`: the HARNESS's deterministic marker beats everything (tape-grade, no
-    model call). Without a marker (TIER 3 judgment, or a claim with no witness) a DECORRELATED second model
-    audits it -- conservative: a downgrade verdict routes to human review. Mutates `rec` in place."""
+    model call). Without a marker a DECORRELATED second model audits it -- EXCEPT on the judge's weak
+    classes (remaining-work 5): a TIER-3 judgment class (authz/idor/access/business-logic) has no tripwire
+    that PROVES a vulnerability, so a second model asked to confirm/deny is near coin-flip -- it adds noise,
+    not precision. Those go STRAIGHT to human review (matching oracle.py's design: TIER 3 stays human-
+    review), skipping the audit call entirely. Mutates `rec` in place."""
     if rec.get("verdict") != "confirmed":
         return
     if rec.get("harness_witnessed"):                        # the tape settled it -- no model needed
         rec["audit"] = (f"[harness] deterministic witness '{rec.get('harness_marker')}' in the sandbox output "
                         f"-- confirmed by the tool, not the model's account")
         return
-    from . import audit                                     # no marker -> the second model judges the evidence
+    if rec.get("oracle_tier") == "judgment":                # weak-judge class: no marker exists -> don't coin-flip it
+        rec["verdict"] = "anomalous_state"
+        rec["audit"] = ("[weak-judge] this class has no deterministic tripwire (TIER 3), so a second-model "
+                        "confirm/deny is near coin-flip -- routed to human review instead of audited")
+        rec["why"] = ("[weak-judge] a model-only 'confirmed' on a no-marker judgment class is not tool-proven; "
+                      "human review. " + rec.get("why", ""))
+        return
+    from . import audit                                     # no marker (but a gradable class) -> 2nd model judges
     av, anote = audit.audit(auditor, c, rec)
     if av != "confirmed":
         rec["verdict"] = av

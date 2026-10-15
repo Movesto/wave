@@ -29,6 +29,28 @@ class ModelAuthError(RuntimeError):
     the pipeline aborts loudly (check WAVE_API_KEY / account credits)."""
 
 
+def _has_usable(msg):
+    """Did the assistant message carry something to act on -- text, salvageable reasoning, or tool_calls?
+    An EMPTY body with no tool_calls is a failed call (the endpoint returned nothing), NEVER a clean/safe
+    answer -- treating it as 'no finding' / 'refuted' is the notebook whiff + silent detector refute the
+    improvement ledger flagged (remaining-work 5)."""
+    if not isinstance(msg, dict):
+        return False
+    if (msg.get("content") or "").strip() or (msg.get("reasoning") or msg.get("thinking") or "").strip():
+        return True
+    return bool(msg.get("tool_calls"))
+
+
+def _call_incomplete(msg, finish_reason):
+    """A reply that must be RETRIED, not consumed: truncated (`finish_reason`/`done_reason` == 'length')
+    with nothing usable, or an empty body with no tool_calls. A truncated reply that still carries partial
+    content/reasoning stays salvageable (the existing behaviour) -- only a genuine whiff is flagged."""
+    fr = (finish_reason or "").lower()
+    if not _has_usable(msg):
+        return True                                     # empty body / nothing to act on
+    return fr == "length" and not (msg.get("tool_calls") or (msg.get("content") or "").strip())
+
+
 class Model:
     def __init__(self, model_id=None, max_new_tokens=1500, api_base=None, api_key=None):
         self.model_id = model_id or os.environ.get("WAVE_MODEL", _DEFAULT)
@@ -50,6 +72,7 @@ class Model:
         # blows straight past it and the reply gets cut before the answer. Raise it for the LOCAL ollama
         # endpoint only -- OpenRouter/GLM rejects ollama's "options" field. WAVE_NUM_CTX overrides.
         self.num_ctx = int(os.environ.get("WAVE_NUM_CTX", "16384"))
+        self.last_finish_reason = None                  # finish/done reason of the last API reply (diagnostics)
         self._tok = None
         self._model = None
 
@@ -120,7 +143,16 @@ class Model:
                     raise ModelAuthError(f"{r.status_code} {r.reason} from {self.api_base} "
                                          f"(model {self.model_id}) -- check WAVE_API_KEY / account credits")
                 r.raise_for_status()
-                return r.json()["choices"][0]["message"]
+                choice = (r.json().get("choices") or [{}])[0]
+                msg, fr = choice.get("message", {}) or {}, choice.get("finish_reason")
+                self.last_finish_reason = fr
+                if _call_incomplete(msg, fr) and attempt < 2:   # truncated/empty -> retry, bumping the budget
+                    body["max_tokens"] = min(8000, int(body.get("max_tokens") or max_tokens or 2000) * 2)
+                    print(f"[model] incomplete reply (finish={fr!r}); retry {attempt + 1} w/ "
+                          f"max_tokens={body['max_tokens']}", flush=True)
+                    time.sleep(1)
+                    continue
+                return msg
             except ModelAuthError:                          # don't retry or swallow an auth failure
                 raise
             except Exception as e:                          # transient 500 / timeout / connection blip -> retry
@@ -166,7 +198,14 @@ class Model:
             try:
                 r = requests.post(url, json=body, timeout=timeout)
                 r.raise_for_status()
-                msg = r.json().get("message", {}) or {}
+                j = r.json()
+                msg, fr = j.get("message", {}) or {}, j.get("done_reason")
+                self.last_finish_reason = fr
+                if _call_incomplete(msg, fr) and attempt < 2:   # truncated/empty (and no tool_calls) -> retry
+                    opts["num_predict"] = min(8000, int(opts.get("num_predict") or max_tokens or 2000) * 2)
+                    print(f"[model] incomplete tool reply (done={fr!r}); retry {attempt + 1}", flush=True)
+                    time.sleep(1)
+                    continue
                 for tc in msg.get("tool_calls") or []:          # native tool_calls have no id -> synthesize
                     tc.setdefault("id", "call_" + _secrets.token_hex(4))
                 return msg
@@ -202,7 +241,15 @@ class Model:
             try:
                 r = requests.post(url, json=body, timeout=timeout)
                 r.raise_for_status()
-                m = r.json().get("message", {})
+                j = r.json()
+                m, fr = j.get("message", {}) or {}, j.get("done_reason")
+                self.last_finish_reason = fr
+                if _call_incomplete(m, fr) and attempt < 2:    # truncated/empty -> retry with more tokens
+                    opts["num_predict"] = min(8000, int(opts.get("num_predict") or max_tokens or 2000) * 2)
+                    print(f"[model] incomplete reply (done={fr!r}); retry {attempt + 1} w/ "
+                          f"num_predict={opts['num_predict']}", flush=True)
+                    time.sleep(1)
+                    continue
                 return m.get("content") or m.get("thinking") or ""
             except Exception as e:
                 last = e

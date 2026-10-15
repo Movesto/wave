@@ -14,8 +14,18 @@ Not every class is graded the same (three tiers):
     stays human-review and is where the decorrelated second-model audit earns its keep.
 
 `graded()` returns (witnessed, marker, tier): witnessed True only for a TIER 1/2 class whose marker is present.
+
+The DYNAMIC boot path (state.run_loop --dynamic / the bench) proves injection differently from the
+investigate path: there the whole app is booted as a RunningTarget, the model crafts HTTP requests
+carrying a unique tracer, and `prove_injection` fires them and greps the app's instrumented-sink logs
+for that tracer in an unsafe position (registry.payload_in_sink). No per-run secret is in play there
+(the boot path emits BARE markers), so grading is by the TRACER at the sink, not the seal.
 """
 import re
+import secrets
+import time
+
+from . import exploit, registry
 
 # harness-planted, unforgeable side-effect: an injection that runs code creates this file, then `ls` shows it.
 _HIT = "wave_HIT"
@@ -128,3 +138,68 @@ def graded(cls, markers, cwe=""):
         if tok in marks:
             return True, tok, "marker"
     return False, "", "marker"
+
+
+# --- DYNAMIC boot-path injection oracle (used by state.run_loop --dynamic and the bench) ----------------
+# Restored after the e35f15d refactor split the per-class token API (scan/graded/reach_in_sink) out of this
+# module but left state.py / remediate.py still calling prove_injection + benign_status. The model CRAFTS
+# attack requests (exploit.craft_requests); this layer FIRES them against the booted app and proves, via the
+# app's own instrumented sinks, whether the payload reached a sink unneutralized. The model never decides a
+# verdict -- registry.payload_in_sink does.
+def _sink_hit(rt, hook, marker):
+    for line in rt.sink_lines(hook.marker):
+        if registry.payload_in_sink(hook, line, marker):
+            return line
+    return None
+
+
+def _any_sink_hit(rt, hooks, marker):
+    for hook in hooks:
+        hit = _sink_hit(rt, hook, marker)
+        if hit:
+            return hit
+    return None
+
+
+def prove_injection(rt, hooks, candidate, routes, model, strikes=1, auth=None, canary=None):
+    """Model crafts attack requests embedding a unique tracer; fire them and check ANY of the app's
+    instrumented sinks for that tracer in an unsafe position. If a `canary` is supplied, the tracer is an
+    OAST token and egress payloads point at the canary -- a callback (now or later, async) is an additional
+    hard witness that catches egress the hooks miss. Returns a verdict dict."""
+    marker = canary.new_token() if canary else "WZ" + secrets.token_hex(3)   # unique per probe
+    canary_url = canary.url(marker) if canary else None
+    for r in exploit.craft_requests(model, candidate, routes, marker, canary_url=canary_url):
+        confirmations, evidence = 0, ""
+        for _ in range(strikes):
+            exploit.fire(rt.base_url, r["method"], r["path"], r["body"],
+                         headers={**(auth or {}), **(r["headers"] or {})})
+            hit = None
+            for _ in range(8):                             # poll: container stdout -> docker logs lags
+                hit = _any_sink_hit(rt, hooks, marker)
+                if not hit and canary and canary.hits.get(marker):
+                    c = canary.hits[marker][0]
+                    hit = f"OAST callback: app dialed the canary at {c['path']} from {c['client']}"
+                if hit:
+                    break
+                time.sleep(0.4)
+            if hit:
+                confirmations += 1
+                evidence = hit
+        if confirmations == strikes and confirmations > 0:
+            oname = "OAST-canary" if str(evidence).startswith("OAST") else "instrumented-sink"
+            return {"status": "proven", "cwe": candidate.cwe, "payload": r["payload"],
+                    "request": f"{r['method']} {r['path']}", "evidence": str(evidence).strip()[:200],
+                    "oracle": oname, "proven_request": r, "marker": marker}
+    return {"status": "not-proven", "cwe": candidate.cwe, "marker": marker,
+            "notes": "no crafted payload observed unneutralized at the sink"}
+
+
+def benign_status(rt, proven_request, auth=None):
+    """Fire a benign version of the proven request; return the HTTP status (or None if unreachable).
+    Used for the differential Gate-B baseline (original app) and the patched-app check."""
+    if not proven_request:
+        return None
+    b = exploit.benignify(proven_request)
+    status, _ = exploit.fire(rt.base_url, b["method"], b["path"], b["body"],
+                             headers={**(auth or {}), **(b["headers"] or {})})
+    return status

@@ -2630,3 +2630,25 @@ def test_hook_notice_lines_never_witness():
         for ln in (hook.code or "").splitlines():
             if any(k in ln for k in ("instrumented", "installed", "instrumentation failed")):
                 assert "WAVE-SINK-" not in ln, (hook.name, ln.strip())
+
+
+def test_oracle_exposes_every_function_the_dynamic_path_calls():
+    """Guard: the dynamic boot path (state.run_loop --dynamic / the bench) calls oracle.<fn>(...); if a
+    refactor removes one but leaves the caller, the whole dynamic stage silently blocks (this exact bug:
+    prove_injection/benign_status were dropped in e35f15d and the bench scored 0 until restored)."""
+    import ast
+    import inspect
+    from agent.orchestrator import oracle, remediate, state
+
+    for mod in (state, remediate):
+        tree = ast.parse(inspect.getsource(mod))
+        called = {n.func.attr for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                  and isinstance(n.func.value, ast.Name) and n.func.value.id == "oracle"}
+        missing = [name for name in called if not hasattr(oracle, name)]
+        assert not missing, (mod.__name__, "calls oracle attrs that do not exist:", missing)
+
+    # the dynamic injection oracle keeps the signature its callers pass (rt, hooks, candidate, routes, model)
+    params = list(inspect.signature(oracle.prove_injection).parameters)
+    assert params[:5] == ["rt", "hooks", "candidate", "routes", "model"]
+    assert {"strikes", "auth", "canary"} <= set(params)

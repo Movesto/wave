@@ -41,11 +41,19 @@ def _has_usable(msg):
     return bool(msg.get("tool_calls"))
 
 
-def _call_incomplete(msg, finish_reason):
+_RETRY_MIN_BUDGET = 256     # below this the caller set a DELIBERATE tiny budget (a probe); a cut/empty reply
+                            # is the expected result, not a whiff -- retrying with 2x a tiny number can't help.
+
+
+def _call_incomplete(msg, finish_reason, budget=None):
     """A reply that must be RETRIED, not consumed: truncated (`finish_reason`/`done_reason` == 'length')
     with nothing usable, or an empty body with no tool_calls. A truncated reply that still carries partial
-    content/reasoning stays salvageable (the existing behaviour) -- only a genuine whiff is flagged."""
+    content/reasoning stays salvageable (the existing behaviour) -- only a genuine whiff is flagged.
+    `budget` is the call's own token budget: a deliberately tiny one (a connectivity/credits probe) is
+    NEVER a whiff, so it is not retried (that wasted 2 extra probe calls -- caught on the omarchy/nv run)."""
     fr = (finish_reason or "").lower()
+    if budget is not None and budget < _RETRY_MIN_BUDGET:
+        return False                                    # deliberate small-budget probe -- expected cut, don't retry
     if not _has_usable(msg):
         return True                                     # empty body / nothing to act on
     return fr == "length" and not (msg.get("tool_calls") or (msg.get("content") or "").strip())
@@ -146,7 +154,7 @@ class Model:
                 choice = (r.json().get("choices") or [{}])[0]
                 msg, fr = choice.get("message", {}) or {}, choice.get("finish_reason")
                 self.last_finish_reason = fr
-                if _call_incomplete(msg, fr) and attempt < 2:   # truncated/empty -> retry, bumping the budget
+                if _call_incomplete(msg, fr, int(body.get("max_tokens") or max_tokens or 2000)) and attempt < 2:
                     body["max_tokens"] = min(8000, int(body.get("max_tokens") or max_tokens or 2000) * 2)
                     print(f"[model] incomplete reply (finish={fr!r}); retry {attempt + 1} w/ "
                           f"max_tokens={body['max_tokens']}", flush=True)
@@ -201,7 +209,7 @@ class Model:
                 j = r.json()
                 msg, fr = j.get("message", {}) or {}, j.get("done_reason")
                 self.last_finish_reason = fr
-                if _call_incomplete(msg, fr) and attempt < 2:   # truncated/empty (and no tool_calls) -> retry
+                if _call_incomplete(msg, fr, int(opts.get("num_predict") or max_tokens or 2000)) and attempt < 2:
                     opts["num_predict"] = min(8000, int(opts.get("num_predict") or max_tokens or 2000) * 2)
                     print(f"[model] incomplete tool reply (done={fr!r}); retry {attempt + 1}", flush=True)
                     time.sleep(1)
@@ -244,7 +252,7 @@ class Model:
                 j = r.json()
                 m, fr = j.get("message", {}) or {}, j.get("done_reason")
                 self.last_finish_reason = fr
-                if _call_incomplete(m, fr) and attempt < 2:    # truncated/empty -> retry with more tokens
+                if _call_incomplete(m, fr, int(opts.get("num_predict") or max_tokens or 2000)) and attempt < 2:
                     opts["num_predict"] = min(8000, int(opts.get("num_predict") or max_tokens or 2000) * 2)
                     print(f"[model] incomplete reply (done={fr!r}); retry {attempt + 1} w/ "
                           f"num_predict={opts['num_predict']}", flush=True)

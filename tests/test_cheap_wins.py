@@ -28,6 +28,12 @@ def test_has_usable_and_call_incomplete():
     assert model_mod._call_incomplete({"tool_calls": [{"id": "x"}]}, "tool_calls") is False
     # a normal complete reply
     assert model_mod._call_incomplete({"content": "done"}, "stop") is False
+    # a DELIBERATE tiny-budget probe (e.g. a 1-token connectivity/credits check) is NOT a whiff -> never
+    # retried (retrying 2x a tiny number can't help -- it wasted probe calls before the budget guard)
+    assert model_mod._call_incomplete({"content": ""}, "length", budget=1) is False
+    assert model_mod._call_incomplete({}, "length", budget=1) is False
+    # a real content budget still flags an empty/length whiff for retry
+    assert model_mod._call_incomplete({"content": ""}, "length", budget=2000) is True
 
 
 class _FakeResp:
@@ -62,6 +68,22 @@ def test_api_chat_retries_truncated_then_returns_complete(monkeypatch):
     assert len(posts) == 2                                   # it retried once
     assert posts[0]["max_tokens"] == 2000 and posts[1]["max_tokens"] == 4000   # budget bumped on retry
     assert m.last_finish_reason == "stop"
+
+
+def test_api_chat_does_not_retry_a_tiny_budget_probe(monkeypatch):
+    # a 1-token connectivity/credits probe ALWAYS comes back finish='length' with ~nothing; the old retry
+    # logic burned two extra probe calls on it (caught on the nv run). The budget floor stops that.
+    m = model_mod.Model(model_id="x", api_base="https://api.test/v1", api_key="k")
+    posts = []
+
+    def fake_post(url, **kw):
+        posts.append(dict(kw.get("json") or {}))
+        return _FakeResp({"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+
+    import requests
+    monkeypatch.setattr(requests, "post", fake_post)
+    m._api_chat([{"role": "user", "content": "ping"}], max_tokens=1)
+    assert len(posts) == 1                                   # consumed as-is, no wasted retries
 
 
 # --- (b) skip the judge on weak (TIER-3 judgment) classes --------------------------------------------

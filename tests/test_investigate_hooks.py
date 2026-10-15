@@ -21,14 +21,19 @@ def test_sink_hook_env_js_writes_to_throwaway_dir_not_the_target(tmp_path):
         # the hooks live OUTSIDE the scanned target -- nothing written into tmp_path
         assert hdir is not None and Path(hdir).resolve() != tmp_path.resolve()
         assert not (tmp_path / ".wave_hooks").exists()
-        for f in ("_wave_sink_eval.js", "_wave_sink_shell.js", "_wave_sink_fs.js", "_wave_sink_ssrf.js",
+        for f in ("_wave_sink_ctx.js",                        # the request-context gate, written alongside
+                  "_wave_sink_eval.js", "_wave_sink_shell.js", "_wave_sink_fs.js", "_wave_sink_ssrf.js",
                   "_wave_sink_deser.js"):                      # core sinks + node-serialize (dep present)
             assert (Path(hdir) / f).exists(), f
         assert "NODE_OPTIONS" in env and "PYTHONPATH" not in env
+        # the gate loads FIRST so http.Server is instrumented before the app serves a request
+        assert env["NODE_OPTIONS"].startswith("--require /wave_hooks/_wave_sink_ctx.js")
         for f in ("_wave_sink_eval.js", "_wave_sink_deser.js"):
             assert f"--require /wave_hooks/{f}" in env["NODE_OPTIONS"]
-        # the SECRET is read at runtime from the env, never baked into the file
-        assert "process.env.WAVE_WITNESS" in (Path(hdir) / "_wave_sink_eval.js").read_text(encoding="utf-8")
+        # the SECRET is read at runtime from the env in the gate, never baked into any file
+        assert "process.env.WAVE_WITNESS" in (Path(hdir) / "_wave_sink_ctx.js").read_text(encoding="utf-8")
+        # every hook builds its marker THROUGH the gate -- no hook seals unconditionally
+        assert '_seal("WAVE-SINK-EVAL")' in (Path(hdir) / "_wave_sink_eval.js").read_text(encoding="utf-8")
     finally:
         shutil.rmtree(hdir, ignore_errors=True)
 
@@ -39,10 +44,15 @@ def test_sink_hook_env_py_writes_sitecustomize_and_pythonpath(tmp_path):
     try:
         assert env == {"PYTHONPATH": "/wave_hooks"}
         sc = (Path(hdir) / "sitecustomize.py").read_text(encoding="utf-8")
-        for mod in ("_wave_sink_audit", "_wave_sink_fs", "_wave_sink_ssrf", "_wave_sink_psycopg2", "_wave_sink_jinja"):
+        for mod in ("_wave_sink_ctx", "_wave_sink_audit", "_wave_sink_fs", "_wave_sink_ssrf",
+                    "_wave_sink_psycopg2", "_wave_sink_jinja"):
             assert (Path(hdir) / (mod + ".py")).exists(), mod
             assert f"import {mod}" in sc
-        assert 'os.environ["WAVE_WITNESS"]' in (Path(hdir) / "_wave_sink_audit.py").read_text(encoding="utf-8")
+        # the gate is imported FIRST (installs the request-context wraps before any sink can fire)
+        assert sc.index("import _wave_sink_ctx") < sc.index("import _wave_sink_audit")
+        # the SECRET is read at runtime from the env in the gate; the audit hook seals THROUGH it
+        assert 'os.environ.get("WAVE_WITNESS"' in (Path(hdir) / "_wave_sink_ctx.py").read_text(encoding="utf-8")
+        assert '_seal("WAVE-SINK-EXEC")' in (Path(hdir) / "_wave_sink_audit.py").read_text(encoding="utf-8")
     finally:
         shutil.rmtree(hdir, ignore_errors=True)
 

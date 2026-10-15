@@ -246,7 +246,9 @@ def _detect_asgi(root):
 
 def _write_py(prof, hooks):
     root = Path(prof.root)
-    imports = []
+    ctx = registry.context_module("py")                 # the request-context gate -- written + imported FIRST
+    (root / ctx.filename).write_text(ctx.code, encoding="utf-8")
+    imports = [f"import {ctx.filename[:-3]}"]
     for h in hooks:
         (root / h.filename).write_text(h.code, encoding="utf-8")
         imports.append(f"import {h.filename[:-3]}")
@@ -357,7 +359,9 @@ def _provision_py_compose(prof, hooks, host_port):
 
     hook_dir = compose_dir / "_wave_hooks"              # bind-mounted at /wave_hooks (on PYTHONPATH)
     hook_dir.mkdir(exist_ok=True)
-    imports = []
+    ctx = registry.context_module("py")                 # the request-context gate -- written + imported FIRST
+    (hook_dir / ctx.filename).write_text(ctx.code, encoding="utf-8")
+    imports = [f"    import {ctx.filename[:-3]}"]
     for h in hooks:
         (hook_dir / h.filename).write_text(h.code, encoding="utf-8")
         imports.append(f"    import {h.filename[:-3]}")
@@ -399,12 +403,14 @@ def _provision_js(prof, hooks, host_port):
     internal = internal or prof.internal_port
     host = host_port or internal
     workdir = _dockerfile_workdir(prof.root)
+    ctx = registry.context_module("js")                 # the request-context gate -- mounted + required FIRST
+    files = [ctx] + list(hooks)
     mounts = []
-    for h in hooks:
+    for h in files:
         (Path(prof.root) / h.filename).write_text(h.code, encoding="utf-8")
         host_path = str((Path(prof.root) / h.filename).resolve()).replace("\\", "/")
         mounts.append(f"{host_path}:{workdir}/{h.filename}:ro")   # BIND-MOUNT: survives multi-stage/prebuilt
-    node_opts = " ".join(f"--require {workdir}/{h.filename}" for h in hooks)
+    node_opts = " ".join(f"--require {workdir}/{h.filename}" for h in files)
 
     # Generate a full modified compose (not an override -- override APPENDS ports, which can't clear a
     # conflicting host mapping). Inject the hook via a bind-MOUNT + NODE_OPTIONS on the build service
@@ -472,12 +478,15 @@ def sink_hook_env(target, is_js):
     if not hooks:
         return {}, None
     hdir = Path(tempfile.mkdtemp(prefix="wave-hooks-"))
+    ctx = registry.context_module(lang)                 # the request-context gate -- written + loaded FIRST
+    (hdir / ctx.filename).write_text(ctx.code, encoding="utf-8")
     for h in hooks:
         (hdir / h.filename).write_text(h.code, encoding="utf-8")
     m = INVEST_HOOK_MOUNT
     if lang == "js":
-        return {"NODE_OPTIONS": " ".join(f"--require {m}/{h.filename}" for h in hooks)}, str(hdir)
-    imports = "\n".join(f"    import {h.filename[:-3]}" for h in hooks)
+        reqs = [ctx.filename] + [h.filename for h in hooks]
+        return {"NODE_OPTIONS": " ".join(f"--require {m}/{fn}" for fn in reqs)}, str(hdir)
+    imports = "\n".join(f"    import {mod}" for mod in [ctx.filename[:-3]] + [h.filename[:-3] for h in hooks])
     (hdir / "sitecustomize.py").write_text(_SITECUSTOMIZE.format(imports=imports or "    pass"), encoding="utf-8")
     return {"PYTHONPATH": m}, str(hdir)
 

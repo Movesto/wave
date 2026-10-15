@@ -5,8 +5,10 @@ Covers: (1) oracle.scan/graded secret semantics, (2) every instrumented sink hoo
 emits the sealed marker (exec'd in a SUBPROCESS -- the Python audit hooks install a process-wide audit hook
 that would otherwise pollute the rest of the suite), (3) the secret is threaded prove -> investigate.
 """
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from agent.orchestrator import oracle, registry
 
@@ -47,36 +49,50 @@ def test_seal_helper():
     assert oracle.seal("WAVE-SINK-SQL", "") == "WAVE-SINK-SQL"
 
 
-# --- (2) every hook seals its marker from the env -----------------------------------------------------
-_PRELUDE_PROBE = "{code}\nimport sys as _s\n_s.stdout.write('MARK=' + _WSINK + '\\n')\n"
+# --- (2) every hook seals its marker THROUGH the request-context gate ---------------------------------
+def _run_py_hook_marker(code, marker, secret, in_request):
+    """Exec a Python hook's source in a FRESH subprocess (keeps its process-wide audit hook out of pytest),
+    with the REAL request-context gate importable, and read the marker `_seal(marker)` builds -- optionally
+    from inside a simulated served request."""
+    import os
+    import tempfile
+    d = Path(tempfile.mkdtemp(prefix="wave-hooktest-"))
+    try:
+        (d / "_wave_sink_ctx.py").write_text(registry.context_module("py").code, encoding="utf-8")
+        probe = ("import _wave_sink_ctx as _ctx\n"
+                 + ("_ctx._in_req.set(True)\n" if in_request else "")
+                 + code + "\n"
+                 + f"import sys as _s\n_s.stdout.write('MARK=' + _seal({marker!r}) + '\\n')\n")
+        (d / "probe.py").write_text(probe, encoding="utf-8")
+        env = {"PATH": os.environ.get("PATH", "")}
+        if secret:
+            env["WAVE_WITNESS"] = secret
+        r = subprocess.run([sys.executable, "probe.py"], cwd=str(d),
+                           capture_output=True, text=True, env=env, timeout=60)
+        for line in (r.stdout or "").splitlines():
+            if line.startswith("MARK="):
+                return line[len("MARK="):]
+        raise AssertionError(f"hook did not report its marker; stderr={r.stderr[:300]}")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
-def _run_py_hook_marker(code, secret):
-    """Exec a Python hook's source in a FRESH subprocess (keeps its audit hook out of pytest) and read the
-    _WSINK it built from the environment."""
-    env = {"PATH": __import__("os").environ.get("PATH", "")}
-    if secret:
-        env["WAVE_WITNESS"] = secret
-    r = subprocess.run([sys.executable, "-c", _PRELUDE_PROBE.format(code=code)],
-                       capture_output=True, text=True, env=env, timeout=60)
-    for line in (r.stdout or "").splitlines():
-        if line.startswith("MARK="):
-            return line[len("MARK="):]
-    raise AssertionError(f"hook did not report its marker; stderr={r.stderr[:300]}")
-
-
-def test_every_python_hook_seals_marker_from_env():
+def test_every_python_hook_seals_marker_through_the_gate():
     for h in [h for h in registry.HOOKS if h.lang == "py"]:
         compile(h.code, h.filename, "exec")                       # must be syntactically valid
-        assert _run_py_hook_marker(h.code, "") == h.marker                      # no env -> bare (back-compat)
-        assert _run_py_hook_marker(h.code, "sec987") == h.marker + "#sec987"    # env -> sealed
+        # no secret -> bare regardless of context (legacy boot path, unchanged)
+        assert _run_py_hook_marker(h.code, h.marker, "", in_request=True) == h.marker
+        # secret set but OUTSIDE a served request -> BARE (self-trigger defanged: a direct driver can't seal)
+        assert _run_py_hook_marker(h.code, h.marker, "sec987", in_request=False) == h.marker
+        # secret set and INSIDE a served request -> SEALED (the only form the oracle counts)
+        assert _run_py_hook_marker(h.code, h.marker, "sec987", in_request=True) == h.marker + "#sec987"
 
 
-def test_every_js_hook_builds_sealed_marker():
+def test_every_js_hook_builds_sealed_marker_through_the_gate():
     for h in [h for h in registry.HOOKS if h.lang == "js"]:
-        assert "process.env.WAVE_WITNESS" in h.code, h.name
-        assert "_WSINK" in h.code, h.name
-        assert f'"{h.marker}"' in h.code, (h.name, "base marker literal missing")
+        assert 'require("./_wave_sink_ctx.js")' in h.code, (h.name, "hook does not load the context gate")
+        assert f'_seal("{h.marker}")' in h.code, (h.name, "hook does not seal its marker through the gate")
+        assert "process.env.WAVE_WITNESS" in h.code, (h.name, "gate-absent fallback must still read the env")
 
 
 def test_hooks_do_not_print_bare_marker_literal_in_witness_lines():

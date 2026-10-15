@@ -7,6 +7,15 @@ Phase-0 hooks proven on VAmPI (SQLAlchemy) and NodeGoat (mongodb). The instrumen
 
 Per the Phase-0 finding (F1/R2/G1): instrumentation is PER-DRIVER, so this is an extensible list,
 not a one-off. Add a hook per (driver) as new stacks are targeted.
+
+THE REQUEST-CONTEXT GATE (self-trigger hardening): the core-language hooks (eval/exec/fs/ssrf) are
+always-on global wraps, so in a sandbox that runs arbitrary model-written code a bare driver
+(`node -e "eval(payload)"`) would trip them and forge a SEALED tape-grade confirm that never went
+through the app. To close that, every hook builds its marker through a shared context module
+(`context_module`): the SEALED form (`WAVE-SINK-X#<secret>`, the only form oracle.scan counts) is
+emitted ONLY when the sink fires WHILE the app is serving an inbound HTTP request; a sink reached from
+code the model ran directly logs the BARE token, which the sealed oracle ignores. Without a per-run
+secret (legacy boot path) the gate is inert and behaviour is unchanged.
 """
 import re
 from dataclasses import dataclass
@@ -24,6 +33,148 @@ class SinkHook:
     kind: str            # sink class: "sql" | "nosql" | "template" | "shell" | ...
 
 
+# ---- THE REQUEST-CONTEXT GATE: a shared module every hook loads to build its marker ------------------
+# Written alongside the sink hooks and loaded FIRST. It tracks whether the app is CURRENTLY serving an
+# inbound HTTP request (JS: an AsyncLocalStorage anchored on http/https Server 'request'; PY: a ContextVar
+# set across the WSGI/ASGI entry of Flask/Django/Bottle/Starlette). `seal(token)` returns the counted
+# `token#<secret>` only inside a served request, else the bare token. See the module docstring.
+@dataclass
+class ContextModule:
+    filename: str
+    code: str
+
+
+_CTX_JS = ContextModule(
+    "_wave_sink_ctx.js",
+    '''// wave request-context gate (shared by the JS sink hooks). A SEALED WAVE-SINK marker -- the only form
+// oracle.scan counts, carrying the per-run secret -- is emitted ONLY while the app is serving an inbound
+// HTTP request. A sink reached from a bare driver the model wrote (e.g. `node -e "eval(x)"`), NOT through
+// the app's request path, logs the BARE token, which the sealed oracle ignores. This stops the always-on
+// eval/exec/fs/ssrf wraps from forging a tape-grade confirm out of code the model ran directly.
+"use strict";
+var _secret = process.env.WAVE_WITNESS || "";
+var _als = null;
+try {
+  var AsyncLocalStorage = require("async_hooks").AsyncLocalStorage;
+  _als = new AsyncLocalStorage();
+  ["http", "https"].forEach(function (name) {          // http.Server and https.Server are SEPARATE prototypes
+    try {
+      var proto = require(name).Server && require(name).Server.prototype;
+      if (!proto || proto.__waveCtx) return;
+      var origEmit = proto.emit;
+      proto.emit = function (event) {                  // every inbound request dispatches via emit('request')
+        if (event === "request") {
+          var self = this, args = arguments;
+          return _als.run({ req: true }, function () { return origEmit.apply(self, args); });
+        }
+        return origEmit.apply(this, arguments);
+      };
+      proto.__waveCtx = true;
+    } catch (e) {}
+  });
+} catch (e) {}
+function inRequest() {
+  try { var s = _als && _als.getStore(); return !!(s && s.req); } catch (e) { return false; }
+}
+function seal(token) { return (inRequest() && _secret) ? (token + "#" + _secret) : token; }
+module.exports = { inRequest: inRequest, seal: seal };
+''')
+
+_CTX_PY = ContextModule(
+    "_wave_sink_ctx.py",
+    '''"""wave request-context gate (shared by the Python sink hooks; twin of _wave_sink_ctx.js). A SEALED
+WAVE-SINK marker -- the only form oracle.scan counts -- is emitted ONLY while the app is serving an inbound
+HTTP request; a sink reached from code the model ran directly logs the BARE token, which the sealed oracle
+ignores. Wraps the per-request WSGI/ASGI entry of the common frameworks; best-effort, each in its own try."""
+import os as _os
+import contextvars as _cv
+
+_secret = _os.environ.get("WAVE_WITNESS", "")
+_in_req = _cv.ContextVar("wave_in_request", default=False)
+
+
+def in_request():
+    try:
+        return bool(_in_req.get())
+    except Exception:
+        return False
+
+
+def seal(token):
+    return (token + "#" + _secret) if (in_request() and _secret) else token
+
+
+def _wrap_wsgi(call):                                    # (self, environ, start_response) -> iterable
+    def _wrapped(self, environ, start_response):
+        tok = _in_req.set(True)
+        try:
+            return call(self, environ, start_response)
+        finally:
+            _in_req.reset(tok)
+    _wrapped.__wave = True
+    return _wrapped
+
+
+try:                                                     # Flask + anything subclassing it: wsgi_app is the entry
+    import flask
+    if not getattr(flask.Flask.wsgi_app, "__wave", False):
+        flask.Flask.wsgi_app = _wrap_wsgi(flask.Flask.wsgi_app)
+except Exception:
+    pass
+
+try:                                                     # Django
+    from django.core.handlers.wsgi import WSGIHandler
+    if not getattr(WSGIHandler.__call__, "__wave", False):
+        WSGIHandler.__call__ = _wrap_wsgi(WSGIHandler.__call__)
+except Exception:
+    pass
+
+try:                                                     # Bottle
+    import bottle
+    if not getattr(bottle.Bottle.wsgi, "__wave", False):
+        bottle.Bottle.wsgi = _wrap_wsgi(bottle.Bottle.wsgi)
+except Exception:
+    pass
+
+try:                                                     # Starlette / FastAPI (ASGI, async entry)
+    import starlette.applications as _sa
+    if not getattr(_sa.Starlette.__call__, "__wave", False):
+        _o = _sa.Starlette.__call__
+
+        async def _wave_asgi(self, scope, receive, send):
+            if scope.get("type") == "http":
+                tok = _in_req.set(True)
+                try:
+                    return await _o(self, scope, receive, send)
+                finally:
+                    _in_req.reset(tok)
+            return await _o(self, scope, receive, send)
+
+        _wave_asgi.__wave = True
+        _sa.Starlette.__call__ = _wave_asgi
+except Exception:
+    pass
+''')
+
+
+def context_module(lang):
+    """The shared request-context gate module for `lang` (written alongside the sink hooks and loaded
+    FIRST). See the module docstring + the gate's own docstring."""
+    return _CTX_JS if lang == "js" else _CTX_PY
+
+
+# Per-hook preamble that binds `_seal`: load the shared gate, degrading to the legacy always-seal form if
+# the gate module is somehow absent (so a missing file can never crash app startup under --require/import).
+_JS_SEAL = ('var _seal; try { _seal = require("./_wave_sink_ctx.js").seal; } catch (e) {\n'
+            '  _seal = function (t) { return process.env.WAVE_WITNESS ? t + "#" + process.env.WAVE_WITNESS : t; }; }')
+_PY_SEAL = ('try:\n'
+            '    from _wave_sink_ctx import seal as _seal\n'
+            'except Exception:\n'
+            '    import os as _os\n'
+            '    def _seal(t, _s=_os.environ.get("WAVE_WITNESS", "")):\n'
+            '        return (t + "#" + _s) if _s else t')
+
+
 # ---- SQLAlchemy (Python): log every statement + params before execution (from Phase-0 VAmPI) ----
 _SQLALCHEMY = SinkHook(
     name="sqlalchemy", lang="py", detect=("sqlalchemy", "flask_sqlalchemy", "flask-sqlalchemy"),
@@ -31,15 +182,14 @@ _SQLALCHEMY = SinkHook(
     code='''"""Instrumented-sink oracle for SQLAlchemy (auto-loaded by the wave entry shim).
 Logs each SQL statement + bound params BEFORE execution. Grep WAVE-SINK-SQL: a payload that appears
 in the STATEMENT (not in PARAMS) proves injection; a bound param proves it was neutralized."""
-import os as _os
-_WSINK = "WAVE-SINK-SQL" + ("#" + _os.environ["WAVE_WITNESS"] if _os.environ.get("WAVE_WITNESS") else "")
+''' + _PY_SEAL + '''
 try:
     from sqlalchemy import event
     from sqlalchemy.engine import Engine
 
     @event.listens_for(Engine, "before_cursor_execute")
     def _wave_log_sql(conn, cursor, statement, parameters, context, executemany):
-        print(_WSINK + ":: " + repr(statement) + " :: PARAMS=" + repr(parameters), flush=True)
+        print(_seal("WAVE-SINK-SQL") + ":: " + repr(statement) + " :: PARAMS=" + repr(parameters), flush=True)
 except Exception as _e:
     print("WAVE-HOOK-FAIL:: (instrumentation failed: %r)" % _e, flush=True)
 ''')
@@ -52,7 +202,7 @@ _MONGODB = SinkHook(
 // Logs each query FILTER before execution. Grep WAVE-SINK-MONGO: an injected operator ($where/$gt)
 // visible in the filter proves NoSQL injection.
 "use strict";
-var _WSINK = "WAVE-SINK-MONGO" + (process.env.WAVE_WITNESS ? "#" + process.env.WAVE_WITNESS : "");
+''' + _JS_SEAL + '''
 try {
   const mongodb = require("mongodb");
   const Collection = mongodb.Collection;
@@ -60,7 +210,7 @@ try {
     const orig = Collection.prototype[m];
     if (typeof orig !== "function") return;
     Collection.prototype[m] = function (query) {
-      try { console.log(_WSINK + ":: coll=" + this.collectionName + " op=" + m +
+      try { console.log(_seal("WAVE-SINK-MONGO") + ":: coll=" + this.collectionName + " op=" + m +
                         " filter=" + JSON.stringify(query)); } catch (e) {}
       return orig.apply(this, arguments);
     };
@@ -77,7 +227,7 @@ _PG = SinkHook(
 // Logs each SQL statement + params before execution. WAVE-SINK-SQL: a payload in the STATEMENT
 // (not in PARAMS) proves injection; a bound param proves neutralization.
 "use strict";
-var _WSINK = "WAVE-SINK-SQL" + (process.env.WAVE_WITNESS ? "#" + process.env.WAVE_WITNESS : "");
+''' + _JS_SEAL + '''
 try {
   const pg = require("pg");
   ["Client", "Pool"].forEach((C) => {
@@ -88,7 +238,7 @@ try {
       try {
         const text = (typeof q === "string") ? q : (q && q.text);
         const vals = (q && typeof q === "object" && q.values) ? q.values : values;
-        console.log(_WSINK + ":: " + JSON.stringify(text) + " :: PARAMS=" + JSON.stringify(vals || []));
+        console.log(_seal("WAVE-SINK-SQL") + ":: " + JSON.stringify(text) + " :: PARAMS=" + JSON.stringify(vals || []));
       } catch (e) {}
       return orig.apply(this, arguments);
     };
@@ -105,8 +255,7 @@ _PSYCOPG2 = SinkHook(
     code='''"""Instrumented-sink oracle for psycopg2 (loaded via the wave sitecustomize). Injects a
 logging cursor_factory through psycopg2.connect so every cursor.execute logs the SQL pre-exec.
 WAVE-SINK-SQL: a payload in the STATEMENT (not in PARAMS) proves injection."""
-import os as _os
-_WSINK = "WAVE-SINK-SQL" + ("#" + _os.environ["WAVE_WITNESS"] if _os.environ.get("WAVE_WITNESS") else "")
+''' + _PY_SEAL + '''
 try:
     import psycopg2
     import psycopg2.extensions
@@ -115,7 +264,7 @@ try:
         def execute(self, query, vars=None):
             try:
                 q = query.decode("utf-8", "replace") if isinstance(query, (bytes, bytearray)) else query
-                print(_WSINK + ":: " + repr(q) + " :: PARAMS=" + repr(vars), flush=True)
+                print(_seal("WAVE-SINK-SQL") + ":: " + repr(q) + " :: PARAMS=" + repr(vars), flush=True)
             except Exception:
                 pass
             return super().execute(query, vars)
@@ -149,21 +298,21 @@ _JS_EVAL = SinkHook(
     code='''// Instrumented-sink oracle for JS code-eval (loaded via NODE_OPTIONS --require, before the app).
 // Wraps global.eval + Function so a tracer in evaluated code proves code injection (CWE-94/95).
 "use strict";
-var _WSINK = "WAVE-SINK-EVAL" + (process.env.WAVE_WITNESS ? "#" + process.env.WAVE_WITNESS : "");
+''' + _JS_SEAL + '''
 try {
   const _eval = global.eval;
   global.eval = function (code) {
-    try { console.log(_WSINK + ":: " + String(code)); } catch (e) {}
+    try { console.log(_seal("WAVE-SINK-EVAL") + ":: " + String(code)); } catch (e) {}
     return _eval.apply(this, arguments);
   };
   const _Function = global.Function;
   global.Function = new Proxy(_Function, {
     apply(t, thisArg, args) {
-      try { console.log(_WSINK + ":: Function(" + args.join(",") + ")"); } catch (e) {}
+      try { console.log(_seal("WAVE-SINK-EVAL") + ":: Function(" + args.join(",") + ")"); } catch (e) {}
       return Reflect.apply(t, thisArg, args);
     },
     construct(t, args, nt) {
-      try { console.log(_WSINK + ":: newFunction(" + args.join(",") + ")"); } catch (e) {}
+      try { console.log(_seal("WAVE-SINK-EVAL") + ":: newFunction(" + args.join(",") + ")"); } catch (e) {}
       return Reflect.construct(t, args, nt);
     }
   });
@@ -178,7 +327,7 @@ _JS_SHELL = SinkHook(
     code='''// Instrumented-sink oracle for Node child_process (loaded via NODE_OPTIONS --require).
 // Logs the command/argv before execution: a tracer in it proves OS command injection (CWE-78).
 "use strict";
-var _WSINK = "WAVE-SINK-SHELL" + (process.env.WAVE_WITNESS ? "#" + process.env.WAVE_WITNESS : "");
+''' + _JS_SEAL + '''
 try {
   const cp = require("child_process");
   ["exec", "execSync", "spawn", "spawnSync", "execFile", "execFileSync"].forEach((m) => {
@@ -188,7 +337,7 @@ try {
       try {
         var extra = arguments[1];
         var argv = Array.isArray(extra) ? " " + extra.join(" ") : "";
-        console.log(_WSINK + ":: " + m + " " + String(cmd) + argv);
+        console.log(_seal("WAVE-SINK-SHELL") + ":: " + m + " " + String(cmd) + argv);
       } catch (e) {}
       return orig.apply(this, arguments);
     };
@@ -203,8 +352,8 @@ _PY_AUDIT = SinkHook(
     filename="_wave_sink_audit.py", kind="shell",
     code='''"""Instrumented-sink oracle for Python code/command execution. A tracer reaching a dynamic
 compile (eval/exec of a string), os.system, or subprocess proves code/command injection."""
-import sys, os
-_WSINK = "WAVE-SINK-EXEC" + ("#" + os.environ["WAVE_WITNESS"] if os.environ.get("WAVE_WITNESS") else "")
+import sys
+''' + _PY_SEAL + '''
 
 def _wave_audit(event, args):
     try:
@@ -212,9 +361,9 @@ def _wave_audit(event, args):
             src = args[0] if args else None
             fname = args[1] if len(args) > 1 else None
             if fname in (None, "<string>", "<unknown>") and isinstance(src, (str, bytes)):
-                print(_WSINK + ":: compile " + repr(src)[:500], flush=True)
+                print(_seal("WAVE-SINK-EXEC") + ":: compile " + repr(src)[:500], flush=True)
         elif event in ("os.system", "subprocess.Popen"):
-            print(_WSINK + ":: " + event + " " + repr(args)[:500], flush=True)
+            print(_seal("WAVE-SINK-EXEC") + ":: " + event + " " + repr(args)[:500], flush=True)
     except Exception:
         pass
 
@@ -232,14 +381,14 @@ _JS_FS = SinkHook(
     code='''// Instrumented-sink oracle for Node fs reads (loaded via NODE_OPTIONS --require).
 // Logs the resolved path before the read: a tracer reaching it via ../ escape proves traversal (CWE-22).
 "use strict";
-var _WSINK = "WAVE-SINK-PATH" + (process.env.WAVE_WITNESS ? "#" + process.env.WAVE_WITNESS : "");
+''' + _JS_SEAL + '''
 try {
   const fs = require("fs");
   ["readFile", "readFileSync", "createReadStream", "open", "openSync", "readdir", "readdirSync"].forEach((m) => {
     const orig = fs[m];
     if (typeof orig !== "function") return;
     fs[m] = function (p) {
-      try { console.log(_WSINK + ":: " + m + " " + String(p)); } catch (e) {}
+      try { console.log(_seal("WAVE-SINK-PATH") + ":: " + m + " " + String(p)); } catch (e) {}
       return orig.apply(this, arguments);
     };
   });
@@ -247,7 +396,7 @@ try {
     const orig = fs.promises[m];
     if (typeof orig !== "function") return;
     fs.promises[m] = function (p) {
-      try { console.log(_WSINK + ":: promises." + m + " " + String(p)); } catch (e) {}
+      try { console.log(_seal("WAVE-SINK-PATH") + ":: promises." + m + " " + String(p)); } catch (e) {}
       return orig.apply(this, arguments);
     };
   });
@@ -261,13 +410,13 @@ _PY_FS = SinkHook(
     filename="_wave_sink_fs.py", kind="path",
     code='''"""Instrumented-sink oracle for Python file opens: a tracer reaching open() via a ../ escape
 proves path traversal (CWE-22). Uses the PEP 578 `open` audit event (path, mode, flags)."""
-import sys, os
-_WSINK = "WAVE-SINK-PATH" + ("#" + os.environ["WAVE_WITNESS"] if os.environ.get("WAVE_WITNESS") else "")
+import sys
+''' + _PY_SEAL + '''
 
 def _wave_fs_audit(event, args):
     try:
         if event == "open" and args:
-            print(_WSINK + ":: open " + repr(args[0])[:400], flush=True)
+            print(_seal("WAVE-SINK-PATH") + ":: open " + repr(args[0])[:400], flush=True)
     except Exception:
         pass
 
@@ -286,7 +435,7 @@ _JS_SSRF = SinkHook(
     code='''// Instrumented-sink oracle for Node outbound HTTP (SSRF). Logs the destination before the request:
 // a tracer in the outbound URL/host proves the attacker controls the server's connection target.
 "use strict";
-var _WSINK = "WAVE-SINK-SSRF" + (process.env.WAVE_WITNESS ? "#" + process.env.WAVE_WITNESS : "");
+''' + _JS_SEAL + '''
 try {
   const http = require("http"), https = require("https");
   function wrap(mod, name) {
@@ -299,7 +448,7 @@ try {
         try {
           var u = (typeof a === "string") ? a
                 : (a && (a.href || ((a.protocol || "http:") + "//" + (a.hostname || a.host || "") + (a.path || "")))) || "";
-          console.log(_WSINK + ":: " + name + " " + String(u));
+          console.log(_seal("WAVE-SINK-SSRF") + ":: " + name + " " + String(u));
         } catch (e) {}
         return orig.apply(this, arguments);
       };
@@ -309,7 +458,7 @@ try {
   if (typeof global.fetch === "function") {
     const of = global.fetch;
     global.fetch = function (u) {
-      try { console.log(_WSINK + ":: fetch " + String(u && u.url ? u.url : u)); } catch (e) {}
+      try { console.log(_seal("WAVE-SINK-SSRF") + ":: fetch " + String(u && u.url ? u.url : u)); } catch (e) {}
       return of.apply(this, arguments);
     };
   }
@@ -324,14 +473,13 @@ _PY_SSRF = SinkHook(
     code='''"""Instrumented-sink oracle for Python outbound HTTP (SSRF). Wraps http.client.HTTPConnection so
 requests/urllib3/urllib funnel through: a tracer in the outbound host/url proves attacker-controlled
 server destination."""
-import os as _os
-_WSINK = "WAVE-SINK-SSRF" + ("#" + _os.environ["WAVE_WITNESS"] if _os.environ.get("WAVE_WITNESS") else "")
+''' + _PY_SEAL + '''
 try:
     import http.client as _h
     _orig = _h.HTTPConnection.putrequest
     def _wave_putrequest(self, method, url, *a, **k):
         try:
-            print(_WSINK + ":: " + str(getattr(self, "host", "")) + " " + str(url), flush=True)
+            print(_seal("WAVE-SINK-SSRF") + ":: " + str(getattr(self, "host", "")) + " " + str(url), flush=True)
         except Exception:
             pass
         return _orig(self, method, url, *a, **k)
@@ -350,19 +498,18 @@ _PY_JINJA = SinkHook(
     filename="_wave_sink_jinja.py", kind="template",
     code='''"""Instrumented-sink oracle for Jinja2 SSTI: logs the TEMPLATE SOURCE passed to from_string/Template.
 A tracer in the source (vs the render context) proves the attacker controls the template -> SSTI."""
-import os as _os
-_WSINK = "WAVE-SINK-TEMPLATE" + ("#" + _os.environ["WAVE_WITNESS"] if _os.environ.get("WAVE_WITNESS") else "")
+''' + _PY_SEAL + '''
 try:
     import jinja2
     _fs = jinja2.Environment.from_string
     def _wave_from_string(self, source, *a, **k):
-        try: print(_WSINK + ":: from_string " + repr(source)[:400], flush=True)
+        try: print(_seal("WAVE-SINK-TEMPLATE") + ":: from_string " + repr(source)[:400], flush=True)
         except Exception: pass
         return _fs(self, source, *a, **k)
     jinja2.Environment.from_string = _wave_from_string
     _oinit = jinja2.Template.__new__
     def _wave_new(cls, source=None, *a, **k):
-        try: print(_WSINK + ":: Template " + repr(source)[:400], flush=True)
+        try: print(_seal("WAVE-SINK-TEMPLATE") + ":: Template " + repr(source)[:400], flush=True)
         except Exception: pass
         return _oinit(cls)
     jinja2.Template.__new__ = staticmethod(_wave_new)
@@ -378,13 +525,13 @@ _JS_DESER = SinkHook(
     marker="WAVE-SINK-DESER", filename="_wave_sink_deser.js", kind="deser",
     code='''// Instrumented-sink oracle for node-serialize deserialization (SSJI/RCE). Logs the input blob.
 "use strict";
-var _WSINK = "WAVE-SINK-DESER" + (process.env.WAVE_WITNESS ? "#" + process.env.WAVE_WITNESS : "");
+''' + _JS_SEAL + '''
 try {
   const ns = require("node-serialize");
   const orig = ns.unserialize;
   if (typeof orig === "function") {
     ns.unserialize = function (s) {
-      try { console.log(_WSINK + ":: unserialize " + String(s).slice(0, 400)); } catch (e) {}
+      try { console.log(_seal("WAVE-SINK-DESER") + ":: unserialize " + String(s).slice(0, 400)); } catch (e) {}
       return orig.apply(this, arguments);
     };
   }
@@ -398,13 +545,12 @@ _PY_YAML = SinkHook(
     name="py_yaml", lang="py", detect=("pyyaml", "yaml"), marker="WAVE-SINK-DESER",
     filename="_wave_sink_yaml.py", kind="deser",
     code='''"""Instrumented-sink oracle for PyYAML deserialization: logs the YAML text passed to yaml.load."""
-import os as _os
-_WSINK = "WAVE-SINK-DESER" + ("#" + _os.environ["WAVE_WITNESS"] if _os.environ.get("WAVE_WITNESS") else "")
+''' + _PY_SEAL + '''
 try:
     import yaml
     _load = yaml.load
     def _wave_load(stream, *a, **k):
-        try: print(_WSINK + ":: yaml.load " + repr(stream)[:400], flush=True)
+        try: print(_seal("WAVE-SINK-DESER") + ":: yaml.load " + repr(stream)[:400], flush=True)
         except Exception: pass
         return _load(stream, *a, **k)
     yaml.load = _wave_load

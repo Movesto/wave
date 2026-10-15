@@ -199,6 +199,9 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         xf = None
     xflow = xf.get("note") if xf else None
     hit = "wave_HIT_" + secrets.token_hex(4)                  # PER-RUN exec witness (unforgeable-by-memorization)
+    sink_secret = secrets.token_hex(8)                        # PER-RUN SEAL for harness sink markers (1a): the
+    # instrumented hooks read it from $WAVE_WITNESS and emit WAVE-SINK-<KIND>#<secret>; the model is NEVER
+    # told it (unlike `hit`), so a cat'd/memorized/injected BARE WAVE-SINK-* can't forge a harness witness.
     mode = briefs._proof_mode(c)                             # sanitizer/ssti/protopoll/deser/render/call
     entry_fn, rpath = _reach_of(cmap, c)                     # untrusted entry + path (Half B)
     reach = (getattr(entry_fn, "name", ""), rpath) if entry_fn is not None else None
@@ -238,7 +241,8 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode,
                                                         reach=reach, route=route, flow=xflow, hit_marker=hit),
                                image=img, mount=target, network="none", max_steps=max_steps,
-                               step_timeout=step_to, online=online, write_tag=tag, hit_marker=hit)
+                               step_timeout=step_to, online=online, write_tag=tag, hit_marker=hit,
+                               sink_secret=sink_secret)
     finally:
         repro.remove(target, tag)
     verdict = v.verdict

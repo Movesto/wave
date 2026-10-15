@@ -40,6 +40,28 @@ CLASS_WITNESS = {
 # The harness matches a PER-RUN random `wave_HIT_<rand>` explicitly (investigate.py) -- proof integrity.
 _ALL_TOKENS = sorted({t for toks in CLASS_WITNESS.values() for t in toks if t != _HIT})
 
+# --- THE PROOF SEAL (improvements remaining-work 1a) ---------------------------------------------------
+# The WAVE-SINK-* markers are HARNESS-planted (emitted by the instrumented sink hooks, registry.py), NOT by
+# the model. Without a seal they are forgeable: a `cat` of a hook file, a marker literal in scanned source,
+# or memorization prints `WAVE-SINK-SQL`, and scan() would witness it -> a FAKE tape-grade confirm that
+# skips the audit (and would be learned as truth). The seal: each hook reads a PER-RUN secret from the
+# `WAVE_WITNESS` env var (the model is never told it) and prints `WAVE-SINK-<KIND>#<secret>`; scan(secret)
+# counts a sink marker ONLY when it carries that run's secret. The hook SOURCE contains os.environ[...], not
+# the value, so it cannot be reproduced by reading/memorizing/injection.
+#
+# Out of this seal's scope (unchanged, each sealed by its own mechanism): the model-planted exec markers
+# `wave_HIT_<rand>` (already per-run random) and `WAVE-PWNED` (the model's cooperative exec echo), and the
+# xss canary `WAVE_RENDER_CANARY:1` (sealed by requiring the browser to have EXECUTED it to value 1).
+WITNESS_ENV = "WAVE_WITNESS"                     # env var the hooks read the per-run secret from
+_SINK_TOKENS = sorted(t for t in _ALL_TOKENS if t.startswith("WAVE-SINK-"))   # harness-planted -> sealed
+_UNSEALED_TOKENS = sorted(t for t in _ALL_TOKENS if not t.startswith("WAVE-SINK-"))  # model/canary -> as-is
+
+
+def seal(token, secret):
+    """The on-the-wire form of a harness marker for a run: `WAVE-SINK-SQL#<secret>`. The hooks build the
+    same string from $WAVE_WITNESS; scan() looks for it. No secret -> the bare token (back-compat)."""
+    return f"{token}#{secret}" if secret else token
+
 # CWE -> class, for callers that carry only a cwe (mirror of prove._CLASS_CWE, injection classes only).
 _CWE_CLASS = {"CWE-78": "cmd", "CWE-89": "sqli", "CWE-943": "nosqli", "CWE-918": "ssrf", "CWE-22": "path",
               "CWE-79": "xss", "CWE-502": "deser", "CWE-601": "redirect", "CWE-639": "authz",
@@ -55,10 +77,20 @@ def _class_of(cls, cwe=""):
     return _CWE_CLASS.get((cwe or "").upper(), c)
 
 
-def scan(text):
-    """The set of harness witness tokens present in a run's output (accumulated across runs by investigate)."""
+def scan(text, secret=""):
+    """The set of harness witness tokens present in a run's output (accumulated across runs by investigate).
+
+    `secret` (the per-run witness seal, improvements 1a): when given, a HARNESS-planted sink marker counts
+    ONLY if it carries this run's secret (`WAVE-SINK-SQL#<secret>`) -- a bare `WAVE-SINK-SQL` from a cat'd
+    hook / scanned-source literal / memorization is IGNORED. Model-planted markers (WAVE-PWNED) and the
+    fired xss canary are matched the same way with or without a secret (each is sealed by its own means).
+    No secret -> legacy behaviour (bare match), for the boot-path oracle and isolated unit tests."""
     t = text or ""
-    found = {tok for tok in _ALL_TOKENS if tok in t}
+    if secret:
+        found = {tok for tok in _SINK_TOKENS if seal(tok, secret) in t}
+        found |= {tok for tok in _UNSEALED_TOKENS if tok != "WAVE_RENDER_CANARY:1" and tok in t}
+    else:
+        found = {tok for tok in _ALL_TOKENS if tok in t}
     if _XSS_FIRED.search(t):
         found.add("WAVE_RENDER_CANARY:1")           # the canary EXECUTED (not merely printed 'none')
     return found

@@ -25,6 +25,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 # Dependency installs (pip/npm) are network- AND memory-heavy -- pip resolving a big package (e.g. ansible)
 # in a 2GB container is fine ONCE, but under `prove --jobs N` several would run AT ONCE and OOM the box.
@@ -199,3 +200,45 @@ def install_packages(packages, *, deps: str, image: str = "python:3.12-slim", ki
     except Exception as e:
         return ExecResult("install: " + " ".join(pkgs), "", f"install: failed ({type(e).__name__}: {e})",
                           1, time.time() - t0)
+
+
+def seed_deps(target, *, deps: str, image: str = "python:3.12-slim", timeout: int = 600) -> ExecResult:
+    """Pre-install the TARGET's OWN declared dependencies into the shared `deps` dir ONCE, so the
+    investigate sandbox starts with them importable and the model never spends steps on `pip install`.
+    This is the deterministic, manifest-driven provisioning that a standalone library/CLI needs (there is
+    no app image to inherit deps from). Networked -- the one egress point, like install_packages: it mounts
+    the target read-only at /work and installs from its manifest into the deps store. `requirements.txt` ->
+    `-r`; a pyproject/setup project -> install the project itself (brings deps AND the importable package)."""
+    if shutil.which("docker") is None:
+        return ExecResult("seed-deps", "", "seed: docker is not available on this host", 127, 0.0)
+    root = Path(target)
+    if (root / "requirements.txt").exists():
+        inner = (f"pip install --no-input --disable-pip-version-check --target {_DEPS_MOUNT} "
+                 f"-r /work/requirements.txt")
+    elif any((root / n).exists() for n in ("pyproject.toml", "setup.py", "setup.cfg")):
+        inner = f"pip install --no-input --disable-pip-version-check --target {_DEPS_MOUNT} /work"
+    else:
+        return ExecResult("seed-deps", "", "seed: no python manifest at target root", 1, 0.0)
+    img = image if "python" in (image or "") else "python:3.12-slim"
+    name = "wave-seed-" + secrets.token_hex(4)
+    # Many projects derive their version from git (setuptools-scm / hatch-vcs / pdm). Building them from a
+    # mounted source tree (no usable .git) fails metadata generation -- which would sink the whole seed. Hand
+    # the build a pretend version so a VCS-versioned project still installs its deps. Harmless otherwise.
+    scm_env = []
+    for var in ("SETUPTOOLS_SCM_PRETEND_VERSION", "HATCH_VCS_PRETEND_VERSION", "PDM_BUILD_SCM_VERSION"):
+        scm_env += ["-e", f"{var}=0.0.0"]
+    cmd = ["docker", "run", "--rm", "--name", name, "--network", "host", "--memory", "2g", "--cpus", "2",
+           "-v", _docker_mount(str(root)) + ":/work:ro", "-v", _docker_mount(deps) + ":" + _DEPS_MOUNT,
+           *scm_env, img, "sh", "-c", inner]
+    t0 = time.time()
+    try:
+        with _INSTALL_SEM:                                   # serialize heavy installs across parallel jobs
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8",
+                               errors="replace")
+        return ExecResult("seed-deps", r.stdout or "", r.stderr or "", r.returncode, time.time() - t0)
+    except subprocess.TimeoutExpired:
+        subprocess.run(["docker", "kill", name], capture_output=True)
+        return ExecResult("seed-deps", "", f"seed: timed out after {timeout}s", 124, time.time() - t0,
+                          timed_out=True)
+    except Exception as e:
+        return ExecResult("seed-deps", "", f"seed: failed ({type(e).__name__}: {e})", 1, time.time() - t0)

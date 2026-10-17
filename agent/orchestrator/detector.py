@@ -25,9 +25,9 @@ from pathlib import Path
 from .repomap import _rel  # noqa: F401  (kept for symmetry with notebook; path handling below uses it indirectly)
 
 # severity for ranking survivors (the proof loop works the most dangerous first)
-_SEV = {"cmd": 9, "eval": 9, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nosqli": 7, "ssrf": 6,
-        "path": 6, "protopollution": 6, "proto": 6, "prototype": 6, "format": 6, "xss": 4, "authz": 5,
-        "idor": 5, "access": 5, "bola": 5, "bfla": 5, "redirect": 3, "other": 1}
+_SEV = {"cmd": 9, "eval": 9, "codegen": 8, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nosqli": 7,
+        "ssrf": 6, "path": 6, "protopollution": 6, "proto": 6, "prototype": 6, "format": 6, "xss": 4,
+        "authz": 5, "idor": 5, "access": 5, "bola": 5, "bfla": 5, "redirect": 3, "other": 1}
 
 # The canonical vulnerability classes the prover/oracle have a recipe for (mirrors prove._CLASS_CWE /
 # oracle.CLASS_WITNESS). A corrected_class is only useful if it is ONE of these -- the prover keys on it
@@ -37,8 +37,8 @@ _SEV = {"cmd": 9, "eval": 9, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nos
 # Langflow CVE-2025-3248 unauth-RCE got dropped. So we normalize every correction back to this taxonomy
 # (via _CLASS_ALIAS) and DROP any label that doesn't resolve, keeping the original recognized class.
 _KNOWN_CLASSES = {"cmd", "sqli", "nosqli", "ssrf", "path", "xss", "deser", "redirect", "authz", "idor",
-                  "access", "bola", "bfla", "eval", "ssti", "protopollution", "proto", "prototype",
-                  "memory", "format", "other"}
+                  "access", "bola", "bfla", "eval", "codegen", "ssti", "protopollution", "proto",
+                  "prototype", "memory", "format", "other"}
 
 # synonyms the model commonly emits -> the canonical class name above.
 _CLASS_ALIAS = {
@@ -54,6 +54,11 @@ _CLASS_ALIAS = {
     "insecure-deserialization": "deser", "deserialization": "deser", "pickle": "deser", "unpickle": "deser",
     "open-redirect": "redirect", "open_redirect": "redirect",
     "template-injection": "ssti", "server-side-template-injection": "ssti", "template": "ssti",
+    # codegen injection (CWE-94): attacker text built into EMITTED code that runs in a DIFFERENT program
+    # (an import/def line in generated source), distinct from in-process eval. "code-injection" stays -> eval
+    # (the safer in-process default); only codegen-specific phrasings resolve here.
+    "code-generation": "codegen", "codegen-injection": "codegen", "generated-code-injection": "codegen",
+    "code-generation-injection": "codegen", "template-code-injection": "codegen", "import-injection": "codegen",
     "prototype-pollution": "protopollution", "prototype_pollution": "protopollution", "proto-pollution": "proto",
     "broken-access-control": "access", "access-control": "access", "authorization": "authz", "auth": "authz",
     "insecure-direct-object-reference": "idor",

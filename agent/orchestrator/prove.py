@@ -33,14 +33,15 @@ from .models import Candidate
 _CLASS_CWE = {"cmd": "CWE-78", "sqli": "CWE-89", "nosqli": "CWE-943", "ssrf": "CWE-918", "path": "CWE-22",
               "xss": "CWE-79", "deser": "CWE-502", "redirect": "CWE-601", "authz": "CWE-639",
               "idor": "CWE-639", "access": "CWE-639", "bola": "CWE-639", "bfla": "CWE-639",
-              "eval": "CWE-95", "ssti": "CWE-1336", "protopollution": "CWE-1321", "proto": "CWE-1321",
-              "prototype": "CWE-1321", "memory": "CWE-120", "format": "CWE-134", "other": ""}
+              "eval": "CWE-95", "codegen": "CWE-94", "ssti": "CWE-1336", "protopollution": "CWE-1321",
+              "proto": "CWE-1321", "prototype": "CWE-1321", "memory": "CWE-120", "format": "CWE-134",
+              "other": ""}
 # classes the cheap in-process canary oracle (rung1) can witness; others go straight to the model prover
 _CANARY_CLASSES = {"cmd", "sqli", "nosqli", "ssrf", "path"}
 # severity for working order (mirrors detector._SEV so the proof loop works the most dangerous first)
-_SEV = {"cmd": 9, "eval": 9, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nosqli": 7, "ssrf": 6,
-        "path": 6, "protopollution": 6, "proto": 6, "prototype": 6, "format": 6, "authz": 6, "idor": 6,
-        "access": 6, "bola": 6, "bfla": 6, "xss": 4, "redirect": 3, "other": 1}
+_SEV = {"cmd": 9, "eval": 9, "codegen": 8, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nosqli": 7,
+        "ssrf": 6, "path": 6, "protopollution": 6, "proto": 6, "prototype": 6, "format": 6, "authz": 6,
+        "idor": 6, "access": 6, "bola": 6, "bfla": 6, "xss": 4, "redirect": 3, "other": 1}
 
 # intrinsically-dangerous sinks: executing them with a handed-in payload proves the MECHANISM (always true),
 # not attacker-control -> a `confirmed` here needs HIGH-confidence reachability (else -> anomalous_state).
@@ -109,6 +110,51 @@ def _to_candidate(surv, rel_index, target):
         sink=str(surv.get("sink") or ""),
         provable=cls in _CANARY_CLASSES and rel.endswith(".py") and bool(unit),
         rank=_SEV.get(cls, 1), route_hint=str(surv.get("input") or "")[:80], slice="", resolved_from="")
+
+
+import re as _re_mod
+
+
+def _sink_callee_candidate(c, cmap, target):
+    """If the flagged sink is a CALL to a repo-defined function (e.g. the line is inside a 400-line
+    `generate()` but the sink is `get_body(url)`, whose def lives in http.py), return a Candidate anchored
+    on that LEAF function -- the small, cleanly-callable unit the canary can import and drive directly, vs
+    the uncallable entrypoint. None for method calls (`x.open(...)`) or callees not defined in the repo.
+    SOUND: this only changes WHICH function the canary tries to import; the observer still requires the
+    marker to reach a sink in an unsafe position, so a wrong name-match just yields `unknown`, never a
+    false positive."""
+    if cmap is None:
+        return None
+    sink = (getattr(c, "sink", "") or "").strip()
+    m = _re_mod.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", sink)   # a leading BARE call name (not `obj.meth(`)
+    if not m:
+        return None
+    callee = m.group(1)
+    if callee == (getattr(c, "unit", "") or "").split("(")[0].strip():
+        return None                                              # already the enclosing unit -- nothing new
+    for p, fi in cmap.files.items():
+        rel = _rel(target, p)
+        if not rel.endswith(".py"):
+            continue
+        for f in list(fi.functions) + [mth for cl in fi.classes for mth in cl.methods]:
+            if f.name == callee:
+                return Candidate(
+                    file=str(Path(target) / rel), unit=f.name + (f.sig or "()"), line=f.line,
+                    cwe=c.cwe, family=c.family, detector="detector-leaf", sink=sink,
+                    provable=True, rank=c.rank, route_hint=getattr(c, "route_hint", ""), slice="",
+                    resolved_from="sink-callee")
+    return None
+
+
+def _canary(c, target, cmap):
+    """Run the cheap canary for a candidate, retrying through a manifest-built venv when the host can't
+    import it (non-web library). Returns a MicroResult. Used for both the enclosing unit and the leaf."""
+    mr = rung1.micro_exec(c, rt=None)
+    if mr.verdict == "unknown" and provision.has_py_manifest(target):
+        libenv = provision.library_env(target)               # non-web: venv from the target's own manifest
+        if libenv is not None and libenv.ready:
+            mr = rung1.micro_exec(c, rt=None, venv=libenv)
+    return mr
 
 
 def _subj(c):
@@ -186,7 +232,16 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     tstatus, tnote = taint.analyze(c)                        # intra-function value taint (Python + JS/TS; else unknown)
     reason = "not a canary-provable Python handler"
     if c.provable:
-        mr = rung1.micro_exec(c, rt=None)                    # cheap in-process canary (no boot, no model)
+        mr = _canary(c, target, cmap)                        # cheap canary on the enclosing unit (venv-aware)
+        if mr.verdict == "unknown":
+            # the sink line sits in an uncallable entrypoint -> drive the LEAF sink function directly (the
+            # web-handler assumption "sink's enclosing fn is a simple-input callable" fails for libraries).
+            leaf = _sink_callee_candidate(c, cmap, target)
+            if leaf is not None:
+                lmr = _canary(leaf, target, cmap)
+                if lmr.verdict in ("proven", "safe"):
+                    mr = lmr
+                    mr.reason = f"[via leaf sink {leaf.unit}] {mr.reason}"
         if mr.verdict == "proven":
             return {"verdict": "confirmed", "evidence": mr.evidence, "why": mr.reason, "ran": 0,
                     "oracle": f"rung1 micro-exec (stubs={mr.stubs})", "marker": mr.marker, "taint": tstatus}
@@ -255,6 +310,15 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         sink_env, hooks_dir = provision.sink_hook_env(target, briefs._is_js(c.file))
     except Exception:
         sink_env, hooks_dir = {}, None
+    # NON-WEB provisioning: for a Python library/CLI with a manifest, pre-seed the sandbox with the target's
+    # OWN deps (once, cached) so the model never spends steps on `pip install` (the datamodel BLOCKED-on-yaml
+    # case). None -> investigate provisions on demand as before (web apps inherit deps from their image).
+    inv_deps = None
+    if not briefs._is_js(c.file) and provision.has_py_manifest(target):
+        try:
+            inv_deps = provision.library_deps(target)
+        except Exception:
+            inv_deps = None
     try:
         # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
         # controlled egress point when online, not blanket container network access.
@@ -264,7 +328,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
                                image=img, mount=target, network="none", max_steps=max_steps,
                                step_timeout=step_to, online=online, write_tag=tag, hit_marker=hit,
                                sink_secret=sink_secret, reach_id=reach_id, sink_env=sink_env,
-                               sink_hooks_dir=hooks_dir)
+                               sink_hooks_dir=hooks_dir, deps=(inv_deps if inv_deps else None))
     finally:
         repro.remove(target, tag)
         if hooks_dir:
@@ -686,6 +750,7 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
             model.unload()
         except Exception:
             pass
+    provision.cleanup_library_envs()                         # remove any venvs built for non-web canary proof
 
     by = {v: [] for v in _VERDICT_ORDER}
     for d in prior.values():                                # last verdict per candidate

@@ -98,6 +98,12 @@ _SINKS_PY = [
     ("cmd",   re.compile(r"\bos\.system\s*\(|\bos\.popen\s*\(|\bsubprocess\.|\bpty\.spawn|\bcommands\.getoutput")),
     ("eval",  re.compile(r"\beval\s*\(|\bexec\s*\(|\bcompile\s*\(\s*[f\"']|\b__import__\s*\(")),
     ("path",  re.compile(r"\bopen\s*\(|\bsend_file\s*\(|os\.path\.join\s*\(|shutil\.(copy|move|rmtree)")),
+    # codegen injection (CWE-94): an f-string that builds a CODE STATEMENT from an interpolated value -- the
+    # value becomes executable code in the EMITTED/GENERATED file (danger is deferred to whoever imports it,
+    # not an in-process eval). NARROW on purpose: the Python keyword is immediately followed by the `{...}`
+    # interpolation (`f"from {x} import"`, `f"import {x}"`, `f"def {x}("`, `f"class {x}"`, `f"@{x}"`), so
+    # ordinary f-strings don't false-pin. This is the datamodel-code-generator imports.py (CVE-2026-55415) shape.
+    ("codegen", re.compile(r"""[fF]['"] *(?:from \{|import \{|def \{|class \{|@\{)""")),
 ]
 _SINKS_JS = [
     ("SQLi",  re.compile(r"\.query\s*\(|sequelize\.query|\.execute\s*\(|knex\.raw|\$queryRawUnsafe|\.\$queryRaw")),
@@ -107,6 +113,9 @@ _SINKS_JS = [
     # prototype pollution: a recursive merge/extend/set that copies attacker keys into an object (and thus
     # Object.prototype). __proto__ appearing literally is a strong tell.
     ("protopollution", re.compile(r"\bdefaultsDeep\b|\bmergeWith\b|_\.merge\s*\(|\.deepMerge\s*\(|deepmerge|\bsetWith\b|_\.set\s*\(|__proto__")),
+    # codegen injection (CWE-94): a template literal that builds a CODE STATEMENT from an interpolated value
+    # (`import ${x}`, `function ${x}(`, `class ${x}`) -> the value becomes code in the EMITTED file. Narrow.
+    ("codegen", re.compile(r"`\s*(?:import \$\{|export [^`]*\$\{|function \$\{|class \$\{)")),
 ]
 
 

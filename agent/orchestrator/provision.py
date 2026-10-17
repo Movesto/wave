@@ -491,6 +491,130 @@ def sink_hook_env(target, is_js):
     return {"PYTHONPATH": m}, str(hdir)
 
 
+# ---- Library proof environment (NON-WEB): a venv built from the target's OWN manifest so a canary
+# micro-exec can import the target's handlers out-of-process. This is what lets /sast prove a standalone
+# library/CLI tool (no server, no compose) -- the in-process executor dies on `import target` when the
+# target's third-party deps aren't in wave's own interpreter; this gives it an interpreter that has them. --
+@dataclass
+class LibraryEnv:
+    python: str = ""        # path to the venv's python (empty => not ready; prover degrades to investigate)
+    note: str = ""
+    root: str = ""          # the venv dir (for cleanup)
+
+    @property
+    def ready(self):
+        return bool(self.python)
+
+
+_PY_MANIFESTS = ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile")
+_LIBENV_CACHE = {}          # target -> LibraryEnv | None (build once per scan)
+import threading as _threading
+_LIBENV_LOCK = _threading.Lock()
+
+
+def has_py_manifest(target):
+    return any((Path(target) / n).exists() for n in _PY_MANIFESTS)
+
+
+def library_env(target, timeout=600):
+    """Build ONCE (cached, thread-safe) an isolated venv with the TARGET's own dependencies installed, so
+    a canary micro-exec can import the target's handlers OUT-OF-PROCESS. Returns a LibraryEnv (`.ready`
+    True when its deps installed), or None when the target has no Python manifest. Best-effort: a build
+    failure returns a not-ready LibraryEnv with a note (the caller just stays on the investigate path)."""
+    key = str(Path(target).resolve())
+    with _LIBENV_LOCK:
+        if key in _LIBENV_CACHE:
+            return _LIBENV_CACHE[key]
+        env = _build_library_env(target, timeout) if has_py_manifest(target) else None
+        _LIBENV_CACHE[key] = env
+        return env
+
+
+def _build_library_env(target, timeout):
+    import os as _os
+    import sys as _sys
+    import tempfile
+    import venv as _venv
+
+    root = Path(target)
+    vdir = Path(tempfile.mkdtemp(prefix="wave-libenv-"))
+    try:
+        _venv.create(str(vdir), with_pip=True)
+    except Exception as e:                                   # pip/venv unavailable on this host
+        return LibraryEnv(note=f"venv create failed: {type(e).__name__}: {e}", root=str(vdir))
+    py = str(vdir / ("Scripts" if _os.name == "nt" else "bin") / ("python.exe" if _os.name == "nt" else "python"))
+    # Install the target's deps. `-e .` reads the manifest (deps + the package itself, so it imports by
+    # name); fall back to a bare requirements.txt. Both are the canonical "make this project importable".
+    cmds = []
+    if any((root / n).exists() for n in ("pyproject.toml", "setup.py", "setup.cfg")):
+        cmds.append([py, "-m", "pip", "install", "--no-input", "--disable-pip-version-check", "-e", str(root)])
+    if (root / "requirements.txt").exists():
+        cmds.append([py, "-m", "pip", "install", "--no-input", "--disable-pip-version-check",
+                     "-r", str(root / "requirements.txt")])
+    ok, note = False, "no installable Python manifest"
+    for cmd in cmds:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8",
+                               errors="replace")
+        except Exception as e:
+            note = f"pip install errored: {type(e).__name__}: {e}"
+            continue
+        if r.returncode == 0:
+            ok, note = True, "deps installed"
+            break
+        note = ((r.stderr or "") + (r.stdout or "")).strip()[-300:]
+    print(f"[prove] library env: {'ready' if ok else 'not ready'} -- {note[:140]}", flush=True)
+    return LibraryEnv(python=(py if ok else ""), note=note, root=str(vdir))
+
+
+_LIBDEPS_CACHE = {}         # target -> deps dir path | None (seed once per scan, for the investigate sandbox)
+
+
+def library_deps(target, timeout=600):
+    """Seed ONCE (cached, thread-safe) a deps store with the TARGET's own dependencies installed for Linux,
+    so the INVESTIGATE sandbox starts with them importable and the model spends zero steps on `pip install`
+    (the non-web analogue of inheriting deps from an app image). Returns the deps dir, or None when there's
+    no manifest / docker is unavailable / the install fails (investigate then provisions on demand as before)."""
+    key = str(Path(target).resolve())
+    with _LIBENV_LOCK:
+        if key in _LIBDEPS_CACHE:
+            return _LIBDEPS_CACHE[key]
+        d = _seed_library_deps(target, timeout) if has_py_manifest(target) else None
+        _LIBDEPS_CACHE[key] = d
+        return d
+
+
+def _seed_library_deps(target, timeout):
+    import shutil as _shutil
+    import tempfile
+
+    from .execute import seed_deps
+    if _shutil.which("docker") is None:
+        return None
+    ddir = tempfile.mkdtemp(prefix="wave-libdeps-")
+    r = seed_deps(target, deps=ddir, timeout=timeout)
+    if r.exit_code == 0:
+        print("[prove] investigate sandbox: target deps pre-seeded from manifest", flush=True)
+        return ddir
+    print(f"[prove] investigate dep seed skipped ({(r.stderr or r.stdout or '').strip()[-120:]})", flush=True)
+    _shutil.rmtree(ddir, ignore_errors=True)
+    return None
+
+
+def cleanup_library_envs():
+    """Remove the venvs + deps stores built this run (called at the end of prove). Idempotent."""
+    import shutil as _shutil
+    with _LIBENV_LOCK:
+        for env in _LIBENV_CACHE.values():
+            if env is not None and env.root:
+                _shutil.rmtree(env.root, ignore_errors=True)
+        for ddir in _LIBDEPS_CACHE.values():
+            if ddir:
+                _shutil.rmtree(ddir, ignore_errors=True)
+        _LIBENV_CACHE.clear()
+        _LIBDEPS_CACHE.clear()
+
+
 def compose_env():
     """docker-compose env with common defaults so a required-var compose (`${POSTGRES_PASSWORD:?}`)
     doesn't fail variable substitution (used by both boot and per-piece micro-exec)."""

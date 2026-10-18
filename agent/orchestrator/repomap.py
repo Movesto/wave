@@ -17,7 +17,10 @@ import re
 # Infra / CI / build / test / vendor / docs paths. Real application code should be deep-read and PROVEN
 # before these: they are pin-dense with shell commands (every `$(...)` looks like a cmd sink) and otherwise
 # crowd out the real attack surface within a budget on big monorepos (the elasticsearch .buildkite case).
-_LOWPRI_DIRS = {"scripts", "tools", "bin", "ci", ".github", ".buildkite", "packaging", "dev-tools", "devtools",
+# NB: bare "tools" is NOT here -- in agent/LLM frameworks a NESTED tools/ dir (Langflow components/tools/,
+# langchain .../tools/) holds first-class runtime components that ARE the attack surface (the MCP Tools RCE
+# lived in components/tools/mcp_stdio.py). A top-level tools/ IS dev tooling -- handled separately below.
+_LOWPRI_DIRS = {"scripts", "bin", "ci", ".github", ".buildkite", "packaging", "dev-tools", "devtools",
                 "benchmarks", "benchmark", "test", "tests", "testfixtures", "fixtures", "vendor", "examples",
                 "example", "e2e", "__tests__", "__mocks__", "spec", "qa", "docs", "doc"}
 
@@ -46,7 +49,15 @@ def is_low_priority_path(path):
         return True
     if _TESTNAME_RE.search(base):
         return True
-    return bool(set(p.strip("/").split("/")) & _LOWPRI_DIRS)
+    segs = [s for s in p.strip("/").split("/") if s]
+    if set(segs) & _LOWPRI_DIRS:
+        return True
+    # A repo-ROOT tools/ is dev tooling; a NESTED tools/ is agent/LLM runtime code (components/tools/,
+    # .../tools/). Demote only when tools/ is the leading segment -- err toward SCANNING when it's nested or
+    # when the path is absolute (segs[0] is a drive/anchor), since missing real attack surface is the costly way.
+    if segs and segs[0] == "tools":
+        return True
+    return False
 from pathlib import Path
 
 from . import codemap, eyes, reachability
@@ -95,7 +106,12 @@ _SINKS_COMMON = [
 ]
 _SINKS_PY = [
     ("SQLi",  re.compile(r"\.execute\w*\s*\(|cursor\.execute|\.raw\s*\(|\btext\s*\(\s*[f\"'(]|\.filter\s*\(\s*[f\"']")),
-    ("cmd",   re.compile(r"\bos\.system\s*\(|\bos\.popen\s*\(|\bsubprocess\.|\bpty\.spawn|\bcommands\.getoutput")),
+    # cmd: stdlib process launch + LIBRARY-WRAPPED launchers that take a caller-supplied command. The MCP
+    # stdio transport (StdioServerParameters(command=...) -> stdio_client(...)) spawns command[0] on the host;
+    # a user-controlled command field is arbitrary-command execution (Langflow MCP Tools RCE, CVE-2026-105697),
+    # and the spawn lives inside the `mcp` package so no subprocess/os.system token appears in first-party code.
+    ("cmd",   re.compile(r"\bos\.system\s*\(|\bos\.popen\s*\(|\bsubprocess\.|\bpty\.spawn|\bcommands\.getoutput|"
+                         r"StdioServerParameters\s*\(|\bstdio_client\s*\(")),
     ("eval",  re.compile(r"\beval\s*\(|\bexec\s*\(|\bcompile\s*\(\s*[f\"']|\b__import__\s*\(")),
     ("path",  re.compile(r"\bopen\s*\(|\bsend_file\s*\(|os\.path\.join\s*\(|shutil\.(copy|move|rmtree)")),
     # codegen injection (CWE-94): an f-string that builds a CODE STATEMENT from an interpolated value -- the
@@ -107,7 +123,8 @@ _SINKS_PY = [
 ]
 _SINKS_JS = [
     ("SQLi",  re.compile(r"\.query\s*\(|sequelize\.query|\.execute\s*\(|knex\.raw|\$queryRawUnsafe|\.\$queryRaw")),
-    ("cmd",   re.compile(r"child_process|\bexec(Sync|File(Sync)?)?\s*\(|\bspawn(Sync)?\s*\(|\.exec\s*\(")),
+    ("cmd",   re.compile(r"child_process|\bexec(Sync|File(Sync)?)?\s*\(|\bspawn(Sync)?\s*\(|\.exec\s*\(|"
+                         r"\bStdioClientTransport\s*\(")),   # MCP JS/TS stdio launcher takes {command, args}
     ("eval",  re.compile(r"\beval\s*\(|new\s+Function\s*\(|vm\.(runIn|createContext)|setTimeout\s*\(\s*['\"]")),
     ("path",  re.compile(r"fs\.(readFile|writeFile|createReadStream|createWriteStream|sendFile|readdir|unlink)|res\.sendFile|\.sendFile\s*\(")),
     # prototype pollution: a recursive merge/extend/set that copies attacker keys into an object (and thus

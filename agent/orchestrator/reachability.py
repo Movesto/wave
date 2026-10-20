@@ -39,20 +39,36 @@ _FRONTEND_IMPORT = re.compile(r"\b(react|next|vue|svelte|@angular|solid-js|preac
 # and misclassifying a backend file there would SUPPRESS a real vuln (the dangerous direction); the
 # browser-global signal + JSX + framework-import catch real frontend robustly without them.
 _FRONTEND_DIRS = {"frontend", "client", "public", "webapp", "www"}
+# A SERVER directory is AUTHORITATIVE: a browser bundle does not live under server/ or backend/. This has to
+# win over the framework-import signal, which over-matches the SERVER builds of ISOMORPHIC libraries --
+# react-dom/server, react-server-dom-*/server, next/dist server code -- and would otherwise flag a server
+# file as frontend and suppress its real server-side sinks (the SSRF/CRLF in next's app-render/*.ts was lost
+# exactly this way). Suppressing a server sink is the dangerous direction, so a clear server marker overrides.
+_SERVER_DIRS = {"server", "backend"}
 
 
 def is_frontend(path, source="", imports=()):
     """Best-effort: does this file run in the BROWSER (not the server)? JSX suffix, a frontend directory, a
-    frontend-framework import, or a browser-only global in the source. Python is virtually never frontend."""
+    frontend-framework import, or a browser-only global in the source. A server/ or backend/ path segment is
+    authoritative (server, never browser) and wins over every frontend signal. Python is never frontend."""
     p = str(path).replace("\\", "/").lower()
+    segs = set(p.split("/"))
+    if segs & _SERVER_DIRS:                                 # under server/ or backend/ -> server code, full stop
+        return False
     if p.rsplit(".", 1)[-1] in ("tsx", "jsx"):
         return True
     if p.endswith(".py"):                                   # server language -- never browser code
         return False
-    if set(p.split("/")) & _FRONTEND_DIRS:
+    if segs & _FRONTEND_DIRS:
         return True
-    if any(_FRONTEND_IMPORT.search(str(i)) for i in (imports or ())):
-        return True
+    # a frontend-framework import -- but NOT its SERVER entrypoint (react-dom/server, .../server), which is
+    # server code shipped by an isomorphic package and must not mark the file as browser.
+    for i in (imports or ()):
+        s = str(i)
+        if "/server" in s.lower():
+            continue
+        if _FRONTEND_IMPORT.search(s):
+            return True
     return bool(source and _BROWSER_SIGNAL.search(source))
 
 # decorator / attribute-macro / annotation signals that a function receives external input DIRECTLY.

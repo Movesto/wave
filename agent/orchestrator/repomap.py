@@ -552,6 +552,61 @@ def _authz_pins(finfo, src_lines):
     return out
 
 
+# --- capability pins: a file that IMPORTS a risk-bearing library is worth a full read even when NO
+# call-site matched the sink dictionary -- the library-wrapped blind spot that hid the Langflow MCP RCE
+# (`import mcp` was the tell; the call-site regex missed `stdio_client(...)`). These are NOMINATIONS, not
+# located sinks: they carry a real class so the file flows through to a model read + CWE, anchored at the
+# first CODE line (never the import line, honoring the invariant above), and are SKIPPED when a real sink
+# of the same class already pinned the file. Deliberately NARROW -- only libraries whose mere presence
+# implies a risky capability the dictionary under-covers (XML parsers, LDAP clients, remote-exec/MCP). NOT
+# yaml/pickle/subprocess: their call sites are already well covered, so a presence pin there is pure noise.
+# defusedxml (the XXE *fix*) is excluded so the safe stack is not nominated.
+_CAP_IMPORTS = [
+    (re.compile(r"\bmcp\b"), "cmd", "mcp (spawns host processes over stdio)"),
+    (re.compile(r"\bparamiko\b|\bfabric\b|\bpexpect\b"), "cmd", "a remote/pty exec client"),
+    (re.compile(r"\blxml\b|\bxml\.etree\b|\bxml\.dom\b|\bxml\.sax\b|\bminidom\b|\bpulldom\b|\bxmlrpc\b"
+                r"|\blibxmljs\b|\bxml2js\b|fast-xml-parser"), "xxe", "an XML parser"),
+    (re.compile(r"\bldap3\b|python-ldap|\bimport\s+ldap\b|\bfrom\s+ldap\b|\bldapjs\b|ldapauth"),
+     "ldap", "an LDAP client"),
+]
+
+
+def _first_code_line(src_lines):
+    """First non-blank, non-comment, non-import source line -- where a capability pin anchors (never an
+    import line). 0 when the file is all imports/blank (nothing meaningful to read -> caller skips)."""
+    for i, raw in enumerate(src_lines, 1):
+        s = raw.strip()
+        if not s or s[0] in "#*" or s.startswith(("//", "/*")):
+            continue
+        if _is_import(raw):
+            continue
+        return i
+    return 0
+
+
+def _capability_pins(finfo, src_lines, existing, is_client):
+    """Nominate a file that imports a risk-bearing library (see _CAP_IMPORTS), even when the per-line sink
+    dictionary matched nothing. Dedupes against a real sink of the same class and respects the frontend
+    server-only suppression, so it only ADDS the library-wrapped files the dictionary alone would miss."""
+    have = {lbl for _ln, lbl, _c in existing}
+    blob = "\n".join(list(getattr(finfo, "imports", None) or ()) + src_lines[:40])
+    anchor = _first_code_line(src_lines)
+    if not anchor:
+        return []
+    out = []
+    for rx, cls, desc in _CAP_IMPORTS:
+        if cls in have:                                        # a real sink already located this class here
+            continue
+        if is_client and cls in reachability.SERVER_ONLY_CLASSES:
+            continue
+        if cls == "xxe" and "defusedxml" in blob:              # the safe XML stack -- not a candidate
+            continue
+        if rx.search(blob):
+            out.append((anchor, cls, f"uses {desc} — capability pin (no direct sink line matched)"))
+            have.add(cls)
+    return out
+
+
 def scan_pins(finfo):
     """Scan one file's lines for routes, 9-class sinks, and dynamic blind spots. Returns three lists of
     (line, label, code). Sink pins are hints, not verdicts."""
@@ -590,6 +645,7 @@ def scan_pins(finfo):
                 if rx.search(s):
                     dyn.append((i, kind, code))
                     break
+    sinks.extend(_capability_pins(finfo, src_lines, sinks, is_client))  # library-import nominations (dict blind spots)
     if not is_client:                                      # server-side only -- no authz surface in the browser
         sinks.extend(_authz_pins(finfo, src_lines))        # no-sink IDOR leads (deterministic recall)
     return routes, sinks, dyn
@@ -730,16 +786,25 @@ def render(cmap, root, per_file, pinned, rest, infra=None):
     return "\n".join(out)
 
 
-def _render_digest(cmap, root, per_file, pinned, infra):
+_DIGEST_FILE_BUDGET = 400      # cap pinned files in the dense digest so a huge monorepo can't blow the
+                               # model's context. `pinned` is reachability-ranked (see build_map), so the
+                               # kept top-N are the real attack surface and only the lowest-priority tail is
+                               # summarized out -- the inverse of the old pincount order, which kept the
+                               # loudest dev-tool files and truncated the subtle runtime sinks.
+
+
+def _render_digest(cmap, root, per_file, pinned, infra, budget=_DIGEST_FILE_BUDGET):
     """A DENSE attack-surface digest for the ledger's model input: per pinned file, only its path +
     purpose + [ROUTE]/[SINK]/[DYN] pins (no signature/structure dumps), plus infra misconfig pins. ~10x
     smaller than the full map, so the ledger sees the whole pinned surface even on a monorepo. The full
-    detailed map (with structure) stays as wave_map.md for viewing and tool-calling depth."""
+    detailed map (with structure) stays as wave_map.md for viewing and tool-calling depth. On a repo with
+    more than `budget` pinned files the lowest-priority tail is omitted (noted inline) to protect context."""
     out = ["# wave attack-surface digest — " + Path(root).name, "",
            "Pinned files (routes + 9-class sink candidates) and infra/CI misconfigs only -- the surface to "
            "triage. Pins are HINTS, not verdicts. Full source + structure of any file are available on "
            "request via tools.", "", "## PINNED CODE (routes + sinks)"]
-    for p in pinned:
+    shown = pinned[:budget] if (budget and len(pinned) > budget) else pinned
+    for p in shown:
         routes, sinks, dyn = per_file[p]
         fi = cmap.files[p]
         out.append("")
@@ -751,6 +816,9 @@ def _render_digest(cmap, root, per_file, pinned, infra):
             out.append(f"   [SINK:{label}] {code}   L{ln}" + (f"   {flow}" if flow else ""))
         for ln, kind, code in dyn:
             out.append(f"   [DYN:{kind}] {code}   L{ln}")
+    if len(shown) < len(pinned):
+        out += ["", f"... {len(pinned) - len(shown)} more pinned files omitted from this digest "
+                    f"(lowest reachability priority; all appear in wave_map.md). Request any by path."]
     sec = [i for i in infra if i["category"] not in _INVENTORY_ONLY and i["pins"]]
     if sec:
         out += ["", "## INFRASTRUCTURE & CI (misconfig pins)"]
@@ -776,7 +844,23 @@ def build_map(target, out=None):
         r, s, d = per_file[p]
         return len(r) * 2 + len(s) * 2 + len(d)
 
-    pinned = sorted([p for p in cmap.files if pincount(p) > 0], key=lambda p: (-pincount(p), p))
+    # Rank pinned files by REACHABILITY -- can untrusted input actually reach a sink here, following the
+    # call graph ACROSS files -- the same priority select.py applies at selection, lifted into the map
+    # stage so the digest the ledger model reads leads with the real attack surface instead of whatever
+    # file has the most raw pin lines. pincount only breaks ties. (Lazy import: select imports repomap, so
+    # a module-level import here would be a cycle.)
+    from . import select as _select
+
+    def _prio(p):
+        try:
+            pr, _sig = _select.file_priority(cmap, per_file, p)
+            return pr
+        except Exception:
+            return ()
+
+    pinned = [p for p in cmap.files if pincount(p) > 0]
+    pinned.sort()                                          # path asc -> deterministic, stable tie-break
+    pinned.sort(key=lambda p: (_prio(p), pincount(p)), reverse=True)
     rest = sorted(p for p in cmap.files if pincount(p) == 0)
     infra = scan_infra(target)
     text = render(cmap, root, per_file, pinned, rest, infra=infra)

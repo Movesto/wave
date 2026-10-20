@@ -79,6 +79,13 @@ _ROUTE = re.compile(
     r"|^\s*(resources?|namespace)\s+:"                                                 # ruby: rails resources
     r"|\b(get|post|put|delete|patch|head|options)\s*\(\s*\"[^\"]*\"\s*\)\s*\{"          # kotlin: ktor DSL get(\"/x\"){
     r"|\.route\s*\(\s*\"|\bweb::(get|post|put|delete|patch|resource|scope)\s*\("        # rust: actix .route/web::
+    # --- convention-based routing (no decorator): modern JS frameworks register handlers by FILE + EXPORT
+    # NAME, which the decorator/callback patterns above miss entirely (the next.js App-Router blind spot). ---
+    r"|export\s+(?:async\s+)?function\s+(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*\(" # next app-router / sveltekit +server / astro
+    r"|export\s+const\s+(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*="                  # ... arrow-assigned form
+    r"|export\s+(?:async\s+)?function\s+(?:loader|action)\s*\("                          # remix route loader/action
+    r"|export\s+(?:async\s+)?function\s+getServerSideProps\s*\("                         # next pages-router (request-time) data
+    r"|[\"']use server[\"']"                                                             # next server-actions directive
 )
 
 # --- The 9 injection classes the detector tries FIRST (class label -> sink regex) ---------------------

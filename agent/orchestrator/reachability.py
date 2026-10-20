@@ -89,6 +89,12 @@ _REMOTE_ENTRY_NAMES = {"handler", "handle", "lambda_handler", "handle_request", 
                        "onmessage", "on_data", "handle_message", "message_handler", "handle_event",
                        "resolver", "resolve_reference"}
 _LOCAL_ENTRY_NAMES = {"main"}                               # a CLI/process main() is NOT a remote attack surface
+# Modern JS frameworks register HTTP handlers with NO decorator -- by export NAME: Next.js App Router /
+# SvelteKit +server / Astro export GET/POST/..., Remix exports loader/action, Next pages-router exports
+# getServerSideProps. The uppercase method names are distinctive enough to trust on their own; the generic
+# ones (loader/action/getServerSideProps) are gated on the function being EXPORTED to stay low-FP.
+_HTTP_METHOD_EXPORTS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+_FRAMEWORK_ENTRY_EXPORTS = {"loader", "action", "getServerSideProps"}
 
 
 def entry_trust(func):
@@ -100,7 +106,12 @@ def entry_trust(func):
         return "local"
     if any(h in decs for h in _ROUTE_HINTS):
         return "remote"
-    name = (getattr(func, "name", "") or "").lower()
+    raw = getattr(func, "name", "") or ""                   # case-SENSITIVE: `GET` is a route handler, `get` is a getter
+    if raw in _HTTP_METHOD_EXPORTS:
+        return "remote"
+    if getattr(func, "exported", False) and raw in _FRAMEWORK_ENTRY_EXPORTS:
+        return "remote"
+    name = raw.lower()
     if name in _REMOTE_ENTRY_NAMES:
         return "remote"
     if name in _LOCAL_ENTRY_NAMES:

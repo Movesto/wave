@@ -34,7 +34,10 @@ SERVER_ONLY_CWE = {"CWE-918", "CWE-89", "CWE-943", "CWE-78", "CWE-22", "CWE-502"
 # has no window/document/localStorage), and catches a plain .js util that no path/suffix rule would.
 _BROWSER_SIGNAL = re.compile(r"\bwindow\.|\bdocument\.|\blocalStorage\b|\bsessionStorage\b|\bnavigator\.|"
                              r"import\.meta\.env|\baddEventListener\s*\(|\bdispatchEvent\s*\(")
-_FRONTEND_IMPORT = re.compile(r"\b(react|next|vue|svelte|@angular|solid-js|preact|@remix-run|react-router)\b", re.I)
+# NB: a leading `\b` would never match the @-scoped names (`\b` can't hold before `@`, a non-word char at the
+# start of a token), so @angular/@remix-run silently never matched. Use a non-word lookbehind, which holds for
+# both a plain name and an `@scope`.
+_FRONTEND_IMPORT = re.compile(r"(?<!\w)(react|next|vue|svelte|@angular|solid-js|preact|@remix-run|react-router)\b", re.I)
 # only UNAMBIGUOUS frontend dirs -- "components"/"pages"/"views" also occur server-side (MVC templates),
 # and misclassifying a backend file there would SUPPRESS a real vuln (the dangerous direction); the
 # browser-global signal + JSX + framework-import catch real frontend robustly without them.

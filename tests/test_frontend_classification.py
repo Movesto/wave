@@ -33,6 +33,14 @@ def test_real_client_code_is_still_frontend():
     assert R.is_frontend("src/ui/store.ts", source="window.localStorage.getItem('x')") is True  # browser global
 
 
+def test_scoped_framework_imports_are_detected():
+    # the @-scoped names (previously dead: `\b` can't match before `@`) must now register as frontend
+    assert R.is_frontend("src/app/root.ts", imports=["@angular/core"]) is True
+    assert R.is_frontend("app/routes/index.ts", imports=["@remix-run/react"]) is True
+    # ...but their SERVER entrypoint is not a frontend signal
+    assert R.is_frontend("app/lib/data.ts", imports=["@remix-run/server-runtime"]) is False
+
+
 # -------------------------------------------------- end to end through scan_pins ---------------------------
 
 def _sinks(tmp_path, subdir, name="handler.ts"):

@@ -156,14 +156,23 @@ def _cookie_sites(target, cap=50):
     return out
 
 
-def scan(target):
-    """Deterministic missing-control advisories. Returns a list of finding dicts."""
+def scan(target, cmap=None, per_file=None):
+    """Deterministic missing-control advisories. Returns a list of finding dicts. When `cmap`/`per_file`
+    are supplied (the `all` pipeline has them), also runs the reach x guard composition -- a remote route
+    that reaches a high-severity sink with no auth guard (authzcov) -- which needs the call graph."""
     target = str(target)
     try:
         routes = _routes.extract_routes(target)
     except Exception:
         routes = []
     findings = []
+
+    if cmap is not None and per_file is not None:
+        try:
+            from . import authzcov
+            findings.extend(authzcov.scan(target, cmap, per_file))
+        except Exception:
+            pass
 
     state_routes = [r for r in routes if (r.method or "").upper() in ("POST", "PUT", "DELETE", "PATCH", "ANY")]
     if state_routes and not _present(target, _CSRF_SIGNS):

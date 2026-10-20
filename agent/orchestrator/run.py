@@ -514,7 +514,7 @@ def cmd_all(args):
     # advisories. Appended to the one report so it's all in one place.
     from . import deps as _deps, controls as _controls, iac as _iac, secrets as _secrets
     dep_findings = _deps.scan(t, online=args.online)
-    ctl_findings = _controls.scan(t)
+    ctl_findings = _controls.scan(t, cmap=res.get("cmap"), per_file=per_file)
     iac_findings = _iac.scan(t)
     sec_findings = _secrets.scan(t)
     try:

@@ -104,7 +104,10 @@ _NATIVE_SYS = (
     "A run that fails with a MISSING dependency (ModuleNotFoundError / Cannot find module) or a refused "
     "connection is an ENVIRONMENT problem, NOT evidence the code is safe -- fix it: call the `install` tool "
     "with the missing package name(s) (it downloads them; your runs stay offline but can then import them), "
-    "asking ONLY for what this test needs -- then re-run. (Or start the service if that's what's missing.) "
+    "asking ONLY for what this test needs -- then re-run. If instead the whole INTERPRETER is missing (e.g. "
+    "'command not found: bun', or `Bun`/`Deno` is undefined because the target is a Bun/Deno project, not "
+    "Node), call `install` with `runtime` (e.g. {\"runtime\":\"bun\"}); the reply gives the image to pass to "
+    "run_command. (Or start the service if that's what's missing.) "
     "If you still cannot run it AND web_search is available, do what a pentester does when they can't run the "
     "target: RESEARCH it -- web_search the dependency/API/service, web_read the docs, and reason about "
     "whether the flow is exploitable given how that library ACTUALLY behaves. Then conclude a reasoned "
@@ -147,16 +150,21 @@ _RUN_TOOL = {"type": "function", "function": {
 
 _INSTALL_TOOL = {"type": "function", "function": {
     "name": "install",
-    "description": "Download the package(s) the sandbox is missing so you can import/run the target (e.g. "
-                   "after a ModuleNotFoundError / 'Cannot find module'). They are fetched WITH network and "
-                   "become importable in your later run_command calls, which still run OFFLINE. Ask ONLY for "
-                   "what THIS test needs -- not the whole project. pip names by default (python:...), npm "
-                   "names if the image is node:...",
+    "description": "Provision what the sandbox is missing so you can run the target. TWO modes: (1) give "
+                   "`packages` to download libraries (after a ModuleNotFoundError / 'Cannot find module') -- "
+                   "fetched WITH network, importable in your later OFFLINE run_command calls; ask ONLY for "
+                   "what THIS test needs. pip names by default (python:...), npm names if the image is "
+                   "node:... (2) give `runtime` to provision a whole INTERPRETER the default image lacks "
+                   "(e.g. the target is a Bun or Deno project and you hit 'command not found: bun' or "
+                   "`Bun`/`Deno` is undefined). Provisionable runtimes: bun, deno, node, python, ruby, go. "
+                   "The reply tells you which image to pass to run_command next.",
     "parameters": {"type": "object", "properties": {
         "packages": {"type": "array", "items": {"type": "string"},
                      "description": "package names, e.g. [\"fastapi\",\"python-jose[cryptography]\"]"},
-        "why": {"type": "string", "description": "what you need them for"},
-    }, "required": ["packages"]}}}
+        "runtime": {"type": "string",
+                    "description": "a runtime to provision instead of packages, e.g. \"bun\" or \"deno\""},
+        "why": {"type": "string", "description": "what you need it for"},
+    }}}}
 
 _CONCLUDE_TOOL = {"type": "function", "function": {
     "name": "conclude",
@@ -355,6 +363,59 @@ def _do_install(packages, *, deps, image, kind, state):
     return (f"install FAILED for {label} (exit {res.exit_code}"
             + (" TIMED OUT" if res.timed_out else "") + f"): {tail}\nTry a different package name (pip vs "
             "npm, or the real distribution name), or conclude 'blocked' if you cannot provision it.")
+
+
+def _verify_runtime(name, target, model):
+    """Second-opinion gate on a runtime provisioning request. The HARD floor is deterministic (the name must
+    be in the runtime registry -- the caller already checked). This adds a reject-only cross-check: if the
+    harness auto-detects a DIFFERENT concrete runtime for the project, the request is suspect. Fails OPEN
+    (allows) on any uncertainty, since the registry already bounds the image to a trusted one. Returns
+    (ok, reason)."""
+    from . import runtimes
+    detected = runtimes.detect(target) if target else None
+    if detected is not None and detected.name != name:
+        return False, (f"the project auto-detects as '{detected.name}', not '{name}' -- provision "
+                       f"'{detected.name}' (image {detected.image}) instead, or say why '{name}' is right")
+    return True, "matches the project" if detected is not None else "no conflicting signal"
+
+
+def _do_provision_runtime(name, *, target, deps, state, image, model=None):
+    """The model's `install({runtime: ...})` action: provision a whole RUNTIME (Bun/Deno/...) when the sink
+    code needs an interpreter the default sandbox lacks -- the generalization of the Bun miss. Strict HOW:
+    only a runtime named in the registry (trusted image) can be provisioned; a reject-only second-opinion
+    cross-check catches a wrong nomination. Returns a short message telling the model how to re-run. Never
+    raises."""
+    from . import runtimes, js_env
+    rt = runtimes.by_name(name)
+    if rt is None:
+        return (f"unknown runtime '{name}'. Provisionable runtimes: {', '.join(runtimes.names())}. "
+                "(For a library/package use `packages` instead.)")
+    if name.lower() in state["done"]:
+        return f"the {name} runtime is already provisioned this run -- re-run with image '{rt.image}'."
+    if state["installs"] >= state["budget"]:
+        return (f"install budget ({state['budget']}) reached -- no more provisioning. Test with what you "
+                "have, or conclude 'blocked' if the runtime is genuinely missing.")
+    ok, reason = _verify_runtime(name.lower(), target, model)
+    if not ok:
+        return f"provisioning '{name}' was NOT confirmed: {reason}."
+    print(f"\U0001f4e6 [deps] provisioning {name} runtime ({rt.image}) ...", flush=True)
+    img = js_env.ensure_image(rt.image)
+    state["installs"] += 1
+    if img is None:
+        print(f"\U0001f4e6 [deps] ✗ could not provision {name}", flush=True)
+        return (f"could not provision the {name} runtime (image {rt.image} not pullable here -- offline or "
+                "Docker unavailable). If you cannot run the code, RESEARCH the behavior and conclude a "
+                "reasoned 'believed', or 'blocked'.")
+    if target:
+        try:
+            js_env.ensure_runtime_deps(target, rt)           # best-effort: the project's own deps
+        except Exception:
+            pass
+    state["done"].add(name.lower())
+    print(f"\U0001f4e6 [deps] ✓ provisioned {name} runtime", flush=True)
+    run_hint = rt.run.replace("{file}", "/work/<your_repro>")
+    return (f"provisioned the {name} runtime. Re-run your test with run_command image='{rt.image}' "
+            f"(run a file with: `{run_hint}`). The project's deps were installed where they resolve.")
 
 
 def _do_write(path, content, mount, tag=""):
@@ -592,9 +653,13 @@ def _investigate_native(model, brief, *, image, mount, container, network, max_s
                 content = _do_write(args.get("path"), args.get("content"), mount, write_tag)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
                 continue
-            if name == "install":                            # model asks for a missing dep -> fetch it (visible)
-                content = _do_install(args.get("packages"), deps=deps, image=image, kind=dep_kind,
-                                      state=inst_state)
+            if name == "install":                            # model asks for a missing dep/runtime -> provision it (visible)
+                if args.get("runtime"):                      # whole-runtime nomination (Bun/Deno/...) -- the Bun-miss fix
+                    content = _do_provision_runtime(args.get("runtime"), target=mount, deps=deps,
+                                                    state=inst_state, image=image, model=model)
+                else:
+                    content = _do_install(args.get("packages"), deps=deps, image=image, kind=dep_kind,
+                                          state=inst_state)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": content})
                 continue
             if name in ("web_search", "web_read"):          # opt-in egress; degrades to '' on any failure
@@ -705,8 +770,12 @@ def _render(trail, limit=1500):
 
 
 def _dep_kind_for(image):
+    from . import runtimes
+    rt = runtimes.runtime_for_image(image)
+    if rt is not None:
+        return rt.dep_kind
     img = (image or "").lower()
-    return "js" if ("node" in img or "wave-js" in img or "tsx" in img) else "py"
+    return "js" if ("node" in img or "wave-js" in img or "tsx" in img or "bun" in img or "deno" in img) else "py"
 
 
 def investigate(model, brief, *, image="python:3.12-slim", mount=None, container=None,
@@ -774,9 +843,14 @@ def _investigate(model, brief, *, image, mount, container, network, max_steps, s
             continue
         kind = str(act.get("action", "")).lower()
         if kind == "install" and deps:
-            msg = _do_install(act.get("packages") or act.get("package"), deps=deps, image=image,
-                              kind=_dep_kind_for(image), state=inst_state)
-            trail.append(("install " + ", ".join(act.get("packages") or []), msg))
+            if act.get("runtime"):
+                msg = _do_provision_runtime(act.get("runtime"), target=mount, deps=deps,
+                                            state=inst_state, image=image, model=model)
+                trail.append((f"install runtime {act.get('runtime')}", msg))
+            else:
+                msg = _do_install(act.get("packages") or act.get("package"), deps=deps, image=image,
+                                  kind=_dep_kind_for(image), state=inst_state)
+                trail.append(("install " + ", ".join(act.get("packages") or []), msg))
             continue
         if kind in ("write", "write_file"):                 # author your OWN repro when the scaffold doesn't fit
             msg = _do_write(act.get("path"), act.get("content"), mount, write_tag)

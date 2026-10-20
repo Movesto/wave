@@ -42,8 +42,9 @@ _REQUEST_ACCESS_RE = re.compile(
 # module does not import the heavier detector. Unknown class -> 1.
 _SEV = {"cmd": 6, "eval": 6, "sqli": 6, "deser": 6,
         "ssrf": 5, "path": 5, "ssti": 5, "nosqli": 5, "authz": 5, "idor": 5, "access": 5, "bola": 5,
-        "protopollution": 4, "xss": 4, "redirect": 4,
-        "redos": 3, "memory": 3, "format": 3}
+        "xxe": 5, "ldap": 5, "xpath": 5,
+        "protopollution": 4, "xss": 4, "redirect": 4, "crlf": 4,
+        "redos": 3, "memory": 3, "format": 3, "weakcrypto": 3}
 
 
 def reads_request(source):

@@ -35,13 +35,15 @@ _CLASS_CWE = {"cmd": "CWE-78", "sqli": "CWE-89", "nosqli": "CWE-943", "ssrf": "C
               "idor": "CWE-639", "access": "CWE-639", "bola": "CWE-639", "bfla": "CWE-639",
               "eval": "CWE-95", "codegen": "CWE-94", "ssti": "CWE-1336", "protopollution": "CWE-1321",
               "proto": "CWE-1321", "prototype": "CWE-1321", "memory": "CWE-120", "format": "CWE-134",
-              "other": ""}
+              "xxe": "CWE-611", "crlf": "CWE-113", "ldap": "CWE-90", "xpath": "CWE-643",
+              "weakcrypto": "CWE-327", "other": ""}
 # classes the cheap in-process canary oracle (rung1) can witness; others go straight to the model prover
 _CANARY_CLASSES = {"cmd", "sqli", "nosqli", "ssrf", "path"}
 # severity for working order (mirrors detector._SEV so the proof loop works the most dangerous first)
 _SEV = {"cmd": 9, "eval": 9, "codegen": 8, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nosqli": 7,
-        "ssrf": 6, "path": 6, "protopollution": 6, "proto": 6, "prototype": 6, "format": 6, "authz": 6,
-        "idor": 6, "access": 6, "bola": 6, "bfla": 6, "xss": 4, "redirect": 3, "other": 1}
+        "xxe": 7, "ldap": 7, "ssrf": 6, "path": 6, "protopollution": 6, "proto": 6, "prototype": 6,
+        "format": 6, "xpath": 6, "authz": 6, "idor": 6, "access": 6, "bola": 6, "bfla": 6, "crlf": 5,
+        "xss": 4, "weakcrypto": 4, "redirect": 3, "other": 1}
 
 # intrinsically-dangerous sinks: executing them with a handed-in payload proves the MECHANISM (always true),
 # not attacker-control -> a `confirmed` here needs HIGH-confidence reachability (else -> anomalous_state).

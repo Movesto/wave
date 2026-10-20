@@ -198,7 +198,7 @@ def _cmd_sast(arg):
     print("    2) all             -- full scan of the security-surface files, NO patch")
     print("    3) all --all-files -- FULL scan of EVERY source file, NO patch (thorough; slow on big repos)")
     print("    4) all --patch     -- security-surface scan, plus auto-patch & reverify confirmations")
-    print("    5) quick           -- eyes + detect + deps, NO prove/Docker (fast; good for a first look)")
+    print("    5) quick           -- eyes + detect + controls/iac/secrets + deps, NO prove/Docker (fast first look)")
     choice = _ask("choose 1/2/3/4/5", "2")
     # Parallelism: the model stages read one file per call, so on a CLOUD model reading serially is the whole
     # reason a 40-file notebook took ~80 min. Fan out on a cloud model (no-op/serial on a local one).
@@ -209,9 +209,16 @@ def _cmd_sast(arg):
     if choice == "5":
         # Fast, no-Docker pass: notebook + falsifier (the detect verdicts) + the deterministic dep scan.
         # Skips the slow prove/patch stage entirely -- a quick first look / verification path.
-        print(CYAN(f"\n  > wave eyes {target} --notes  ;  wave detect {target}  ;  wave deps {target}\n"))
+        print(CYAN(f"\n  > wave eyes {target} --notes  ;  wave detect {target}  ;  "
+                   f"wave controls/iac/secrets {target}  ;  wave deps {target}\n"))
         _run_cli(["eyes", target, "--notes"] + jflag)
         _run_cli(["detect", target] + jflag)
+        # Infra coverage is NOT optional on a partial scan: the deterministic, no-model, no-network scanners
+        # (missing-controls / IaC / committed-secrets) always run so a quick look still sees container/CI/secret
+        # bugs. deps stays last (it alone needs network egress to OSV.dev).
+        _run_cli(["controls", target])
+        _run_cli(["iac", target])
+        _run_cli(["secrets", target])
         _run_cli(["deps", target])
         print(DIM(f"  detect verdicts -> {target}/wave_detect.jsonl   deps -> {target}/wave_deps.md"))
         return

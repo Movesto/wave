@@ -120,6 +120,21 @@ _SINKS_PY = [
     # interpolation (`f"from {x} import"`, `f"import {x}"`, `f"def {x}("`, `f"class {x}"`, `f"@{x}"`), so
     # ordinary f-strings don't false-pin. This is the datamodel-code-generator imports.py (CVE-2026-55415) shape.
     ("codegen", re.compile(r"""[fF]['"] *(?:from \{|import \{|def \{|class \{|@\{)""")),
+    # XXE (CWE-611): an XML parser that can resolve external entities / DTDs. `defusedxml` is the safe variant;
+    # a direct etree/minidom/sax/pulldom/xmlrpc parse of untrusted XML is the sink (lxml resolve_entities=True
+    # is an explicit opt-in to the danger).
+    ("xxe",   re.compile(r"etree\.(parse|fromstring|XML)\s*\(|\bminidom\.parse\w*\s*\(|\bxml\.sax\.|"
+                         r"\bpulldom\.|\bxmlrpc\.client|\bresolve_entities\s*=\s*True")),
+    # XPath injection (CWE-643): a user string built into an XPath query (lxml .xpath() / etree.XPath()).
+    ("xpath", re.compile(r"\.xpath\s*\(|etree\.XPath\s*\(")),
+    # LDAP injection (CWE-90): a user value interpolated into an LDAP search filter (python-ldap / ldap3).
+    ("ldap",  re.compile(r"\.search_s\s*\(|\.search_ext\w*\s*\(|\.search_st\s*\(")),
+    # CRLF / HTTP response splitting (CWE-113): raw input written into a response header name/value.
+    ("crlf",  re.compile(r"\.set_header\s*\(|\.add_header\s*\(|\.send_header\s*\(")),
+    # weak crypto (CWE-327): a broken hash or cipher used where a security property is expected. PRESENCE pin
+    # (like memory/format/redos) -> lands needs-review, not auto-proved. Generic PRNG (random.*) deliberately
+    # NOT pinned -- too noisy on scientific/ML repos; broken-cipher/hash tells are the sound signal.
+    ("weakcrypto", re.compile(r"hashlib\.(md5|sha1)\b|\bCrypto\.Cipher\.(DES|ARC4)\b|\bMODE_ECB\b")),
 ]
 _SINKS_JS = [
     ("SQLi",  re.compile(r"\.query\s*\(|sequelize\.query|\.execute\s*\(|knex\.raw|\$queryRawUnsafe|\.\$queryRaw")),
@@ -133,6 +148,18 @@ _SINKS_JS = [
     # codegen injection (CWE-94): a template literal that builds a CODE STATEMENT from an interpolated value
     # (`import ${x}`, `function ${x}(`, `class ${x}`) -> the value becomes code in the EMITTED file. Narrow.
     ("codegen", re.compile(r"`\s*(?:import \$\{|export [^`]*\$\{|function \$\{|class \$\{)")),
+    # XXE (CWE-611): a node XML parser with entity resolution on (libxmljs, xmldom with noent).
+    ("xxe",   re.compile(r"\blibxmljs\b|\.parseXmlString\s*\(|\bnoent\s*:\s*true\b")),
+    # XPath injection (CWE-643): a user string built into an XPath query.
+    ("xpath", re.compile(r"document\.evaluate\s*\(|\bxpath\.(select|evaluate)\s*\(|\.selectNodes\s*\(")),
+    # LDAP injection (CWE-90): an LDAP search with an interpolated filter (ldapjs).
+    ("ldap",  re.compile(r"\bldapjs\b|\bnew\s+ldap\.")),
+    # CRLF / HTTP response splitting (CWE-113): raw input into a response header.
+    ("crlf",  re.compile(r"\.setHeader\s*\(|\.writeHead\s*\(|\bres\.set\s*\(")),
+    # weak crypto / insecure randomness (CWE-327/338): broken hash/cipher, or Math.random() where a token is
+    # expected. PRESENCE pin -> needs-review.
+    ("weakcrypto", re.compile(r"createHash\s*\(\s*['\"](md5|sha1)['\"]|createCipheriv?\s*\(\s*['\"]des|"
+                              r"\bMath\.random\s*\(\s*\)")),
 ]
 
 
@@ -147,6 +174,15 @@ _SINKS_PHP = [
     ("deser",    re.compile(r"\bunserialize\s*\(")),
     ("xss",      re.compile(r"\becho\s+[^;]*\$|\bprint\s+[^;]*\$|print_r\s*\(\s*\$")),
     ("redirect", re.compile(r"header\s*\(\s*[\"']\s*Location\s*:")),
+    # XXE (CWE-611): simplexml/DOM/xml_parse loading untrusted XML (classic PHP XXE via LIBXML_NOENT).
+    ("xxe",      re.compile(r"simplexml_load_(string|file)\s*\(|->loadXML\s*\(|new\s+DOMDocument|"
+                            r"xml_parse\s*\(|LIBXML_NOENT")),
+    # XPath injection (CWE-643).
+    ("xpath",    re.compile(r"->xpath\s*\(|new\s+DOMXPath|xpath_eval\s*\(")),
+    # LDAP injection (CWE-90).
+    ("ldap",     re.compile(r"ldap_search\s*\(|ldap_list\s*\(|ldap_read\s*\(")),
+    # weak crypto (CWE-327): md5/sha1 as a security hash, or mt_rand/rand for tokens.
+    ("weakcrypto", re.compile(r"\bmd5\s*\(|\bsha1\s*\(|\bmcrypt_|\bmt_rand\s*\(")),
 ]
 # Ruby sinks (complete table)
 _SINKS_RUBY = [
@@ -182,6 +218,18 @@ _SINKS_JAVA = [
     ("eval",     re.compile(r"ScriptEngine|\.eval\s*\(|Nashorn|GroovyShell")),
     ("xss",      re.compile(r"\.getWriter\(\)\.(print|write)|response\.getWriter|out\.print\s*\(")),
     ("redirect", re.compile(r"sendRedirect\s*\(|RedirectView")),
+    # XXE (CWE-611): a JAXP/DOM/SAX/StAX/JAXB parser factory (unsafe unless FEATURE_SECURE_PROCESSING is set).
+    ("xxe",      re.compile(r"DocumentBuilderFactory|SAXParserFactory|XMLInputFactory|SAXReader|XMLReader\b|"
+                            r"SAXBuilder|TransformerFactory|SchemaFactory|Unmarshaller\b")),
+    # XPath injection (CWE-643).
+    ("xpath",    re.compile(r"XPathFactory|xpath\.(compile|evaluate)|XPathExpression")),
+    # LDAP injection (CWE-90): a JNDI DirContext search with an interpolated filter.
+    ("ldap",     re.compile(r"\bDirContext\b|InitialDirContext|new\s+SearchControls")),
+    # CRLF / HTTP response splitting (CWE-113).
+    ("crlf",     re.compile(r"\.setHeader\s*\(|\.addHeader\s*\(|response\.addCookie")),
+    # weak crypto (CWE-327): broken hash/cipher or java.util.Random for security.
+    ("weakcrypto", re.compile(r"MessageDigest\.getInstance\s*\(\s*\"(MD5|SHA-1)\"|"
+                              r"Cipher\.getInstance\s*\(\s*\"(DES|RC4|DESede)|new\s+Random\s*\(")),
 ]
 _SINKS_CSHARP = [
     ("SQLi",     re.compile(r"SqlCommand\s*\(|\.(ExecuteReader|ExecuteNonQuery|ExecuteScalar)\s*\(|"
@@ -192,6 +240,15 @@ _SINKS_CSHARP = [
     ("deser",    re.compile(r"BinaryFormatter|XmlSerializer|JavaScriptSerializer|LosFormatter|NetDataContractSerializer")),
     ("xss",      re.compile(r"Response\.Write\s*\(|Html\.Raw\s*\(")),
     ("redirect", re.compile(r"Response\.Redirect\s*\(")),
+    # XXE (CWE-611): .NET XML readers that resolve a DTD unless XmlResolver is nulled.
+    ("xxe",      re.compile(r"XmlTextReader|XmlDocument\b|XDocument\.(Load|Parse)|DataSet\.ReadXml|XmlReader\.Create")),
+    # XPath injection (CWE-643).
+    ("xpath",    re.compile(r"SelectNodes\s*\(|SelectSingleNode\s*\(|XPathExpression")),
+    # LDAP injection (CWE-90).
+    ("ldap",     re.compile(r"DirectorySearcher|new\s+DirectoryEntry|SearchRequest\s*\(")),
+    # weak crypto (CWE-327): broken hash/cipher providers or System.Random for security.
+    ("weakcrypto", re.compile(r"MD5\.Create|SHA1\.Create|DESCryptoServiceProvider|RC2CryptoServiceProvider|"
+                              r"new\s+Random\s*\(")),
 ]
 _SINKS_RUST = [
     ("cmd",      re.compile(r"Command::new\s*\(|process::Command|\.arg\s*\(")),

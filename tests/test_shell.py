@@ -86,11 +86,14 @@ def test_sast_full_with_patch(monkeypatch):
     assert calls == [["all", "./repo", "--patch", "--online"]]        # depth 4 = patch
 
 
-def test_sast_quick_runs_eyes_detect_deps_no_docker(monkeypatch):
+def test_sast_quick_runs_eyes_detect_infra_deps_no_docker(monkeypatch):
     calls = _capture(monkeypatch)
     monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "5" if "choose" in prompt else "./repo")
     shell._cmd_sast("")
-    assert calls == [["eyes", "./repo", "--notes"], ["detect", "./repo"], ["deps", "./repo"]]
+    # quick = fast, no-Docker first look, but infra coverage (controls/iac/secrets) is NOT optional on a
+    # partial scan -- the deterministic no-model scanners always run; deps stays last (it alone needs network).
+    assert calls == [["eyes", "./repo", "--notes"], ["detect", "./repo"],
+                     ["controls", "./repo"], ["iac", "./repo"], ["secrets", "./repo"], ["deps", "./repo"]]
 
 
 def test_sast_full_without_online(monkeypatch):

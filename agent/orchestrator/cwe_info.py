@@ -32,6 +32,11 @@ _CWE = {
     "CWE-134":  ("Format String", "high", "Never pass untrusted input as a format string; use a constant format with explicit arguments."),
     "CWE-190":  ("Integer Overflow", "medium", "Range-check arithmetic on untrusted sizes; use checked or widening operations."),
     "CWE-248":  ("Uncaught Exception / Denial of Service", "medium", "Handle errors explicitly; avoid unwrap()/expect()/unchecked parses on untrusted input."),
+    "CWE-611":  ("XML External Entity (XXE)", "high", "Disable DTD/external-entity resolution on the XML parser (set FEATURE_SECURE_PROCESSING / XmlResolver=null / LIBXML flags), or use a hardened parser like defusedxml."),
+    "CWE-113":  ("HTTP Response Splitting (CRLF Injection)", "medium", "Strip or reject CR/LF in any value written to a response header; use the framework's header API, never string concatenation."),
+    "CWE-90":   ("LDAP Injection", "high", "Escape LDAP filter metacharacters (RFC 4515) or bind parameters; never build a filter by string concatenation."),
+    "CWE-643":  ("XPath Injection", "high", "Use a parameterized/compiled XPath with variable binding; never concatenate untrusted input into the expression."),
+    "CWE-327":  ("Use of a Broken or Risky Cryptographic Algorithm", "medium", "Replace MD5/SHA-1/DES/RC4/ECB with a modern primitive (SHA-256+, AES-GCM); use a CSPRNG (secrets/os.urandom) for tokens."),
 }
 
 # class label (the notebook/detector's coarse tag) -> a representative CWE, for when no CWE id is present
@@ -39,7 +44,8 @@ _CLASS_CWE = {
     "sqli": "CWE-89", "nosqli": "CWE-943", "cmd": "CWE-78", "xss": "CWE-79", "path": "CWE-22",
     "ssrf": "CWE-918", "deser": "CWE-502", "redirect": "CWE-601", "eval": "CWE-95", "ssti": "CWE-1336",
     "protopollution": "CWE-1321", "authz": "CWE-639", "idor": "CWE-639", "memory": "CWE-120",
-    "format": "CWE-134", "panic": "CWE-248",
+    "format": "CWE-134", "panic": "CWE-248", "xxe": "CWE-611", "crlf": "CWE-113", "ldap": "CWE-90",
+    "xpath": "CWE-643", "weakcrypto": "CWE-327",
 }
 
 _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}

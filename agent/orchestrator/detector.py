@@ -26,7 +26,8 @@ from .repomap import _rel  # noqa: F401  (kept for symmetry with notebook; path 
 
 # severity for ranking survivors (the proof loop works the most dangerous first)
 _SEV = {"cmd": 9, "eval": 9, "codegen": 8, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nosqli": 7,
-        "ssrf": 6, "path": 6, "protopollution": 6, "proto": 6, "prototype": 6, "format": 6, "xss": 4,
+        "xxe": 7, "ldap": 7, "ssrf": 6, "path": 6, "protopollution": 6, "proto": 6, "prototype": 6,
+        "format": 6, "xpath": 6, "crlf": 5, "xss": 4, "weakcrypto": 4,
         "authz": 5, "idor": 5, "access": 5, "bola": 5, "bfla": 5, "redirect": 3, "other": 1}
 
 # The canonical vulnerability classes the prover/oracle have a recipe for (mirrors prove._CLASS_CWE /
@@ -38,7 +39,7 @@ _SEV = {"cmd": 9, "eval": 9, "codegen": 8, "deser": 8, "ssti": 8, "sqli": 8, "me
 # (via _CLASS_ALIAS) and DROP any label that doesn't resolve, keeping the original recognized class.
 _KNOWN_CLASSES = {"cmd", "sqli", "nosqli", "ssrf", "path", "xss", "deser", "redirect", "authz", "idor",
                   "access", "bola", "bfla", "eval", "codegen", "ssti", "protopollution", "proto",
-                  "prototype", "memory", "format", "other"}
+                  "prototype", "memory", "format", "xxe", "crlf", "ldap", "xpath", "weakcrypto", "other"}
 
 # synonyms the model commonly emits -> the canonical class name above.
 _CLASS_ALIAS = {
@@ -63,6 +64,13 @@ _CLASS_ALIAS = {
     "broken-access-control": "access", "access-control": "access", "authorization": "authz", "auth": "authz",
     "insecure-direct-object-reference": "idor",
     "buffer-overflow": "memory", "format-string": "format",
+    "xml-external-entity": "xxe", "xml-external-entities": "xxe", "xxe-injection": "xxe", "xml-injection": "xxe",
+    "crlf-injection": "crlf", "http-response-splitting": "crlf", "response-splitting": "crlf",
+    "header-injection": "crlf", "http-header-injection": "crlf",
+    "ldap-injection": "ldap", "xpath-injection": "xpath",
+    "weak-crypto": "weakcrypto", "weak-cryptography": "weakcrypto", "broken-crypto": "weakcrypto",
+    "insecure-crypto": "weakcrypto", "weak-hash": "weakcrypto", "weak-cipher": "weakcrypto",
+    "insecure-randomness": "weakcrypto", "predictable-random": "weakcrypto",
 }
 
 

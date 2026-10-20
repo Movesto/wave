@@ -84,3 +84,53 @@ def test_controls_runs_authzcov_only_with_cmap(tmp_path):
 
 def test_scan_is_safe_without_cmap():
     assert authzcov.scan("nonexistent", None, None) == []
+
+
+# -------- inline framework routes (anchor B): the opencode/Hono shape the call graph can't name ----------
+
+def _ts(tmp_path, body):
+    (tmp_path / "server.ts").write_text(body, encoding="utf-8")
+    res = repomap.build_map(str(tmp_path), out=str(tmp_path / "map.md"))
+    return res["cmap"], res["per_file"]
+
+
+def test_inline_route_sink_in_server_file_is_flagged(tmp_path):
+    # an anonymous Hono-style callback -> the sink has NO enclosing function; the file is a server endpoint
+    # (reads c.req) so it is anchored by file, not call graph. This is the opencode shell-route shape.
+    cmap, per_file = _ts(tmp_path,
+        "import { Hono } from 'hono'\n"
+        "const app = new Hono()\n"
+        "app.post('/run', async (c) => {\n"
+        "  const cmd = c.req.query('cmd')\n"
+        "  return child_process.exec(cmd)\n"     # cmd sink inside an inline, unnamed route callback
+        "})\n")
+    findings = authzcov.scan(str(tmp_path), cmap, per_file)
+    assert any("inline" in f["title"] for f in findings), f"inline route sink must be flagged: {findings}"
+
+
+def test_global_auth_suppresses_inline_route(tmp_path):
+    cmap, per_file = _ts(tmp_path,
+        "import { Hono } from 'hono'\n"
+        "import { bearerAuth } from 'hono/bearer-auth'\n"
+        "const app = new Hono()\n"
+        "app.use(bearerAuth({ token: process.env.TOKEN }))\n"   # app-wide auth -> covers every route
+        "app.post('/run', async (c) => {\n"
+        "  const cmd = c.req.query('cmd')\n"
+        "  return child_process.exec(cmd)\n"
+        "})\n")
+    findings = authzcov.scan(str(tmp_path), cmap, per_file)
+    assert not any(f.get("control") == "unauth-exec" for f in findings), "an app-wide auth guard must suppress"
+
+
+# -------- the event-handler exclusion (why the uninstall.ts/spawn.ts CLI false-positives went away) ------
+
+class _Fn:
+    def __init__(self, name="", decorators=(), exported=False):
+        self.name, self.decorators, self.exported = name, list(decorators), exported
+
+
+def test_http_route_is_a_web_entry_but_event_handler_is_not():
+    assert authzcov._is_web_route_entry(_Fn(decorators=["@app.post('/x')"]))      # real HTTP route
+    assert authzcov._is_web_route_entry(_Fn(name="POST", exported=True))          # App-Router method export
+    assert not authzcov._is_web_route_entry(_Fn(name="handler", decorators=["wave:event-handler"]))  # event bus
+    assert not authzcov._is_web_route_entry(_Fn(name="handler"))                  # bare CLI handler name

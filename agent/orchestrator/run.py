@@ -259,6 +259,10 @@ def cmd_prove(args):
     from . import prove
     from .model import Model
     out_dir = str(Path(args.candidates).parent) if args.candidates else args.target
+    if getattr(args, "boot", False):                          # opt-in boot-and-drive witness (part 2)
+        os.environ["WAVE_BOOT_WITNESS"] = "1"
+        if getattr(args, "boot_heavy", False):
+            os.environ["WAVE_BOOT_HEAVY"] = "1"
     model = Model()
     by, paths = prove.run(model, args.target, candidates_path=args.candidates, budget=args.budget,
                           out_dir=out_dir, gate=not args.no_reach_gate, online=args.online,
@@ -362,6 +366,10 @@ def cmd_all(args):
     from . import detector, notebook, prove, repomap
     from .model import Model
     t = args.target
+    if getattr(args, "boot", False):                          # opt-in boot-and-drive witness (part 2)
+        os.environ["WAVE_BOOT_WITNESS"] = "1"
+        if getattr(args, "boot_heavy", False):
+            os.environ["WAVE_BOOT_HEAVY"] = "1"
     model = Model()
 
     # Preflight: one cheap model call BEFORE the (expensive) map, so a dead/unauthorized endpoint fails loudly
@@ -788,6 +796,12 @@ def main(argv=None):
     pr.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="prove N survivors in PARALLEL (cloud model only; local single-GPU stays serial). "
                          "~4 fits a 32GB/6-core box; lower for heavy compiled builds")
+    pr.add_argument("--boot", action="store_true",
+                    help="for a feasible command-exec HTTP route, BOOT the app in the sandbox and drive a live "
+                         "request to witness it (opt-in; heavier). Needs Docker; capped mem/cpu/time")
+    pr.add_argument("--boot-heavy", action="store_true",
+                    help="also allow a boot-and-drive witness the preflight rated HEAVY (big monorepo) -- only "
+                         "if your hardware can take it")
     pr.set_defaults(func=cmd_prove)
 
     pt = sub.add_parser("patch", help="Stage 4: patch each confirmed finding + reverify with the same proof")
@@ -843,6 +857,11 @@ def main(argv=None):
                     help="Stage 5 Phase 2/3: also run the model cross-file reconcile + re-investigate (adds cost)")
     al.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="prove N survivors in PARALLEL (cloud model only; ~4 fits a 32GB/6-core box)")
+    al.add_argument("--boot", action="store_true",
+                    help="for a feasible command-exec HTTP route, BOOT the app + drive a live request to "
+                         "witness it (opt-in; heavier, needs Docker)")
+    al.add_argument("--boot-heavy", action="store_true",
+                    help="also allow a boot-and-drive witness the preflight rated HEAVY")
     al.set_defaults(func=cmd_all)
 
     dp = sub.add_parser("deps", help="scan dependencies for known CVEs (OSV.dev; deterministic, needs network)")

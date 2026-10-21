@@ -25,7 +25,7 @@ import secrets
 import shutil
 from pathlib import Path
 
-from . import briefs, codemap, oracle, provision, reachability, recorder, repro, routes, rung1, taint, witness_plan, xtaint
+from . import boot_witness, briefs, codemap, oracle, provision, reachability, recorder, repro, routes, rung1, runtimes, taint, witness_plan, xtaint
 from . import investigate as invmod
 from .models import Candidate
 
@@ -317,6 +317,30 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
                                f"{jr.name}-only path would be misreported as a 'believed' lead"}
             img = jr.image or img
             js_run = jr.run or js_run
+    # OPT-IN BOOT-AND-DRIVE WITNESS (part 2): for an enabled + FEASIBLE command-exec ROUTE, actually boot the
+    # app and drive a live request BEFORE the read-only model investigate. A definitive result
+    # (confirmed/anomalous_state/refuted) short-circuits; a 'blocked' boot falls through to the normal lead so
+    # we still report it. Gated: WAVE_BOOT_WITNESS=1 + the preflight plan's feasibility ('ready', or 'heavy'
+    # only with WAVE_BOOT_HEAVY=1); 'underspecified' is never auto-booted.
+    if (route is not None and wplan is not None and getattr(wplan, "needed", False)
+            and have_docker and boot_witness.enabled() and briefs._is_js(c.file)
+            and boot_witness.is_applicable(c, wplan)):
+        _heavy_ok = os.environ.get("WAVE_BOOT_HEAVY", "").strip().lower() in ("1", "true", "yes", "on")
+        if wplan.feasibility == "ready" or (wplan.feasibility == "heavy" and _heavy_ok):
+            _rt = runtimes.runtime_for_image(img)
+            br = boot_witness.drive(target, c, wplan, image=img, runtime=(_rt.name if _rt else "node"),
+                                    route=route, model=model,
+                                    code_window=briefs._code_window(c.file, getattr(c, "line", 0)))
+            if br is not None and br.verdict != "blocked":
+                return {"verdict": br.verdict, "evidence": br.evidence, "why": br.why,
+                        "oracle": "boot-and-drive witness", "ran": 1, "taint": tstatus, "image": img,
+                        "reach_proof": ("witnessed" if br.verdict == "confirmed" else "none"),
+                        "witness": ([br.marker] if br.marker else []),
+                        "harness_witnessed": br.verdict == "confirmed", "harness_marker": br.marker,
+                        "oracle_tier": "marker", "witness_plan": wplan.as_dict(),
+                        "_trail": [(f"boot `{wplan.entrypoint}` + drive {route[0]} {route[1]}",
+                                    (br.log or br.why)[:1500])]}
+            # a 'blocked' boot (couldn't bind / too heavy) -> fall through to the normal model investigate
     scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag,
                            entry=build_entry, run_tmpl=js_run)
     step_to = (300 if mode in briefs.COMPILED_MODES               # build/fetch a standalone repro

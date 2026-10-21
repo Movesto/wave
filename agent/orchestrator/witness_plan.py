@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -130,12 +132,143 @@ def _modules_count(pkg_dir):
         return 0
 
 
-def _cost_tier(modules_count, direct_deps):
-    if modules_count > 400 or direct_deps > 150:
+def _cost_tier(modules_count, direct_deps, modules_mb=0):
+    """Coarse boot-cost tier. SIZE dominates when we've measured it (package COUNT is unreliable across
+    bun/npm/pnpm layouts -- bun's node_modules shows few top-level entries for gigabytes on disk)."""
+    if modules_mb > 800 or modules_count > 400 or direct_deps > 150:
         return "heavy"
-    if modules_count > 80 or direct_deps > 40:
+    if modules_mb > 150 or modules_count > 80 or direct_deps > 40:
         return "medium"
     return "light"
+
+
+# memory CAP (docker --memory) suggested per cost tier -- a server killed above it comes back `blocked`,
+# never a crash. The caller can override with WAVE_BOOT_MEMORY. Coarse but honest: it's the knob that
+# actually decides "can my machine run this witness".
+_MEM_BY_TIER = {"light": "1g", "medium": "2g", "heavy": "4g"}
+
+
+def mem_for_tier(tier: str) -> str:
+    return os.environ.get("WAVE_BOOT_MEMORY") or _MEM_BY_TIER.get(tier, "2g")
+
+
+_LOCKFILES = ("bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "deno.lock")
+
+
+def workspace_root(target):
+    """The INSTALL root to mount for a boot: in a monorepo, deps are hoisted to the WORKSPACE root (where the
+    lockfile + the real node_modules live) and each package only SYMLINKS them -- so mounting the nearest
+    node_modules (a package's symlink farm) wouldn't resolve. Prefer the OUTERMOST dir (up to the .git
+    boundary) that has a lockfile, else the outermost package.json, else the .git dir. Returns
+    (root, pkg_subdir) where pkg_subdir is the server package to cd into (relative to root)."""
+    p = Path(target).resolve()
+    chain = []
+    for d in (p, *p.parents):
+        chain.append(d)
+        if (d / ".git").is_dir():
+            break
+    root = None
+    for d in reversed(chain):                                  # outermost first: the install/workspace root
+        if any((d / lf).exists() for lf in _LOCKFILES):
+            root = d
+            break
+    if root is None:
+        for d in reversed(chain):
+            if (d / "package.json").is_file():
+                root = d
+                break
+    root = root or chain[-1]
+    pj = _nearest_package_json(target, target)                 # the server package nearest the target
+    pkg_dir = pj.parent if pj else root
+    try:
+        sub = str(pkg_dir.resolve().relative_to(root.resolve())).replace("\\", "/")
+    except Exception:
+        sub = "."
+    return root, (sub or ".")
+
+
+def _deps_root(target):
+    """(root, node_modules_path) for size measurement -- the workspace root's node_modules (the real,
+    hoisted one), not a package's symlink farm."""
+    root, _sub = workspace_root(target)
+    nm = root / "node_modules"
+    return root, (nm if nm.is_dir() else None)
+
+
+def _dir_size_mb(path, budget_s=5.0):
+    """Sum file sizes under `path`, bounded by a wall-clock budget (a 2 GB node_modules can be 100k+ files,
+    too slow to fully stat in a preflight). Returns (megabytes, partial?) -- `partial` True means it's a
+    LOWER BOUND (the walk was cut off), reported as '>=' so the number is never misleadingly small."""
+    if not path or not Path(path).is_dir():
+        return 0.0, False
+    total, t0, partial = 0, time.monotonic(), False
+    try:
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+            if time.monotonic() - t0 > budget_s:
+                partial = True
+                break
+    except OSError:
+        pass
+    return total / (1024 * 1024), partial
+
+
+@dataclass
+class Footprint:
+    package: str = ""
+    runtime: str = ""
+    source_mb: float = 0.0
+    modules_mb: float = 0.0
+    modules_partial: bool = False       # modules_mb is a LOWER BOUND (walk was time-capped)
+    modules_installed: bool = False
+    packages: int = 0                   # top-level node_modules entries
+    cost_tier: str = "light"
+    mem_cap: str = "2g"                 # the docker --memory the boot will run under
+    free_disk_gb: float = 0.0
+
+    def line(self):
+        src = f"source {self.source_mb:.0f} MB"
+        if self.modules_installed:
+            mods = f"node_modules {'>=' if self.modules_partial else ''}{self.modules_mb:.0f} MB"
+        else:
+            mods = "node_modules NOT installed (first boot installs them -- needs network + that much free disk)"
+        tier = {"light": "LIGHT", "medium": "MEDIUM", "heavy": "HEAVY"}.get(self.cost_tier, self.cost_tier)
+        return (f"[{tier}] {self.package or 'project'} ({self.runtime}): {src}, {mods}; "
+                f"free disk {self.free_disk_gb:.0f} GB. Boot runs under a {self.mem_cap} memory cap "
+                f"(set WAVE_BOOT_MEMORY to change; killed above it => blocked, never a crash).")
+
+
+def project_footprint(target):
+    """Measured STORAGE + MEMORY footprint of booting this project's server package -- so the user can judge
+    'can my hardware run the witness' BEFORE committing to a boot. Bounded (time-capped size walk); never
+    raises. Returns a Footprint (zeros if it can't be measured)."""
+    try:
+        from . import runtimes
+        rt = runtimes.detect(target)
+        rt_name = getattr(rt, "name", "") or "node"
+        root, nm = _deps_root(target)
+        pj = _nearest_package_json(target, target)
+        pkg = _read_json(pj) if pj else {}
+        pkg_dir = pj.parent if pj else root
+        name = pkg.get("name") or pkg_dir.name
+        direct = len(pkg.get("dependencies") or {}) + len(pkg.get("devDependencies") or {})
+        packages = _modules_count(root)
+        source_mb, _ = _dir_size_mb(pkg_dir, budget_s=3.0)          # the package's own source
+        modules_mb, partial = (_dir_size_mb(nm) if nm else (0.0, False))
+        tier = _cost_tier(packages, direct, modules_mb)
+        try:
+            free_gb = shutil.disk_usage(str(root)).free / (1024 ** 3)
+        except Exception:
+            free_gb = 0.0
+        return Footprint(package=name, runtime=rt_name, source_mb=source_mb, modules_mb=modules_mb,
+                         modules_partial=partial, modules_installed=bool(nm), packages=packages,
+                         cost_tier=tier, mem_cap=mem_for_tier(tier), free_disk_gb=free_gb)
+    except Exception:
+        return Footprint()
 
 
 def build_plan(target, candidate, route=None, runtime=None):

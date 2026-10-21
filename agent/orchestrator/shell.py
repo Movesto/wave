@@ -236,7 +236,14 @@ def _cmd_sast(arg):
             argv.append("--online")
         # Boot-and-drive witness: for a command-exec HTTP route, actually BOOT the app in Docker and drive a
         # live request to WITNESS it (turns an inline-route lead from 'believed' into a proven 'confirmed').
-        # Opt-in + heavier: needs Docker, and only runs on a route the preflight rated feasible.
+        # Opt-in + heavier: needs Docker, and only runs on a route the preflight rated feasible. Show the
+        # MEASURED footprint (storage + memory cap + free disk) FIRST so the size decides, not a guess.
+        try:
+            from . import witness_plan as _wp
+            print(DIM("  measuring project footprint (storage/memory) ..."))
+            print(DIM("  " + _wp.project_footprint(target).line()))
+        except Exception:
+            pass
         if _confirm("try the boot-and-drive witness for HTTP command-exec routes? (boots the app in Docker to "
                     "prove it -- needs Docker, heavier)"):
             argv.append("--boot")

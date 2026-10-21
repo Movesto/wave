@@ -81,6 +81,7 @@ def _keyed_confirm(answers, default=True):
 
 def test_sast_all_files_no_patch(monkeypatch):
     calls = _capture(monkeypatch)
+    _stub_footprint(monkeypatch)
     monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "3" if "choose" in prompt else "./repo")
     monkeypatch.setattr(shell, "_confirm",                            # yes online, NO boot, yes run-now
                         _keyed_confirm({"OSV.dev": True, "boot": False, "run now": True}))
@@ -91,6 +92,7 @@ def test_sast_all_files_no_patch(monkeypatch):
 
 def test_sast_full_with_patch(monkeypatch):
     calls = _capture(monkeypatch)
+    _stub_footprint(monkeypatch)
     monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "4" if "choose" in prompt else "./repo")
     monkeypatch.setattr(shell, "_confirm",
                         _keyed_confirm({"OSV.dev": True, "boot": False, "run now": True}))
@@ -98,8 +100,16 @@ def test_sast_full_with_patch(monkeypatch):
     assert calls == [["all", "./repo", "--patch", "--online"]]        # depth 4 = patch
 
 
+def _stub_footprint(monkeypatch):
+    """Don't measure a real repo's node_modules during a unit test -- stub the preflight footprint call."""
+    from agent.orchestrator import witness_plan
+    monkeypatch.setattr(witness_plan, "project_footprint",
+                        lambda t: witness_plan.Footprint(package="x", runtime="bun"))
+
+
 def test_sast_boot_witness_opt_in(monkeypatch):
     calls = _capture(monkeypatch)
+    _stub_footprint(monkeypatch)
     monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "2" if "choose" in prompt else "./repo")
     monkeypatch.setattr(shell, "_confirm",                            # no online, YES boot + heavy, run now
                         _keyed_confirm({"OSV.dev": False, "HEAVY": True, "boot": True, "run now": True}))
@@ -109,6 +119,7 @@ def test_sast_boot_witness_opt_in(monkeypatch):
 
 def test_sast_boot_without_heavy(monkeypatch):
     calls = _capture(monkeypatch)
+    _stub_footprint(monkeypatch)
     monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "2" if "choose" in prompt else "./repo")
     monkeypatch.setattr(shell, "_confirm",                            # boot yes, heavy NO
                         _keyed_confirm({"OSV.dev": False, "HEAVY": False, "boot": True, "run now": True}))
@@ -128,6 +139,7 @@ def test_sast_quick_runs_eyes_detect_infra_deps_no_docker(monkeypatch):
 
 def test_sast_full_without_online(monkeypatch):
     calls = _capture(monkeypatch)
+    _stub_footprint(monkeypatch)
     monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "2" if "choose" in prompt else "./repo")
     monkeypatch.setattr(shell, "_confirm",                            # no online, no boot, yes run-now
                         _keyed_confirm({"OSV.dev": False, "boot": False, "run now": True}))

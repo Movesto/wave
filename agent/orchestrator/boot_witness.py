@@ -61,29 +61,12 @@ def _docker_mount(host_path: str) -> str:
 
 
 def _boot_root(target: str):
-    """The dir to MOUNT: the nearest ancestor with node_modules (deps resolve there -- often hoisted to the
-    monorepo root), else the nearest package.json / .git, else the target. Returns (root, pkg_subdir)."""
-    p = Path(target).resolve()
-    root = None
-    for d in (p, *p.parents):
-        if (d / "node_modules").is_dir():
-            root = d
-            break
-        if (d / ".git").is_dir():
-            root = root or d
-            break
-    if root is None:
-        from . import js_env
-        pj = js_env._pkg_root(target)
-        root = pj or p
-    # the package dir that actually holds the start script (nearest package.json at/above target)
-    from . import js_env
-    pkg = js_env._pkg_root(target) or root
-    try:
-        sub = str(pkg.resolve().relative_to(root.resolve())).replace("\\", "/")
-    except Exception:
-        sub = "."
-    return root, (sub or ".")
+    """The dir to MOUNT + the package subdir to cd into. In a monorepo deps are hoisted to the WORKSPACE root
+    (lockfile + real node_modules) and packages only symlink them, so we mount that root -- shared with the
+    preflight (witness_plan.workspace_root) so the footprint we SHOW matches what we actually boot."""
+    from . import witness_plan
+    root, sub = witness_plan.workspace_root(target)
+    return Path(root), sub
 
 
 def is_applicable(candidate, plan) -> bool:
@@ -250,15 +233,21 @@ def drive(target, candidate, plan, *, image, runtime, route, model=None, code_wi
         or _default_request(route, marker)
     root, sub = _boot_root(target)
     ep = plan.entrypoint
+    # memory cap: explicit arg > WAVE_BOOT_MEMORY > the plan's cost-tier default (heavy => more headroom)
+    if memory is None:
+        from . import witness_plan
+        memory = witness_plan.mem_for_tier(getattr(plan, "cost_tier", "medium"))
+    cpus = cpus or os.environ.get("WAVE_BOOT_CPUS") or DEFAULT_CPUS
     script = _render_driver(sub=sub, marker=marker, ep=ep, wait=_BOOT_WAIT,
                             spec=json.dumps(spec), runner=_runner_cmd(runtime))
     cmd = ["docker", "run", "--rm", "--network", "none",
-           "--memory", str(memory or DEFAULT_MEMORY), "--cpus", str(cpus or DEFAULT_CPUS),
+           "--memory", str(memory), "--cpus", str(cpus),
            "-v", _docker_mount(str(root)) + ":/work", "-w", "/work",
            image, "sh", "-c", script]
     env = dict(os.environ)
     env["MSYS_NO_PATHCONV"] = "1"                              # Git-Bash: don't mangle /work
-    print(f"🔌 [boot-witness] booting {plan.package} ({runtime}) to drive {route[0]} {route[1]} ...", flush=True)
+    print(f"🔌 [boot-witness] booting {plan.package} ({runtime}) under {memory}/{cpus}cpu to drive "
+          f"{route[0]} {route[1]} ...", flush=True)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=int(timeout or DEFAULT_TIMEOUT), env=env)
     except subprocess.TimeoutExpired:

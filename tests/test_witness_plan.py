@@ -57,6 +57,48 @@ def test_heavy_tier_from_many_direct_deps(tmp_path):
     assert "HEAVY" in plan.summary()
 
 
+def test_mem_cap_scales_with_tier(monkeypatch):
+    monkeypatch.delenv("WAVE_BOOT_MEMORY", raising=False)
+    assert (witness_plan.mem_for_tier("light"), witness_plan.mem_for_tier("medium"),
+            witness_plan.mem_for_tier("heavy")) == ("1g", "2g", "4g")
+    monkeypatch.setenv("WAVE_BOOT_MEMORY", "8g")
+    assert witness_plan.mem_for_tier("heavy") == "8g"           # explicit override wins
+
+
+def test_size_dominates_tier_over_count():
+    # bun's node_modules shows few top-level entries for gigabytes -> size must drive the tier
+    assert witness_plan._cost_tier(modules_count=11, direct_deps=20, modules_mb=1525) == "heavy"
+    assert witness_plan._cost_tier(modules_count=11, direct_deps=20, modules_mb=0) == "light"
+
+
+def test_workspace_root_is_the_lockfile_root_not_a_symlink_farm(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "bun.lock").write_text("", encoding="utf-8")         # install root marker
+    (repo / "node_modules").mkdir()                              # the real (hoisted) deps
+    pkg = repo / "packages" / "opencode"
+    (pkg / "node_modules").mkdir(parents=True)                   # a package's symlink farm (must NOT win)
+    (pkg / "package.json").write_text('{"name":"opencode"}', encoding="utf-8")
+    src = pkg / "src"
+    src.mkdir()
+    root, sub = witness_plan.workspace_root(str(src))
+    assert root.resolve() == repo.resolve() and sub == "packages/opencode"
+
+
+def test_project_footprint_measures_storage_and_caps_memory(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "bun.lock").write_text("", encoding="utf-8")
+    nm = repo / "node_modules" / "big"
+    nm.mkdir(parents=True)
+    (nm / "blob.bin").write_bytes(b"x" * (2 * 1024 * 1024))      # 2 MB of deps
+    (repo / "package.json").write_text('{"name":"api","scripts":{"start":"bun run s.ts"}}', encoding="utf-8")
+    fp = witness_plan.project_footprint(str(repo))
+    assert fp.modules_installed and fp.modules_mb >= 1.5         # measured a real size
+    assert fp.mem_cap in ("1g", "2g", "4g") and fp.free_disk_gb >= 0
+    assert "node_modules" in fp.line() and "memory cap" in fp.line()
+
+
 def test_report_renders_from_the_persisted_dict(tmp_path):
     (tmp_path / "package.json").write_text(json.dumps(
         {"name": "api", "scripts": {"dev": "bun run s.ts"}, "dependencies": {"hono": "^4"}}), encoding="utf-8")

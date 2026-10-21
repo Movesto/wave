@@ -16,7 +16,14 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections import namedtuple
 from pathlib import Path
+
+# The resolved JS/TS runtime for the investigate sandbox: the image to launch, the run-a-file template
+# (e.g. "bun {file}" vs "tsx {file}"), a blocked reason (set only when a DETECTED non-node runtime can't be
+# provisioned), and the runtime name. One object so the image, the scaffold run-hint, and the brief all
+# name the SAME interpreter -- the fix for the Bun-witness miss (image was bun but brief/scaffold said tsx).
+JsRuntime = namedtuple("JsRuntime", "image run blocked name")
 
 RUNNER_IMAGE = "wave-js-runner:latest"
 _DOCKERFILE = "FROM node:20-slim\nRUN npm install -g tsx@4 >/dev/null 2>&1 || npm install -g tsx\n"
@@ -192,3 +199,26 @@ def prepare(target: str) -> str | None:
     image = ensure_runner()
     ensure_deps(target)                                     # best-effort; the model can still read code without it
     return image
+
+
+def resolve(target: str) -> JsRuntime:
+    """Resolve the JS/TS runtime END TO END: the image to launch, the run-a-file template, and (when a
+    non-node runtime is DETECTED but its image can't be provisioned) a blocked reason. This is `prepare`'s
+    richer sibling -- it returns the run template too, so the caller can make the scaffold's run-hint AND the
+    brief name the SAME interpreter the image provides (bun/deno vs node+tsx). A detected Bun/Deno project
+    whose image can't be provisioned returns `blocked` rather than silently falling back to Node -- running a
+    Bun-only path on `tsx`/`node` would misreport it as a 'believed' lead. Never raises."""
+    from . import runtimes
+    rt = runtimes.detect(target)
+    if rt is not None and rt.family == "js" and rt.name != "node":
+        img = ensure_image(rt.image)
+        if img:
+            ensure_runtime_deps(target, rt)                 # best-effort: the project's own deps (bun install)
+            return JsRuntime(img, rt.run or "{file}", None, rt.name)
+        return JsRuntime(None, rt.run or "{file}",
+                         f"detected the {rt.name} runtime (needs image {rt.image}) but could not provision it "
+                         f"here (offline / image not cached / Docker unavailable)", rt.name)
+    image = ensure_runner()
+    ensure_deps(target)                                     # best-effort
+    node = runtimes.by_name("node")
+    return JsRuntime(image or "node:20-slim", (node.run if node else "tsx {file}"), None, "node")

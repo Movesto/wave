@@ -445,18 +445,20 @@ def _flow_block(flow):
 
 
 def _brief_for(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None, flow=None,
-               hit_marker="", reach_id=""):
+               hit_marker="", reach_id="", js_run="tsx {file}"):
     """Build the proof brief. `hit_marker` (a PER-RUN random token) replaces the literal `wave_HIT` witness
     everywhere in the brief, so the exec-witness the model plants is unpredictable -- a memorized or
     prompt-injected bare `wave_HIT` can no longer satisfy the harness (proof-integrity hardening). `reach_id`
-    (also per-run) is the Half-B tape tracer the model carries in the entry payload (1b)."""
+    (also per-run) is the Half-B tape tracer the model carries in the entry payload (1b). `js_run` is the
+    resolved JS run template (`bun {file}` / `tsx {file}` / ...) so the brief names the interpreter the
+    sandbox actually launches."""
     b = _build_brief(candidate, target, reason, scaffold=scaffold, mode=mode, reach=reach, route=route,
-                     flow=flow, reach_id=reach_id)
+                     flow=flow, reach_id=reach_id, js_run=js_run)
     return b.replace("wave_HIT", hit_marker) if hit_marker else b
 
 
 def _build_brief(candidate, target, reason, scaffold=None, mode="call", reach=None, route=None, flow=None,
-                 reach_id=""):
+                 reach_id="", js_run="tsx {file}"):
     rel = _rel(candidate.file, target)
     code = _code_window(candidate.file, getattr(candidate, "line", 0))
     fn = str(candidate.unit).split("(")[0].strip()
@@ -585,10 +587,22 @@ def _build_brief(candidate, target, reason, scaffold=None, mode="call", reach=No
             "If it prints 'none' (the output was escaped), the code is safe -> conclude refuted. The repo's "
             "node_modules and tsx are installed; write the script to a file to avoid shell-quoting issues.")
     elif _is_js(candidate.file):
-        extra = ("\nThis is JavaScript/TypeScript. `tsx` is installed: run a .ts file or inline TS with "
-                 "`tsx -e \"...\"` or `tsx <file>.ts`; the repo's node_modules ARE installed so its "
-                 "require/import dependencies resolve. Load the exported function and call it with your "
-                 "payload (e.g. `node -e \"require('/work/app').f('; id')\"` or the tsx equivalent).")
+        interp = (js_run or "tsx {file}").split()[0]         # "tsx" / "bun" / "deno" -- the launched runtime
+        if interp == "tsx":
+            extra = ("\nThis is JavaScript/TypeScript. `tsx` is installed: run a .ts file or inline TS with "
+                     "`tsx -e \"...\"` or `tsx <file>.ts`; the repo's node_modules ARE installed so its "
+                     "require/import dependencies resolve. Load the exported function and call it with your "
+                     "payload (e.g. `node -e \"require('/work/app').f('; id')\"` or the tsx equivalent).")
+        else:
+            run_ex = (js_run or "").replace("{file}", "<file>") or f"{interp} <file>"
+            extra = (f"\nThis is JavaScript/TypeScript running on the **{interp}** runtime (NOT node/tsx -- "
+                     f"this sandbox launches `{interp}`; do not assume `tsx` or `node` are on PATH). Write "
+                     f"your repro to a file and run it with `{run_ex}` (e.g. `{interp} /work/repro.mjs "
+                     f"'<payload>'`), or run inline TS/JS with `{interp} -e \"...\"`. The project's declared "
+                     f"deps are installed where {interp} resolves them, so its import/require of workspace "
+                     f"dependencies works. Load the exported function and call it with your payload. If "
+                     f"`{interp}` is somehow missing, provision it with install({{runtime:\"{interp}\"}}) "
+                     f"rather than concluding the code is safe.")
     return (f"File: {rel} (mounted at /work/{rel}). Function: {candidate.unit}.\n"
             f"Suspected {candidate.cwe} ({candidate.family}); sink: {candidate.sink}.\n"
             f"A quick automatic check was inconclusive ({reason}).\n\nCode around the sink:\n{code}\n\n"

@@ -292,15 +292,28 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         en, ef = getattr(entry_fn, "name", ""), getattr(entry_fn, "file", "")
         if en and ef and en != sink_fn:
             build_entry = (en, ef)
-    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag, entry=build_entry)
+    # Resolve the runtime BEFORE scaffolding so the launched image, the scaffold's run-hint, and the brief
+    # all name the SAME interpreter. For JS/TS this is runtime-aware (bun/deno vs node+tsx): a DETECTED
+    # non-node runtime whose image can't be provisioned is `blocked`, never a silent Node fallback that
+    # would run a Bun/Deno-only path on tsx and misreport it as 'believed' (the Bun-witness fix).
     img = briefs._image_for(c.file)
+    js_run = "tsx {file}"
     if briefs._is_js(c.file):                                # JS/TS need tsx + the repo's node_modules;
         from . import js_env                                 # DOM render ALSO needs a real browser --
         if mode == "render":                                 # node:20-slim has none of these (the XSS miss).
             js_env.ensure_deps(target)                       # (all cached/idempotent -> built once, then fast)
             img = js_env.ensure_browser_runner() or js_env.prepare(target) or img
         else:
-            img = js_env.prepare(target) or img
+            jr = js_env.resolve(target)
+            if jr.blocked:
+                return {"verdict": "blocked", "evidence": "", "ran": 0, "oracle": "runtime unavailable",
+                        "taint": tstatus,
+                        "why": f"{jr.blocked}; refusing to run the witness on a Node fallback -- a "
+                               f"{jr.name}-only path would be misreported as a 'believed' lead"}
+            img = jr.image or img
+            js_run = jr.run or js_run
+    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag,
+                           entry=build_entry, run_tmpl=js_run)
     step_to = (300 if mode in briefs.COMPILED_MODES               # build/fetch a standalone repro
                else (120 if mode in ("render", "asan")
                      else (90 if briefs._is_js(c.file) else 45)))
@@ -326,7 +339,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         # controlled egress point when online, not blanket container network access.
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode,
                                                         reach=reach, route=route, flow=xflow, hit_marker=hit,
-                                                        reach_id=reach_id),
+                                                        reach_id=reach_id, js_run=js_run),
                                image=img, mount=target, network="none", max_steps=max_steps,
                                step_timeout=step_to, online=online, write_tag=tag, hit_marker=hit,
                                sink_secret=sink_secret, reach_id=reach_id, sink_env=sink_env,

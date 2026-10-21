@@ -126,18 +126,23 @@ def _gate_a(model, target, c, rec, have_docker, max_steps, tag=""):
     if not have_docker:
         return "unproven", "cannot reverify the fix (docker unavailable) -- patch UNVERIFIED, not fixed"
     mode = briefs._proof_mode(c)                             # match prove's proof-shape routing
-    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag)
     img = briefs._image_for(c.file)
+    js_run = "tsx {file}"
     if briefs._is_js(c.file):                                # tsx+node_modules; browser only for DOM render
         from . import js_env
         if mode == "render":
             js_env.ensure_deps(target)
             img = js_env.ensure_browser_runner() or js_env.prepare(target) or img
         else:
-            img = js_env.prepare(target) or img
+            jr = js_env.resolve(target)                      # runtime-aware (bun/deno vs node+tsx)
+            if jr.blocked:                                   # can't provision the detected runtime -> can't reverify
+                return "unproven", f"cannot reverify the fix -- {jr.blocked}"
+            img = jr.image or img
+            js_run = jr.run or js_run
+    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag, run_tmpl=js_run)
     try:
         v = invmod.investigate(model, briefs._brief_for(c, target, "reverify the patch", scaffold=scaffold,
-                                                        mode=mode),
+                                                        mode=mode, js_run=js_run),
                                image=img, mount=target, network="none",
                                max_steps=max_steps,
                                step_timeout=(300 if mode in briefs.COMPILED_MODES else

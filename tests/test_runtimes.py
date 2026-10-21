@@ -107,3 +107,56 @@ def test_budget_caps_provisioning(tmp_path):
 def test_dep_kind_follows_the_runtime_image():
     assert investigate._dep_kind_for("oven/bun:1") == "js"
     assert investigate._dep_kind_for("python:3.12-slim") == "py"
+
+
+# ---------------------------- end-to-end runtime threading (the Bun-witness fix) --------------------------
+# The provisioning registry gave the sandbox a bun IMAGE, but the witness still ran on node+tsx because the
+# brief/scaffold/image-choice at the top of the prove path were hard-coded to Node. js_env.resolve() carries
+# ONE decision (image + run template) so all three agree; a detected runtime that can't be provisioned is
+# `blocked`, never a silent Node fallback.
+
+from agent.orchestrator import js_env, repro, briefs
+from types import SimpleNamespace
+
+
+def test_resolve_bun_project_carries_image_and_run_template(tmp_path, monkeypatch):
+    (tmp_path / "bun.lock").write_text("", encoding="utf-8")
+    monkeypatch.setattr("agent.orchestrator.js_env.ensure_image", lambda img, timeout=600: img)
+    monkeypatch.setattr("agent.orchestrator.js_env.ensure_runtime_deps", lambda t, rt: True)
+    r = js_env.resolve(str(tmp_path))
+    assert (r.image, r.run, r.blocked, r.name) == ("oven/bun:1", "bun {file}", None, "bun")
+
+
+def test_resolve_detected_runtime_unprovisionable_is_blocked_not_node(tmp_path, monkeypatch):
+    (tmp_path / "bun.lock").write_text("", encoding="utf-8")
+    monkeypatch.setattr("agent.orchestrator.js_env.ensure_image", lambda img, timeout=600: None)  # can't pull
+    r = js_env.resolve(str(tmp_path))
+    assert r.image is None and r.name == "bun" and "bun" in r.blocked      # blocked, never a tsx fallback
+
+
+def test_resolve_plain_node_project_uses_tsx(tmp_path, monkeypatch):
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("agent.orchestrator.js_env.ensure_runner", lambda timeout=600: "wave-js-runner:latest")
+    monkeypatch.setattr("agent.orchestrator.js_env.ensure_deps", lambda t, timeout=600: True)
+    r = js_env.resolve(str(tmp_path))
+    assert r.run == "tsx {file}" and r.blocked is None and r.name == "node"
+
+
+def test_scaffold_run_hint_follows_the_runtime(tmp_path):
+    (tmp_path / "app.ts").write_text("export function f(x){return x}\n", encoding="utf-8")
+    c = SimpleNamespace(file=str(tmp_path / "app.ts"), line=1, unit="f", cwe="CWE-78", family="cmd", sink="spawn")
+    try:
+        _, hint_bun = repro.build(c, str(tmp_path), mode="call", run_tmpl="bun {file}")
+        _, hint_node = repro.build(c, str(tmp_path), mode="call", run_tmpl="tsx {file}")
+    finally:
+        repro.remove(str(tmp_path))
+    assert hint_bun.startswith("bun ") and hint_node.startswith("tsx ")
+
+
+def test_brief_names_the_launched_runtime(tmp_path):
+    (tmp_path / "app.ts").write_text("export function f(x){return x}\n", encoding="utf-8")
+    c = SimpleNamespace(file=str(tmp_path / "app.ts"), line=1, unit="f", cwe="CWE-78", family="cmd", sink="spawn")
+    b_bun = briefs._brief_for(c, str(tmp_path), "x", scaffold=None, mode="call", js_run="bun {file}")
+    b_node = briefs._brief_for(c, str(tmp_path), "x", scaffold=None, mode="call", js_run="tsx {file}")
+    assert "bun" in b_bun and "`tsx` is installed" not in b_bun     # bun project: not told tsx is present
+    assert "`tsx` is installed" in b_node                           # node project: the original tsx guidance

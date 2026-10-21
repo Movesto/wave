@@ -338,8 +338,8 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
                         "witness": ([br.marker] if br.marker else []),
                         "harness_witnessed": br.verdict == "confirmed", "harness_marker": br.marker,
                         "oracle_tier": "marker", "witness_plan": wplan.as_dict(),
-                        "_trail": [(f"boot `{wplan.entrypoint}` + drive {route[0]} {route[1]}",
-                                    (br.log or br.why)[:1500])]}
+                        "_trail": [(f"boot `{getattr(br, 'entrypoint', '') or wplan.entrypoint}` + drive "
+                                    f"{route[0]} {route[1]}", (br.log or br.why)[:1500])]}
             # a 'blocked' boot (couldn't bind / too heavy) -> fall through to the normal model investigate
     scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag,
                            entry=build_entry, run_tmpl=js_run)

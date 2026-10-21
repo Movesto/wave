@@ -99,6 +99,31 @@ def test_project_footprint_measures_storage_and_caps_memory(tmp_path):
     assert "node_modules" in fp.line() and "memory cap" in fp.line()
 
 
+def test_entrypoint_honors_boot_cmd_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("WAVE_BOOT_CMD", "bun run ./src/index.ts serve --port 4096")
+    (tmp_path / "package.json").write_text(json.dumps(
+        {"name": "api", "scripts": {"dev": "bun run x.ts"}}), encoding="utf-8")
+    (tmp_path / "bun.lock").write_text("", encoding="utf-8")
+    plan = witness_plan.build_plan(str(tmp_path), _cand(tmp_path), route=("POST", "/x", "hono", ""))
+    assert plan.entrypoint == "bun run ./src/index.ts serve --port 4096"   # the user's command, shown in the plan
+
+
+def test_plan_and_footprint_agree_on_cost_tier(tmp_path):
+    # build_plan now measures node_modules size (shared/cached with project_footprint), so the tier the user is
+    # SHOWN (footprint) is the tier the boot is GATED on (plan) -- no medium-vs-heavy disagreement.
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "bun.lock").write_text("", encoding="utf-8")
+    nm = tmp_path / "node_modules" / "x"
+    nm.mkdir(parents=True)
+    (nm / "b.bin").write_bytes(b"x" * (2 * 1024 * 1024))
+    (tmp_path / "package.json").write_text(json.dumps(
+        {"name": "api", "scripts": {"start": "bun run s.ts"}}), encoding="utf-8")
+    plan = witness_plan.build_plan(str(tmp_path), _cand(tmp_path), route=("POST", "/x", "hono", ""))
+    fp = witness_plan.project_footprint(str(tmp_path))
+    assert plan.cost_tier == fp.cost_tier
+    assert witness_plan.mem_for_tier(plan.cost_tier) == fp.mem_cap
+
+
 def test_report_renders_from_the_persisted_dict(tmp_path):
     (tmp_path / "package.json").write_text(json.dumps(
         {"name": "api", "scripts": {"dev": "bun run s.ts"}, "dependencies": {"hono": "^4"}}), encoding="utf-8")

@@ -104,7 +104,13 @@ def _read_json(p):
 
 
 def _entrypoint(pkg, runtime):
-    """A start command from package.json scripts, else a main/module file, else ''. Runtime-aware runner."""
+    """A start command from package.json scripts, else a main/module file, else ''. Runtime-aware runner.
+    An explicit WAVE_BOOT_CMD wins (the user telling us exactly how THEIR project boots its server). This is
+    only the PREFLIGHT estimate shown in the report; the actual boot re-resolves it against the project's real
+    CLI subcommands (see boot_witness._resolve_server_cmd) so we drive what the project ships, not a guess."""
+    override = os.environ.get("WAVE_BOOT_CMD", "").strip()
+    if override:
+        return override
     runner = {"bun": "bun run", "deno": "deno task", "node": "npm run"}.get(runtime, "npm run")
     scripts = pkg.get("scripts") or {}
     for name in _START_SCRIPTS:
@@ -162,8 +168,9 @@ def workspace_root(target):
     boundary) that has a lockfile, else the outermost package.json, else the .git dir. Returns
     (root, pkg_subdir) where pkg_subdir is the server package to cd into (relative to root)."""
     p = Path(target).resolve()
+    start = p if p.is_dir() else p.parent                      # anchor on a DIR (target may be a source file)
     chain = []
-    for d in (p, *p.parents):
+    for d in (start, *start.parents):
         chain.append(d)
         if (d / ".git").is_dir():
             break
@@ -178,8 +185,11 @@ def workspace_root(target):
                 root = d
                 break
     root = root or chain[-1]
-    pj = _nearest_package_json(target, target)                 # the server package nearest the target
-    pkg_dir = pj.parent if pj else root
+    pkg_dir = root                                             # the package the target belongs to: the
+    for d in chain:                                           # INNERMOST package.json at/above it, within root
+        if (d / "package.json").is_file():
+            pkg_dir = d
+            break
     try:
         sub = str(pkg_dir.resolve().relative_to(root.resolve())).replace("\\", "/")
     except Exception:
@@ -215,6 +225,23 @@ def _dir_size_mb(path, budget_s=5.0):
     except OSError:
         pass
     return total / (1024 * 1024), partial
+
+
+_WS_MODULES_MB = {}        # workspace-root -> (mb, partial): measuring a 1.5 GB node_modules is slow and is the
+#                            SAME for every candidate in a target, so measure it once and share it (footprint +
+#                            each build_plan), which also keeps the plan's cost tier == the footprint's tier.
+
+
+def _workspace_modules_mb(target):
+    """Measured size of the hoisted (workspace-root) node_modules, cached per root. (mb, partial)."""
+    try:
+        root, nm = _deps_root(target)
+        key = str(root)
+        if key not in _WS_MODULES_MB:
+            _WS_MODULES_MB[key] = _dir_size_mb(nm) if nm else (0.0, False)
+        return _WS_MODULES_MB[key]
+    except Exception:
+        return 0.0, False
 
 
 @dataclass
@@ -258,7 +285,7 @@ def project_footprint(target):
         direct = len(pkg.get("dependencies") or {}) + len(pkg.get("devDependencies") or {})
         packages = _modules_count(root)
         source_mb, _ = _dir_size_mb(pkg_dir, budget_s=3.0)          # the package's own source
-        modules_mb, partial = (_dir_size_mb(nm) if nm else (0.0, False))
+        modules_mb, partial = _workspace_modules_mb(target)         # shared/cached with build_plan -> same tier
         tier = _cost_tier(packages, direct, modules_mb)
         try:
             free_gb = shutil.disk_usage(str(root)).free / (1024 ** 3)
@@ -304,7 +331,8 @@ def build_plan(target, candidate, route=None, runtime=None):
 
         entry = _entrypoint(pkg, rt_name)
         modules = _modules_count(pkg_dir)
-        tier = _cost_tier(modules, direct)
+        modules_mb, _ = _workspace_modules_mb(target)               # measured size dominates the tier (so the
+        tier = _cost_tier(modules, direct, modules_mb)              # plan agrees with project_footprint)
 
         reasons = []
         feasibility = "ready"
@@ -316,7 +344,8 @@ def build_plan(target, candidate, route=None, runtime=None):
             reasons.append("expects external service(s) the sandbox can't auto-stand-up")
         if feasibility == "ready" and tier == "heavy":
             feasibility = "heavy"
-            reasons.append(f"~{modules or direct} packages to load — sizable memory/boot cost")
+            reasons.append(f"~{modules_mb:.0f} MB of node_modules to load — sizable memory/boot cost"
+                           if modules_mb else f"~{modules or direct} packages to load — sizable memory/boot cost")
         if not modules:
             reasons.append("node_modules not installed yet (first boot installs them)")
 

@@ -118,6 +118,85 @@ def _model_request(model, *, route, code_window, marker):
         return None
 
 
+_SERVE_SYS = (
+    "You pick the EXACT command that starts a project's HTTP server, choosing ONLY from what the project "
+    "ALREADY SHIPS -- its package.json scripts and its CLI subcommands. We are TESTING an existing project for "
+    "a vulnerability, not building one: never invent a new file, script, or entrypoint. Return ONLY JSON, no "
+    'prose: {"cmd":"<shell command, run from the package directory, that starts the HTTP server so it binds a '
+    'port>"}. If the server is started by a CLI SUBCOMMAND (e.g. the binary plus `serve`), include that '
+    "subcommand. You MAY append a fixed port flag if the CLI supports one. Use the project's own runner "
+    "(bun/npm/deno) exactly as its scripts do."
+)
+
+
+def _entry_source(pkg_dir, pkg):
+    """Best-effort (name, truncated text) of the CLI/server ENTRY file the project ships -- where subcommands
+    like `serve` are registered -- so the model picks the REAL server-start, not a guessed script. Prefers the
+    SOURCE file the project actually runs (what its dev/start script points at) over a `bin` shim, which is
+    usually a launcher with no command table."""
+    cands = []
+    scripts = pkg.get("scripts") or {}
+    for n in ("dev", "start", "serve", "server", "start:prod"):   # the .ts/.js a start script runs = most telling
+        m = re.search(r"(\.?/?[\w./-]+\.(?:ts|js|mjs|tsx))", scripts.get(n) or "")
+        if m:
+            cands.append(m.group(1))
+    for k in ("module", "main"):
+        if pkg.get(k):
+            cands.append(pkg[k])
+    cands += ["src/index.ts", "src/index.js", "index.ts", "index.js", "src/cli.ts", "src/main.ts"]
+    b = pkg.get("bin")                                            # a bin shim is the LEAST informative -> last
+    if isinstance(b, str):
+        cands.append(b)
+    elif isinstance(b, dict):
+        cands += list(b.values())
+    seen = set()
+    for c in cands:
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        p = Path(pkg_dir) / c
+        try:
+            if p.is_file():
+                return p.name, "\n".join(p.read_text(encoding="utf-8", errors="replace").splitlines()[:140])
+        except OSError:
+            continue
+    return "", ""
+
+
+def _resolve_server_cmd(target, plan, route, model):
+    """The REAL command to boot this project's HTTP server. Priority: WAVE_BOOT_CMD (explicit user override) >
+    the MODEL choosing from the project's OWN scripts + CLI subcommand table > the preflight's deterministic
+    guess. Returns (cmd, source). Never raises."""
+    override = os.environ.get("WAVE_BOOT_CMD", "").strip()
+    if override:
+        return override, "WAVE_BOOT_CMD"
+    if model is not None:
+        try:
+            from . import witness_plan
+            root, sub = witness_plan.workspace_root(target)
+            pkg_dir = (root / sub) if sub and sub != "." else root
+            pj = pkg_dir / "package.json"
+            pkg = witness_plan._read_json(pj) if pj.is_file() else {}
+            ename, esrc = _entry_source(pkg_dir, pkg)
+            user = (f"Route to reach: {route[0]} {route[1]}\n"
+                    f"package.json scripts: {json.dumps(pkg.get('scripts') or {})}\n"
+                    f"package.json bin: {json.dumps(pkg.get('bin'))}\n"
+                    + (f"CLI/server entry ({ename}), first lines:\n{esrc}\n" if esrc else "")
+                    + "Return the JSON server-start command now.")
+            msg = model.chat([{"role": "system", "content": _SERVE_SYS},
+                              {"role": "user", "content": user}], temperature=0.0)
+            content = (msg or {}).get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            m = re.search(r"\{.*\}", content or "", re.S)
+            if m:
+                spec = json.loads(m.group(0))
+                cmd = (spec.get("cmd") or "").strip() if isinstance(spec, dict) else ""
+                if cmd:
+                    return cmd, "model"
+        except Exception:
+            pass
+    return (getattr(plan, "entrypoint", "") or ""), "preflight"
+
+
 def _default_request(route, marker):
     """Heuristic fallback when there's no model / the model reply didn't parse: fill path params with '1' and
     try the common command fields with the marker injection."""
@@ -187,6 +266,7 @@ class BootResult:
     log: str = ""
     status: int = 0             # HTTP status observed (0 if none)
     marker: str = ""            # the witness marker (set on a confirm) -> harness_marker in the record
+    entrypoint: str = ""        # the server-start command actually used (model-resolved / override / preflight)
 
 
 def _runner_cmd(runtime):
@@ -231,8 +311,16 @@ def drive(target, candidate, plan, *, image, runtime, route, model=None, code_wi
     marker = "wave_BOOT_" + secrets.token_hex(5)
     spec = _model_request(model, route=route, code_window=code_window, marker=marker) \
         or _default_request(route, marker)
-    root, sub = _boot_root(target)
-    ep = plan.entrypoint
+    # Anchor on the CANDIDATE's file, not the scan target: in a monorepo the vulnerable package is a subdir, so
+    # we mount the workspace root (hoisted deps) but must cd into THAT package -- not the repo root.
+    boot_anchor = getattr(candidate, "file", "") or target
+    root, sub = _boot_root(boot_anchor)
+    # the server-start command: read what the project ALREADY ships (CLI subcommand / script), don't guess
+    ep, ep_src = _resolve_server_cmd(boot_anchor, plan, route, model)
+    ep = ep or plan.entrypoint
+    if not ep:
+        return BootResult("blocked", why="no server-start command found (no start script / CLI serve subcommand); "
+                          "set WAVE_BOOT_CMD to the command that boots the server", entrypoint="")
     # memory cap: explicit arg > WAVE_BOOT_MEMORY > the plan's cost-tier default (heavy => more headroom)
     if memory is None:
         from . import witness_plan
@@ -246,17 +334,18 @@ def drive(target, candidate, plan, *, image, runtime, route, model=None, code_wi
            image, "sh", "-c", script]
     env = dict(os.environ)
     env["MSYS_NO_PATHCONV"] = "1"                              # Git-Bash: don't mangle /work
-    print(f"🔌 [boot-witness] booting {plan.package} ({runtime}) under {memory}/{cpus}cpu to drive "
-          f"{route[0]} {route[1]} ...", flush=True)
+    print(f"🔌 [boot-witness] booting {plan.package} ({runtime}) under {memory}/{cpus}cpu via `{ep}` "
+          f"[{ep_src}] to drive {route[0]} {route[1]} ...", flush=True)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=int(timeout or DEFAULT_TIMEOUT), env=env)
     except subprocess.TimeoutExpired:
         return BootResult("blocked", why=f"boot-and-drive exceeded the {int(timeout or DEFAULT_TIMEOUT)}s budget "
-                          "(server too heavy to boot here, or it hung)")
+                          "(server too heavy to boot here, or it hung)", entrypoint=ep)
     except Exception as e:
-        return BootResult("blocked", why=f"boot-and-drive could not run ({type(e).__name__})")
+        return BootResult("blocked", why=f"boot-and-drive could not run ({type(e).__name__})", entrypoint=ep)
     out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
     res = _classify(out, marker)
+    res.entrypoint = ep
     tick = {"confirmed": "✓ WITNESSED", "anomalous_state": "• reached (unauth)", "refuted": "• guarded",
             "blocked": "✗ could not boot/drive"}.get(res.verdict, res.verdict)
     print(f"🔌 [boot-witness] {tick}: {res.why[:90]}", flush=True)

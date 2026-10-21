@@ -87,3 +87,55 @@ def test_drive_is_noop_when_not_applicable(tmp_path, monkeypatch):
     out = boot_witness.drive(str(tmp_path), _cand(cwe="CWE-89", family="sqli"), _plan(tmp_path),
                              image="oven/bun:1", runtime="bun", route=("POST", "/x", "hono", ""))
     assert out is None                                        # non-exec class -> caller keeps its own path
+
+
+def _monorepo_with_cli(tmp_path):
+    """A monorepo whose server package starts the HTTP server via a CLI SUBCOMMAND (the opencode shape)."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "bun.lock").write_text("", encoding="utf-8")
+    pkg = repo / "packages" / "api"
+    (pkg / "src").mkdir(parents=True)
+    (pkg / "package.json").write_text(json.dumps(
+        {"name": "api", "scripts": {"dev": "bun run ./src/index.ts"}, "bin": {"api": "./bin/api"}}),
+        encoding="utf-8")
+    (pkg / "src" / "index.ts").write_text(
+        "import { ServeCommand } from './cli/serve'\ncli.command(ServeCommand)  // `serve` boots the HTTP server\n",
+        encoding="utf-8")
+    (pkg / "bin").mkdir()
+    (pkg / "bin" / "api").write_text("#!/bin/sh\nexec bun run ./src/index.ts \"$@\"\n", encoding="utf-8")  # shim
+    return str(pkg / "src" / "server.ts")
+
+
+def test_resolve_server_cmd_priority(tmp_path, monkeypatch):
+    cand_file = _monorepo_with_cli(tmp_path)
+    plan = SimpleNamespace(entrypoint="bun run dev")
+    route = ("POST", "/session/:id/shell", "hono", "")
+
+    class _Model:
+        def chat(self, msgs, temperature=0):
+            self.saw = msgs[-1]["content"]
+            return {"content": '{"cmd":"bun run ./src/index.ts serve --port 4096"}'}
+    m = _Model()
+
+    monkeypatch.delenv("WAVE_BOOT_CMD", raising=False)
+    cmd, src = boot_witness._resolve_server_cmd(cand_file, plan, route, m)
+    assert cmd == "bun run ./src/index.ts serve --port 4096" and src == "model"
+    # the model was shown the project's OWN command table (index.ts), not a guess / the bin shim
+    assert "ServeCommand" in m.saw and "exec bun run" not in m.saw
+
+    monkeypatch.setenv("WAVE_BOOT_CMD", "bun run ./src/index.ts serve")      # explicit override wins over model
+    assert boot_witness._resolve_server_cmd(cand_file, plan, route, m) == ("bun run ./src/index.ts serve",
+                                                                           "WAVE_BOOT_CMD")
+    monkeypatch.delenv("WAVE_BOOT_CMD", raising=False)
+    # no model -> fall back to the preflight's deterministic entrypoint (never invents)
+    assert boot_witness._resolve_server_cmd(cand_file, plan, route, None) == ("bun run dev", "preflight")
+
+
+def test_entry_source_prefers_real_source_over_bin_shim(tmp_path):
+    cand_file = _monorepo_with_cli(tmp_path)
+    pkg_dir = witness_plan.workspace_root(cand_file)
+    root, sub = pkg_dir
+    pdir = root / sub
+    name, src = boot_witness._entry_source(pdir, witness_plan._read_json(pdir / "package.json"))
+    assert name == "index.ts" and "ServeCommand" in src          # the command table, not the bin launcher

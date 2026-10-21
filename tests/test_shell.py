@@ -69,21 +69,51 @@ def test_sast_discover_argv(monkeypatch):
     assert calls == [["discover", "./repo"]]
 
 
+def _keyed_confirm(answers, default=True):
+    """A _confirm keyed on a substring of the prompt, so adding a prompt doesn't silently shift an iterator."""
+    def _c(prompt):
+        for key, val in answers.items():
+            if key in prompt:
+                return val
+        return default
+    return _c
+
+
 def test_sast_all_files_no_patch(monkeypatch):
     calls = _capture(monkeypatch)
     monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "3" if "choose" in prompt else "./repo")
-    monkeypatch.setattr(shell, "_confirm", lambda prompt: True)       # yes to online + run-now
+    monkeypatch.setattr(shell, "_confirm",                            # yes online, NO boot, yes run-now
+                        _keyed_confirm({"OSV.dev": True, "boot": False, "run now": True}))
     shell._cmd_sast("")
     assert calls == [["all", "./repo", "--all-files", "--online"]]    # depth 3 = full all-files, NO patch
-    assert "--patch" not in calls[0]
+    assert "--patch" not in calls[0] and "--boot" not in calls[0]
 
 
 def test_sast_full_with_patch(monkeypatch):
     calls = _capture(monkeypatch)
     monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "4" if "choose" in prompt else "./repo")
-    monkeypatch.setattr(shell, "_confirm", lambda prompt: True)       # yes to online + run-now
+    monkeypatch.setattr(shell, "_confirm",
+                        _keyed_confirm({"OSV.dev": True, "boot": False, "run now": True}))
     shell._cmd_sast("")
     assert calls == [["all", "./repo", "--patch", "--online"]]        # depth 4 = patch
+
+
+def test_sast_boot_witness_opt_in(monkeypatch):
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "2" if "choose" in prompt else "./repo")
+    monkeypatch.setattr(shell, "_confirm",                            # no online, YES boot + heavy, run now
+                        _keyed_confirm({"OSV.dev": False, "HEAVY": True, "boot": True, "run now": True}))
+    shell._cmd_sast("")
+    assert calls == [["all", "./repo", "--boot", "--boot-heavy"]]
+
+
+def test_sast_boot_without_heavy(monkeypatch):
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "2" if "choose" in prompt else "./repo")
+    monkeypatch.setattr(shell, "_confirm",                            # boot yes, heavy NO
+                        _keyed_confirm({"OSV.dev": False, "HEAVY": False, "boot": True, "run now": True}))
+    shell._cmd_sast("")
+    assert calls == [["all", "./repo", "--boot"]]                     # --boot but not --boot-heavy
 
 
 def test_sast_quick_runs_eyes_detect_infra_deps_no_docker(monkeypatch):
@@ -98,9 +128,9 @@ def test_sast_quick_runs_eyes_detect_infra_deps_no_docker(monkeypatch):
 
 def test_sast_full_without_online(monkeypatch):
     calls = _capture(monkeypatch)
-    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "2" if "1/2/3" in prompt else "./repo")
-    answers = iter([False, True])                                    # no to online, yes to run-now
-    monkeypatch.setattr(shell, "_confirm", lambda prompt: next(answers))
+    monkeypatch.setattr(shell, "_ask", lambda prompt, default="": "2" if "choose" in prompt else "./repo")
+    monkeypatch.setattr(shell, "_confirm",                            # no online, no boot, yes run-now
+                        _keyed_confirm({"OSV.dev": False, "boot": False, "run now": True}))
     shell._cmd_sast("")
     assert calls == [["all", "./repo"]]
 

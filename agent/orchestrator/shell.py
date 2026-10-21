@@ -234,6 +234,15 @@ def _cmd_sast(arg):
             argv.append("--patch")
         if _confirm("include the dependency-CVE scan (sends your package names to OSV.dev over the network)?"):
             argv.append("--online")
+        # Boot-and-drive witness: for a command-exec HTTP route, actually BOOT the app in Docker and drive a
+        # live request to WITNESS it (turns an inline-route lead from 'believed' into a proven 'confirmed').
+        # Opt-in + heavier: needs Docker, and only runs on a route the preflight rated feasible.
+        if _confirm("try the boot-and-drive witness for HTTP command-exec routes? (boots the app in Docker to "
+                    "prove it -- needs Docker, heavier)"):
+            argv.append("--boot")
+            if _confirm("also allow it on apps the preflight rates HEAVY (big monorepos -- only if your "
+                        "hardware can take it)?"):
+                argv.append("--boot-heavy")
         if _confirm("this loads the model and may take a while -- run now?") is False:
             print(DIM("  cancelled."))
             return

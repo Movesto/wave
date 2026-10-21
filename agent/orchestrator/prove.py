@@ -307,7 +307,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
             jr = js_env.resolve(target)
             if jr.blocked:
                 return {"verdict": "blocked", "evidence": "", "ran": 0, "oracle": "runtime unavailable",
-                        "taint": tstatus,
+                        "taint": tstatus, "image": None,
                         "why": f"{jr.blocked}; refusing to run the witness on a Node fallback -- a "
                                f"{jr.name}-only path would be misreported as a 'believed' lead"}
             img = jr.image or img
@@ -371,6 +371,8 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     hw, hmarker, htier = oracle.graded(cls_name, markers, cwe=getattr(c, "cwe", ""))
     return {"verdict": verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
             "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
+            "image": img,                                     # which runtime image the sandbox LAUNCHED (diag)
+            "_trail": list(getattr(v, "trail", []) or []),    # [(cmd, result)] for the diagnostic transcript log
             "reach_proof": reach_proof,                       # witnessed(tape) | claimed(model) | inferred | none
             "reach_tape": bool(getattr(v, "reach_tape", False)),   # HARNESS saw the reach tracer at a sealed sink (1b)
             "reach_in_prose": reach_in_prose,                 # model CLAIMED driving it in prose (diagnostic only)
@@ -714,13 +716,22 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
                              cwe=c.cwe, family=c.family).id
         transcript = rec.pop("_transcript", None)
         trace_mode = rec.pop("_mode", "")
-        from . import traces
+        trail = rec.pop("_trail", None)
+        from . import traces, transcript_log
         if traces.enabled() and transcript:
             traces.save(target=target, file=surv.get("file", ""), line=int(surv.get("line") or 0),
                         cls=str(surv.get("class") or "other").lower(), cwe=c.cwe, verdict=rec["verdict"],
                         evidence=rec.get("evidence", ""), oracle=rec.get("oracle", ""),
                         model=getattr(model, "model_id", ""), mode=trace_mode, ran=rec.get("ran", 0),
                         transcript=transcript)
+        # DIAGNOSTIC transcript (on by default, EVERY verdict incl believed/blocked): what the model ran +
+        # observed and which runtime image the sandbox launched -- so a lead is explainable without the live
+        # stdout. Compact (truncated results); distinct from the opt-in, verified-only training traces above.
+        transcript_log.save(out_dir, file=surv.get("file", ""), line=int(surv.get("line") or 0),
+                            cls=str(surv.get("class") or "other").lower(), cwe=c.cwe,
+                            verdict=rec.get("verdict", ""), image=rec.get("image", ""),
+                            oracle=rec.get("oracle", ""), ran=rec.get("ran", 0), mode=trace_mode,
+                            trail=trail)
         _record_outcome(case, hyp_id, c, rec)
         out = {"file": surv.get("file", ""), "line": int(surv.get("line") or 0),
                "class": str(surv.get("class") or "other").lower(), "cwe": c.cwe, "unit": c.unit,

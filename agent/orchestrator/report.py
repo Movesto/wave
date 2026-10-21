@@ -174,7 +174,9 @@ def generate(target, out_dir=None, model="", patches_path=None):
                ("wave_notebook.md", "the model's per-file security notes"),
                ("wave_candidates.jsonl", "detector survivors handed to the proof stage"),
                ("wave_findings.jsonl", "machine-readable findings (source for this report)"),
-               ("casefile.json", "full proof transcripts (what the model ran + observed)")]
+               ("wave_transcripts.jsonl", "per-candidate diagnostic trail (runtime image launched + every "
+                                          "command the model ran and observed)"),
+               ("casefile.json", "the CaseFile — each candidate's hypothesis and final conclusion")]
     present = [(nm, desc) for nm, desc in catalog if (src / nm).exists()]
     if present:
         lines.append("## Where the detail lives")
@@ -192,7 +194,7 @@ def generate(target, out_dir=None, model="", patches_path=None):
         (dest / "wave_report.md").write_text("\n".join(lines), encoding="utf-8")
     except OSError:
         pass
-    for name in ("wave_findings.jsonl", "wave_patches.jsonl", "casefile.json"):
+    for name in ("wave_findings.jsonl", "wave_patches.jsonl", "wave_transcripts.jsonl", "casefile.json"):
         s = src / name
         if s.exists():
             try:

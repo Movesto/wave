@@ -25,7 +25,7 @@ import secrets
 import shutil
 from pathlib import Path
 
-from . import briefs, codemap, oracle, provision, reachability, recorder, repro, routes, rung1, taint, xtaint
+from . import briefs, codemap, oracle, provision, reachability, recorder, repro, routes, rung1, taint, witness_plan, xtaint
 from . import investigate as invmod
 from .models import Candidate
 
@@ -292,6 +292,11 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         en, ef = getattr(entry_fn, "name", ""), getattr(entry_fn, "file", "")
         if en and ef and en != sink_fn:
             build_entry = (en, ef)
+    # PREFLIGHT WITNESS PLAN: a sink reached through an HTTP ROUTE can't be witnessed by the in-process
+    # scaffold (esp. an inline arrow route with no importable fn) -- the real witness is to BOOT the app and
+    # drive the route. We don't boot here; we ASSESS what that would take + its cost, and surface it as an
+    # opt-in in the report (so a heavy monorepo tells you the cost instead of blind-booting). Never raises.
+    wplan = witness_plan.build_plan(target, c, route=route) if route else None
     # Resolve the runtime BEFORE scaffolding so the launched image, the scaffold's run-hint, and the brief
     # all name the SAME interpreter. For JS/TS this is runtime-aware (bun/deno vs node+tsx): a DETECTED
     # non-node runtime whose image can't be provisioned is `blocked`, never a silent Node fallback that
@@ -373,6 +378,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
             "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
             "image": img,                                     # which runtime image the sandbox LAUNCHED (diag)
             "_trail": list(getattr(v, "trail", []) or []),    # [(cmd, result)] for the diagnostic transcript log
+            **({"witness_plan": wplan.as_dict()} if (wplan and wplan.needed) else {}),  # opt-in boot-witness plan
             "reach_proof": reach_proof,                       # witnessed(tape) | claimed(model) | inferred | none
             "reach_tape": bool(getattr(v, "reach_tape", False)),   # HARNESS saw the reach tracer at a sealed sink (1b)
             "reach_in_prose": reach_in_prose,                 # model CLAIMED driving it in prose (diagnostic only)

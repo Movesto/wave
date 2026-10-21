@@ -48,6 +48,18 @@ def _last(findings):
     return list(seen.values())
 
 
+def _witness_line(wp):
+    """Human line for a preflight boot-witness plan (from the persisted dict). Falls back to a terse form if
+    the plan module isn't importable for any reason."""
+    try:
+        from .witness_plan import WitnessPlan
+        return WitnessPlan(**{k: wp.get(k) for k in wp if k in WitnessPlan.__dataclass_fields__}).summary()
+    except Exception:
+        route = wp.get("route") or "the route"
+        pkg = wp.get("package") or "the server package"
+        return f"boot {pkg} and drive {route} ({wp.get('feasibility', '')} — not run, opt-in)."
+
+
 def _sev_key(r):
     """Order findings by severity (critical first), then high-confidence first."""
     from . import cwe_info
@@ -138,6 +150,9 @@ def generate(target, out_dir=None, model="", patches_path=None):
                 lines.append(f"- **how:** {r['oracle']}")
             if r.get("methodology"):
                 lines.append(f"- **method (model's approach):** {r['methodology']}")
+            wp = r.get("witness_plan")
+            if isinstance(wp, dict) and wp.get("needed"):
+                lines.append(f"- **to witness (preflight, not run):** {_witness_line(wp)}")
             pat = patches.get((r.get("file"), r.get("line")))
             if pat:
                 st = pat.get("status", "")

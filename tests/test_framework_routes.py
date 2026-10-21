@@ -5,7 +5,7 @@ These lock in that such handlers now (a) pin as ROUTES so the file is selected, 
 entries so reachability ranks them -- without false-flagging a lowercase `get`/`getUser` getter."""
 from pathlib import Path
 
-from agent.orchestrator import repomap, reachability
+from agent.orchestrator import repomap, reachability, routes
 from agent.orchestrator.codemap import Func, FileInfo
 
 
@@ -78,3 +78,58 @@ def test_build_map_selects_and_ranks_route_file(tmp_path):
     names = [Path(p).name for p in res["pinned"]]
     assert "route.ts" in names, "the App-Router route file must be selected"
     assert names.index("route.ts") < names.index("util.ts"), f"route (entry+sink) should rank first; {names}"
+
+
+# -------------------------------------------------- chained multi-line JS routes (Hono/opencode) ----------
+# A big server file declares many routes as CHAINED, multi-line `.post(\n "path",\n ...,\n handler\n)` blocks.
+# The single-line _EXPRESS regex sees none of them, and an inline arrow handler has no name to map a sink to.
+# The route is DECLARED in the project's own source -- the extractor must read it, and find_route must place a
+# sink INSIDE one handler on the RIGHT route (by line span), not the first route in the file.
+_CHAINED_SERVER = '''\
+const app = new Hono()
+  .get(
+    "/health",
+    (c) => c.json({ ok: true }),
+  )
+  .post(
+    "/session/:sessionID/shell",
+    validator("json", ShellInput),
+    async (c) => {
+      const body = c.req.valid("json")
+      const msg = await SessionPrompt.shell({ ...body })
+      return c.json(msg)
+    },
+  )
+  .get(
+    "/session/:sessionID/messages",
+    (c) => c.json(list()),
+  )
+'''
+
+
+def test_chained_multiline_route_is_extracted(tmp_path):
+    f = tmp_path / "server.ts"
+    f.write_text(_CHAINED_SERVER, encoding="utf-8")
+    rs = routes.extract_routes(str(tmp_path))
+    paths = {(r.method, r.path) for r in rs}
+    assert ("POST", "/session/:sessionID/shell") in paths, f"chained .post route must extract; got {paths}"
+    shell = next(r for r in rs if r.path == "/session/:sessionID/shell")
+    assert shell.line < shell.end and shell.framework == "hono"   # carries a span + framework
+
+
+def test_find_route_places_inline_sink_on_the_right_route(tmp_path):
+    f = tmp_path / "server.ts"
+    f.write_text(_CHAINED_SERVER, encoding="utf-8")
+    rs = routes.extract_routes(str(tmp_path))
+    sink_line = _CHAINED_SERVER.splitlines().index(
+        "      const msg = await SessionPrompt.shell({ ...body })") + 1
+    r = routes.find_route(rs, str(f), "", line=sink_line)
+    assert r is not None and r.path == "/session/:sessionID/shell", \
+        f"a sink inside the shell handler must map to that route, not the first in the file; got {r}"
+
+
+def test_single_line_route_still_owned_by_express(tmp_path):
+    # a classic single-line express route must NOT be duplicated by the multi-line extractor
+    (tmp_path / "app.js").write_text('app.get("/u", getUser)\n', encoding="utf-8")
+    rs = [r for r in routes.extract_routes(str(tmp_path)) if r.path == "/u"]
+    assert len(rs) == 1 and rs[0].function == "getUser"

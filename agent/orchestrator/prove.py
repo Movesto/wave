@@ -284,7 +284,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     route = None
     if route_list:
         en = getattr(entry_fn, "name", "") if entry_fn is not None else ""
-        r = routes.find_route(route_list, getattr(c, "file", ""), en or sink_fn)
+        r = routes.find_route(route_list, getattr(c, "file", ""), en or sink_fn, line=getattr(c, "line", 0))
         if r is not None:
             route = (r.method, r.path, r.framework, routes.drive_recipe(r))
     build_entry = None

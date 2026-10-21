@@ -22,6 +22,9 @@ class Route:
     file: str
     function: str
     framework: str = ""            # which extractor produced it -> picks the drive recipe
+    line: int = 0                  # source line of the route declaration (0 = unknown)
+    end: int = 0                   # last line of the route block -> lets find_route place an INLINE sink by
+    #                                line containment, when one file declares many routes (big server files)
 
 
 def _iter(target, exts):
@@ -83,6 +86,80 @@ def _express_routes(target):
             h = re.findall(r"([A-Za-z_$][\w$]*)\s*(?:\)|,|$)", rest)
             func = h[-1] if h else ""
             routes.append(Route(method, path, str(f), func))
+    return routes
+
+
+# ---- Chained / multi-line JS routes (Hono, Elysia, chained Express) ----------------------------
+# The single-line _EXPRESS regex only sees `x.post("path", handler)` on ONE line. Modern JS frameworks
+# register routes as a CHAINED, multi-line block:
+#     .post(
+#       "/session/:sessionID/shell",
+#       describeRoute({...}), validator(...),
+#       async (c) => { ...sink... },
+#     )
+# so the whole attack surface of a big server file is invisible to _EXPRESS -- and an INLINE arrow handler
+# has no function name to map a sink to. This extractor reads the route the PROJECT ALREADY DECLARES
+# (method + path + the block's line span), so a sink inside the handler body is placed by line containment
+# (see find_route). Deterministic, string/comment-aware; only emits multi-line blocks (single-line routes
+# stay owned by _EXPRESS, so no duplicate).
+_JS_ROUTE_EXTS = {".js", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+_JS_METHOD = re.compile(r"\.(get|post|put|delete|patch|options|head|all)\s*\(", re.I)
+
+
+def _js_block_end(text, i):
+    """Index just past the ')' matching the '(' at text[i], skipping strings / template literals / comments.
+    Best-effort (no ${} nesting); returns len(text) if unbalanced."""
+    depth, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "'\"`":                                   # string / template literal -> skip to its close
+            q = ch
+            i += 1
+            while i < n and text[i] != q:
+                i += 2 if text[i] == "\\" else 1
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":  # line comment
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":  # block comment
+            j = text.find("*/", i)
+            i = n if j < 0 else j + 2
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+_JS_FIRST_STR = re.compile(r"""['"`]([^'"`\n]*)['"`]""")
+
+
+def _js_chained_routes(target):
+    routes = []
+    for f in _iter(target, _JS_ROUTE_EXTS):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        fw = "hono" if "hono" in text.lower() else ("express" if "express" in text.lower() else "")
+        for m in _JS_METHOD.finditer(text):
+            open_paren = m.end() - 1
+            block_end = _js_block_end(text, open_paren)
+            start_line = text.count("\n", 0, m.start()) + 1
+            end_line = text.count("\n", 0, block_end) + 1
+            if end_line <= start_line:                     # single-line route -> _EXPRESS owns it
+                continue
+            sm = _JS_FIRST_STR.search(text, m.end(), block_end)
+            path = sm.group(1) if sm else ""
+            if not path.startswith("/"):                   # first arg isn't a route path -> not a route call
+                continue
+            routes.append(Route(m.group(1).upper(), path, str(f), "", fw, start_line, end_line))
     return routes
 
 
@@ -380,7 +457,8 @@ def _filebased_routes(target):
 _EXTRACTORS = [(_openapi_routes, "openapi"), (_express_routes, "express"), (_nest_routes, "nestjs"),
                (_flask_routes, "flask"), (_rust_routes, "rust"), (_spring_routes, "spring"),
                (_csharp_routes, "aspnet"), (_go_routes, "go"), (_rails_routes, "rails"),
-               (_laravel_routes, "laravel"), (_filebased_routes, None)]   # None = keep each route's own framework
+               (_laravel_routes, "laravel"), (_js_chained_routes, None), (_filebased_routes, None)]
+# None = keep each route's own framework (the chained JS + file-based extractors each span several frameworks)
 # frameworks emitted by the multi-framework file-based extractor (for the drive-recipe coverage check).
 _FILE_FRAMEWORKS = ("nextjs", "sveltekit", "nuxt")
 
@@ -460,13 +538,23 @@ def drive_recipe(route):
     return tpl.format(m=(route.method or "get").lower(), M=(route.method or "GET"), path=route.path)
 
 
-def find_route(routes, file, function):
-    """The Route object reaching a sink at (file, function). EXACT file path first (file-based routing: the
-    route IS the file, and basenames like `route.ts`/`index.ts` collide across dirs), then function-name
-    (decorated handlers), then basename. Returns the Route (method/path/framework) or None."""
+def find_route(routes, file, function, line=0):
+    """The Route object reaching a sink at (file, function[, line]). EXACT file path first (file-based routing:
+    the route IS the file). Within that file, when routes carry line SPANS (the chained-JS extractor), place
+    the sink by CONTAINMENT -- the route whose block encloses the sink line, tightest first; else the nearest
+    route declared ABOVE it. This is what lets a big server file with many inline routes map a sink to the RIGHT
+    route instead of the first one. Then function-name (decorated handlers), then basename. Returns the Route
+    or None."""
     nf = str(file or "").replace("\\", "/")
     exact = [r for r in routes if str(r.file or "").replace("\\", "/") == nf]
     if exact:
+        if line:
+            contain = [r for r in exact if r.line and r.end and r.line <= line <= r.end]
+            if contain:
+                return min(contain, key=lambda r: r.end - r.line)
+            above = [r for r in exact if r.line and r.line <= line]
+            if above:
+                return max(above, key=lambda r: r.line)
         return exact[0]
     if function:
         hit = [r for r in routes if r.function == function]

@@ -64,15 +64,25 @@ def test_classify_confirmed_carries_marker_for_the_confirm_pipeline():
 
 def test_classify_names_an_offline_startup_fetch_as_the_blocker():
     # the opencode case: the server fetches models.dev at boot; offline (--network none) it crashes before
-    # binding a port. The blocked reason must SAY so (not "neither marker nor usable response") and name the
-    # opt-in -- so the user knows boot ran, why it failed, and how to let it complete.
+    # binding a port. The blocked reason must SAY so (not "neither marker nor usable response") so the user
+    # knows boot ran and WHY it failed.
     out = ("WAVE_BOOT: SERVER_EXITED\n---LOG---\n"
            "TypeError: getaddrinfo EAI_AGAIN models.dev\n  at fetch(\"https://models.dev/api.json\")")
     res = boot_witness._classify(out, "MK")
     assert res.verdict == "blocked"
-    assert "models.dev" in res.why and "--network none" in res.why and "WAVE_BOOT_NETWORK" in res.why
+    assert "models.dev" in res.why and "--network none" in res.why
+    # SAFETY: the network opt-in is disabled, so the blocked reason must NOT advertise giving the sandbox net;
+    # it tells the user the lead stands and to confirm it themselves.
+    assert not boot_witness._NETWORK_OPTIN_ENABLED
+    assert "WAVE_BOOT_NETWORK" not in res.why and "offline by design" in res.why
     # a crash with no network signature keeps the generic bind-a-port reason
     assert "bind a port" in boot_witness._classify("WAVE_BOOT: NO_PORT\n---LOG---\nOOM killed", "MK").why
+
+
+def test_boot_network_optin_is_disabled_so_the_boot_is_always_offline(monkeypatch):
+    # even with WAVE_BOOT_NETWORK=1 set, the kill-switch keeps the container on --network none.
+    monkeypatch.setenv("WAVE_BOOT_NETWORK", "1")
+    assert boot_witness._NETWORK_OPTIN_ENABLED is False       # the safety default while testing many targets
 
 
 def test_render_driver_survives_shell_and_regex_braces():

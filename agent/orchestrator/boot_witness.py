@@ -39,6 +39,13 @@ DEFAULT_CPUS = "2"
 DEFAULT_TIMEOUT = 180        # total wall-clock for boot + wait + drive (seconds)
 _BOOT_WAIT = 40              # seconds to wait for the server to bind a port, inside the container
 
+# SAFETY KILL-SWITCH: the boot sandbox is ALWAYS offline (--network none). Granting a booted target internet
+# egress is a real risk (the booted code is the thing under test), so the opt-in is kept wired but DISABLED --
+# while this is False, WAVE_BOOT_NETWORK does nothing and the boot never gets network. Flip to True to re-enable
+# the opt-in deliberately. When a target can't boot offline, the reasoned lead + the visible boot trail stand,
+# and the user confirms it in an environment they control.
+_NETWORK_OPTIN_ENABLED = False
+
 # classes this executor can drive (a command-exec route is the first-class target)
 _EXEC_CWES = {"CWE-78", "CWE-77", "CWE-94"}
 _EXEC_FAMILIES = ("cmd", "exec", "unauth-exec", "rce")
@@ -288,10 +295,13 @@ def _network_block_why(out: str) -> str:
     hm = re.search(r"(?:getaddrinfo|EAI_AGAIN|ENOTFOUND)[^\n]*?([a-z0-9.-]+\.[a-z]{2,})", out or "", re.I)
     if hm:
         host = hm.group(1)
+    tail = (" Set WAVE_BOOT_NETWORK=1 to let the boot reach the network (only for a target you trust) -- the "
+            "request is still local." if _NETWORK_OPTIN_ENABLED else
+            " The sandbox is offline by design (a booted target gets no internet), so this app can't be "
+            "boot-witnessed here; the reasoned lead + this trail stand -- confirm it in an environment you control.")
     return ("the server needs network egress at STARTUP" + (f" (fetches {host})" if host else "")
             + " but the witness sandbox is offline (--network none), so it crashed before binding a port. The "
-              "HTTP drive itself is local; only the app's boot-time fetch needs the net. Set WAVE_BOOT_NETWORK=1 "
-              "to let the boot reach the network (only for a target you trust) -- the request is still local.")
+              "HTTP drive itself is local; only the app's boot-time fetch needs the net." + tail)
 
 
 def _classify(out: str, marker: str) -> BootResult:
@@ -354,7 +364,8 @@ def drive(target, candidate, plan, *, image, runtime, route, model=None, code_wi
     # so no egress is needed to test the route. But some apps fetch at STARTUP (opencode pulls its model catalog
     # from models.dev) and won't bind a port offline. WAVE_BOOT_NETWORK=1 lets the boot reach the network so init
     # can finish -- opt-in, off by default, ONLY for a target you trust (it lets the booted code egress freely).
-    netgress = os.environ.get("WAVE_BOOT_NETWORK", "").strip().lower() in ("1", "true", "yes", "on")
+    netgress = (_NETWORK_OPTIN_ENABLED
+                and os.environ.get("WAVE_BOOT_NETWORK", "").strip().lower() in ("1", "true", "yes", "on"))
     net = "bridge" if netgress else "none"
     cmd = ["docker", "run", "--rm", "--network", net,
            "--memory", str(memory), "--cpus", str(cpus),

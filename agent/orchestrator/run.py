@@ -259,6 +259,10 @@ def cmd_prove(args):
     from . import prove
     from .model import Model
     out_dir = str(Path(args.candidates).parent) if args.candidates else args.target
+    if getattr(args, "boot", False):                          # opt-in boot-and-drive witness (part 2)
+        os.environ["WAVE_BOOT_WITNESS"] = "1"
+        if getattr(args, "boot_heavy", False):
+            os.environ["WAVE_BOOT_HEAVY"] = "1"
     model = Model()
     by, paths = prove.run(model, args.target, candidates_path=args.candidates, budget=args.budget,
                           out_dir=out_dir, gate=not args.no_reach_gate, online=args.online,
@@ -362,6 +366,10 @@ def cmd_all(args):
     from . import detector, notebook, prove, repomap
     from .model import Model
     t = args.target
+    if getattr(args, "boot", False):                          # opt-in boot-and-drive witness (part 2)
+        os.environ["WAVE_BOOT_WITNESS"] = "1"
+        if getattr(args, "boot_heavy", False):
+            os.environ["WAVE_BOOT_HEAVY"] = "1"
     model = Model()
 
     # Preflight: one cheap model call BEFORE the (expensive) map, so a dead/unauthorized endpoint fails loudly
@@ -402,6 +410,25 @@ def cmd_all(args):
         print(f"[all] selected {len(targets)} of {len(pinned)} pinned files to deep-read", flush=True)
     else:
         targets = pinned                                     # read every pinned file (budget covers it)
+    # Stage 1a -- COVERAGE REVIEW: the audit model (WAVE_AUDIT_MODEL) reads the whole-map skeleton + the
+    # pinned surface and negotiates with the harness about CORE attack surface the regex pins missed
+    # (library-wrapped sinks, convention routes, auth layers). Promotions are HINTS added to the read set,
+    # never findings -- confirmation still runs the deterministic prove path. Off with --no-coverage or when
+    # no audit model is configured (then it is a no-op).
+    if getattr(args, "coverage", True) and not args.all_files:
+        from . import coverage
+        try:
+            promoted, _clog = coverage.review(model, t, res["cmap"], per_file, pinned,
+                                              _dropped_lp, args.notes_budget, out_dir=t)
+        except Exception as e:
+            promoted = []
+            print(f"[all] coverage review skipped: {str(e)[:160]}", flush=True)
+        if promoted:
+            tset = set(targets)
+            added = [p for p in promoted if p not in tset]
+            targets = targets + added
+            print(f"[all] coverage: audit model promoted {len(added)} missed file(s) into the read set "
+                  f"-> {t}/wave_coverage.md", flush=True)
     if args.interactive:                                     # propose the read set; user prunes/extends
         from .repomap import _rel
         picks = [{"file": _rel(t, p), "path": p,
@@ -495,7 +522,7 @@ def cmd_all(args):
     # advisories. Appended to the one report so it's all in one place.
     from . import deps as _deps, controls as _controls, iac as _iac, secrets as _secrets
     dep_findings = _deps.scan(t, online=args.online)
-    ctl_findings = _controls.scan(t)
+    ctl_findings = _controls.scan(t, cmap=res.get("cmap"), per_file=per_file)
     iac_findings = _iac.scan(t)
     sec_findings = _secrets.scan(t)
     try:
@@ -769,6 +796,12 @@ def main(argv=None):
     pr.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="prove N survivors in PARALLEL (cloud model only; local single-GPU stays serial). "
                          "~4 fits a 32GB/6-core box; lower for heavy compiled builds")
+    pr.add_argument("--boot", action="store_true",
+                    help="for a feasible command-exec HTTP route, BOOT the app in the sandbox and drive a live "
+                         "request to witness it (opt-in; heavier). Needs Docker; capped mem/cpu/time")
+    pr.add_argument("--boot-heavy", action="store_true",
+                    help="also allow a boot-and-drive witness the preflight rated HEAVY (big monorepo) -- only "
+                         "if your hardware can take it")
     pr.set_defaults(func=cmd_prove)
 
     pt = sub.add_parser("patch", help="Stage 4: patch each confirmed finding + reverify with the same proof")
@@ -813,6 +846,9 @@ def main(argv=None):
     al.add_argument("--all-files", action="store_true",
                     help="deep-read EVERY parsed source file, not just pinned (full coverage)")
     al.add_argument("--interactive", action="store_true", help="propose the read set; prune/extend it before reading")
+    al.add_argument("--no-coverage", dest="coverage", action="store_false",
+                    help="skip Stage 1a coverage review (audit model negotiates missed attack surface into "
+                         "the read set); on by default when WAVE_AUDIT_MODEL is set")
     al.add_argument("--no-reconcile", action="store_true",
                     help="skip Stage 5 (dedup + contradiction resolution) before patch/report")
     al.add_argument("--no-variants", action="store_true",
@@ -821,6 +857,11 @@ def main(argv=None):
                     help="Stage 5 Phase 2/3: also run the model cross-file reconcile + re-investigate (adds cost)")
     al.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="prove N survivors in PARALLEL (cloud model only; ~4 fits a 32GB/6-core box)")
+    al.add_argument("--boot", action="store_true",
+                    help="for a feasible command-exec HTTP route, BOOT the app + drive a live request to "
+                         "witness it (opt-in; heavier, needs Docker)")
+    al.add_argument("--boot-heavy", action="store_true",
+                    help="also allow a boot-and-drive witness the preflight rated HEAVY")
     al.set_defaults(func=cmd_all)
 
     dp = sub.add_parser("deps", help="scan dependencies for known CVEs (OSV.dev; deterministic, needs network)")

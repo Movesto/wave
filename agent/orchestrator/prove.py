@@ -25,7 +25,7 @@ import secrets
 import shutil
 from pathlib import Path
 
-from . import briefs, codemap, oracle, provision, reachability, recorder, repro, routes, rung1, taint, xtaint
+from . import boot_witness, briefs, codemap, oracle, provision, reachability, recorder, repro, routes, rung1, runtimes, taint, witness_plan, xtaint
 from . import investigate as invmod
 from .models import Candidate
 
@@ -33,14 +33,17 @@ from .models import Candidate
 _CLASS_CWE = {"cmd": "CWE-78", "sqli": "CWE-89", "nosqli": "CWE-943", "ssrf": "CWE-918", "path": "CWE-22",
               "xss": "CWE-79", "deser": "CWE-502", "redirect": "CWE-601", "authz": "CWE-639",
               "idor": "CWE-639", "access": "CWE-639", "bola": "CWE-639", "bfla": "CWE-639",
-              "eval": "CWE-95", "ssti": "CWE-1336", "protopollution": "CWE-1321", "proto": "CWE-1321",
-              "prototype": "CWE-1321", "memory": "CWE-120", "format": "CWE-134", "other": ""}
+              "eval": "CWE-95", "codegen": "CWE-94", "ssti": "CWE-1336", "protopollution": "CWE-1321",
+              "proto": "CWE-1321", "prototype": "CWE-1321", "memory": "CWE-120", "format": "CWE-134",
+              "xxe": "CWE-611", "crlf": "CWE-113", "ldap": "CWE-90", "xpath": "CWE-643",
+              "weakcrypto": "CWE-327", "other": ""}
 # classes the cheap in-process canary oracle (rung1) can witness; others go straight to the model prover
 _CANARY_CLASSES = {"cmd", "sqli", "nosqli", "ssrf", "path"}
 # severity for working order (mirrors detector._SEV so the proof loop works the most dangerous first)
-_SEV = {"cmd": 9, "eval": 9, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nosqli": 7, "ssrf": 6,
-        "path": 6, "protopollution": 6, "proto": 6, "prototype": 6, "format": 6, "authz": 6, "idor": 6,
-        "access": 6, "bola": 6, "bfla": 6, "xss": 4, "redirect": 3, "other": 1}
+_SEV = {"cmd": 9, "eval": 9, "codegen": 8, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nosqli": 7,
+        "xxe": 7, "ldap": 7, "ssrf": 6, "path": 6, "protopollution": 6, "proto": 6, "prototype": 6,
+        "format": 6, "xpath": 6, "authz": 6, "idor": 6, "access": 6, "bola": 6, "bfla": 6, "crlf": 5,
+        "xss": 4, "weakcrypto": 4, "redirect": 3, "other": 1}
 
 # intrinsically-dangerous sinks: executing them with a handed-in payload proves the MECHANISM (always true),
 # not attacker-control -> a `confirmed` here needs HIGH-confidence reachability (else -> anomalous_state).
@@ -109,6 +112,51 @@ def _to_candidate(surv, rel_index, target):
         sink=str(surv.get("sink") or ""),
         provable=cls in _CANARY_CLASSES and rel.endswith(".py") and bool(unit),
         rank=_SEV.get(cls, 1), route_hint=str(surv.get("input") or "")[:80], slice="", resolved_from="")
+
+
+import re as _re_mod
+
+
+def _sink_callee_candidate(c, cmap, target):
+    """If the flagged sink is a CALL to a repo-defined function (e.g. the line is inside a 400-line
+    `generate()` but the sink is `get_body(url)`, whose def lives in http.py), return a Candidate anchored
+    on that LEAF function -- the small, cleanly-callable unit the canary can import and drive directly, vs
+    the uncallable entrypoint. None for method calls (`x.open(...)`) or callees not defined in the repo.
+    SOUND: this only changes WHICH function the canary tries to import; the observer still requires the
+    marker to reach a sink in an unsafe position, so a wrong name-match just yields `unknown`, never a
+    false positive."""
+    if cmap is None:
+        return None
+    sink = (getattr(c, "sink", "") or "").strip()
+    m = _re_mod.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", sink)   # a leading BARE call name (not `obj.meth(`)
+    if not m:
+        return None
+    callee = m.group(1)
+    if callee == (getattr(c, "unit", "") or "").split("(")[0].strip():
+        return None                                              # already the enclosing unit -- nothing new
+    for p, fi in cmap.files.items():
+        rel = _rel(target, p)
+        if not rel.endswith(".py"):
+            continue
+        for f in list(fi.functions) + [mth for cl in fi.classes for mth in cl.methods]:
+            if f.name == callee:
+                return Candidate(
+                    file=str(Path(target) / rel), unit=f.name + (f.sig or "()"), line=f.line,
+                    cwe=c.cwe, family=c.family, detector="detector-leaf", sink=sink,
+                    provable=True, rank=c.rank, route_hint=getattr(c, "route_hint", ""), slice="",
+                    resolved_from="sink-callee")
+    return None
+
+
+def _canary(c, target, cmap):
+    """Run the cheap canary for a candidate, retrying through a manifest-built venv when the host can't
+    import it (non-web library). Returns a MicroResult. Used for both the enclosing unit and the leaf."""
+    mr = rung1.micro_exec(c, rt=None)
+    if mr.verdict == "unknown" and provision.has_py_manifest(target):
+        libenv = provision.library_env(target)               # non-web: venv from the target's own manifest
+        if libenv is not None and libenv.ready:
+            mr = rung1.micro_exec(c, rt=None, venv=libenv)
+    return mr
 
 
 def _subj(c):
@@ -186,7 +234,16 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     tstatus, tnote = taint.analyze(c)                        # intra-function value taint (Python + JS/TS; else unknown)
     reason = "not a canary-provable Python handler"
     if c.provable:
-        mr = rung1.micro_exec(c, rt=None)                    # cheap in-process canary (no boot, no model)
+        mr = _canary(c, target, cmap)                        # cheap canary on the enclosing unit (venv-aware)
+        if mr.verdict == "unknown":
+            # the sink line sits in an uncallable entrypoint -> drive the LEAF sink function directly (the
+            # web-handler assumption "sink's enclosing fn is a simple-input callable" fails for libraries).
+            leaf = _sink_callee_candidate(c, cmap, target)
+            if leaf is not None:
+                lmr = _canary(leaf, target, cmap)
+                if lmr.verdict in ("proven", "safe"):
+                    mr = lmr
+                    mr.reason = f"[via leaf sink {leaf.unit}] {mr.reason}"
         if mr.verdict == "proven":
             return {"verdict": "confirmed", "evidence": mr.evidence, "why": mr.reason, "ran": 0,
                     "oracle": f"rung1 micro-exec (stubs={mr.stubs})", "marker": mr.marker, "taint": tstatus}
@@ -227,7 +284,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     route = None
     if route_list:
         en = getattr(entry_fn, "name", "") if entry_fn is not None else ""
-        r = routes.find_route(route_list, getattr(c, "file", ""), en or sink_fn)
+        r = routes.find_route(route_list, getattr(c, "file", ""), en or sink_fn, line=getattr(c, "line", 0))
         if r is not None:
             route = (r.method, r.path, r.framework, routes.drive_recipe(r))
     build_entry = None
@@ -235,15 +292,64 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         en, ef = getattr(entry_fn, "name", ""), getattr(entry_fn, "file", "")
         if en and ef and en != sink_fn:
             build_entry = (en, ef)
-    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag, entry=build_entry)
+    # PREFLIGHT WITNESS PLAN: a sink reached through an HTTP ROUTE can't be witnessed by the in-process
+    # scaffold (esp. an inline arrow route with no importable fn) -- the real witness is to BOOT the app and
+    # drive the route. We don't boot here; we ASSESS what that would take + its cost, and surface it as an
+    # opt-in in the report (so a heavy monorepo tells you the cost instead of blind-booting). Never raises.
+    wplan = witness_plan.build_plan(target, c, route=route) if route else None
+    # Resolve the runtime BEFORE scaffolding so the launched image, the scaffold's run-hint, and the brief
+    # all name the SAME interpreter. For JS/TS this is runtime-aware (bun/deno vs node+tsx): a DETECTED
+    # non-node runtime whose image can't be provisioned is `blocked`, never a silent Node fallback that
+    # would run a Bun/Deno-only path on tsx and misreport it as 'believed' (the Bun-witness fix).
     img = briefs._image_for(c.file)
+    js_run = "tsx {file}"
     if briefs._is_js(c.file):                                # JS/TS need tsx + the repo's node_modules;
         from . import js_env                                 # DOM render ALSO needs a real browser --
         if mode == "render":                                 # node:20-slim has none of these (the XSS miss).
             js_env.ensure_deps(target)                       # (all cached/idempotent -> built once, then fast)
             img = js_env.ensure_browser_runner() or js_env.prepare(target) or img
         else:
-            img = js_env.prepare(target) or img
+            jr = js_env.resolve(target)
+            if jr.blocked:
+                return {"verdict": "blocked", "evidence": "", "ran": 0, "oracle": "runtime unavailable",
+                        "taint": tstatus, "image": None,
+                        "why": f"{jr.blocked}; refusing to run the witness on a Node fallback -- a "
+                               f"{jr.name}-only path would be misreported as a 'believed' lead"}
+            img = jr.image or img
+            js_run = jr.run or js_run
+    # OPT-IN BOOT-AND-DRIVE WITNESS (part 2): for an enabled + FEASIBLE command-exec ROUTE, actually boot the
+    # app and drive a live request BEFORE the read-only model investigate. A definitive result
+    # (confirmed/anomalous_state/refuted) short-circuits; a 'blocked' boot falls through to the normal lead so
+    # we still report it. Gated: WAVE_BOOT_WITNESS=1 + the preflight plan's feasibility ('ready', or 'heavy'
+    # only with WAVE_BOOT_HEAVY=1); 'underspecified' is never auto-booted.
+    boot_blocked = None                                      # a boot that was ATTEMPTED but couldn't bind/drive
+    if (route is not None and wplan is not None and getattr(wplan, "needed", False)
+            and have_docker and boot_witness.enabled() and briefs._is_js(c.file)
+            and boot_witness.is_applicable(c, wplan)):
+        _heavy_ok = os.environ.get("WAVE_BOOT_HEAVY", "").strip().lower() in ("1", "true", "yes", "on")
+        if wplan.feasibility == "ready" or (wplan.feasibility == "heavy" and _heavy_ok):
+            _rt = runtimes.runtime_for_image(img)
+            br = boot_witness.drive(target, c, wplan, image=img, runtime=(_rt.name if _rt else "node"),
+                                    route=route, model=model,
+                                    code_window=briefs._code_window(c.file, getattr(c, "line", 0)))
+            if br is not None and br.verdict != "blocked":
+                return {"verdict": br.verdict, "evidence": br.evidence, "why": br.why,
+                        "oracle": "boot-and-drive witness", "ran": 1, "taint": tstatus, "image": img,
+                        "reach_proof": ("witnessed" if br.verdict == "confirmed" else "none"),
+                        "witness": ([br.marker] if br.marker else []),
+                        "harness_witnessed": br.verdict == "confirmed", "harness_marker": br.marker,
+                        "oracle_tier": "marker", "witness_plan": wplan.as_dict(),
+                        "_trail": [(f"boot `{getattr(br, 'entrypoint', '') or wplan.entrypoint}` + drive "
+                                    f"{route[0]} {route[1]}", (br.log or br.why)[:1500])]}
+            # a 'blocked' boot (couldn't bind / too heavy / needs network at startup) FALLS THROUGH to the normal
+            # model investigate -- but we REMEMBER it so the attempt is never invisible: the lead records WHY the
+            # boot failed (in its trail + a `boot` note) instead of looking like boot was never tried (the
+            # opencode case: the user enabled boot, it ran, it crashed on an offline startup fetch, and the
+            # report showed nothing).
+            if br is not None:
+                boot_blocked = br
+    scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag,
+                           entry=build_entry, run_tmpl=js_run)
     step_to = (300 if mode in briefs.COMPILED_MODES               # build/fetch a standalone repro
                else (120 if mode in ("render", "asan")
                      else (90 if briefs._is_js(c.file) else 45)))
@@ -255,16 +361,25 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
         sink_env, hooks_dir = provision.sink_hook_env(target, briefs._is_js(c.file))
     except Exception:
         sink_env, hooks_dir = {}, None
+    # NON-WEB provisioning: for a Python library/CLI with a manifest, pre-seed the sandbox with the target's
+    # OWN deps (once, cached) so the model never spends steps on `pip install` (the datamodel BLOCKED-on-yaml
+    # case). None -> investigate provisions on demand as before (web apps inherit deps from their image).
+    inv_deps = None
+    if not briefs._is_js(c.file) and provision.has_py_manifest(target):
+        try:
+            inv_deps = provision.library_deps(target)
+        except Exception:
+            inv_deps = None
     try:
         # container stays sandboxed (network=none); web_search/web_read run on the HOST -- the single,
         # controlled egress point when online, not blanket container network access.
         v = invmod.investigate(model, briefs._brief_for(c, target, reason, scaffold=scaffold, mode=mode,
                                                         reach=reach, route=route, flow=xflow, hit_marker=hit,
-                                                        reach_id=reach_id),
+                                                        reach_id=reach_id, js_run=js_run),
                                image=img, mount=target, network="none", max_steps=max_steps,
                                step_timeout=step_to, online=online, write_tag=tag, hit_marker=hit,
                                sink_secret=sink_secret, reach_id=reach_id, sink_env=sink_env,
-                               sink_hooks_dir=hooks_dir)
+                               sink_hooks_dir=hooks_dir, deps=(inv_deps if inv_deps else None))
     finally:
         repro.remove(target, tag)
         if hooks_dir:
@@ -290,8 +405,20 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     markers = set(getattr(v, "witness", []) or [])
     cls_name = (getattr(c, "family", "") or "").split()[0]
     hw, hmarker, htier = oracle.graded(cls_name, markers, cwe=getattr(c, "cwe", ""))
+    # A boot was ATTEMPTED and blocked -> record it so the lead is never silent about it: a trail line (for the
+    # diagnostic transcript) + a `boot` note (for the report), both naming the command tried and why it failed.
+    _boot_trail, _boot_note = [], None
+    if boot_blocked is not None:
+        _bep = getattr(boot_blocked, "entrypoint", "") or (wplan.entrypoint if wplan else "")
+        _boot_note = f"boot-and-drive attempted via `{_bep}` -> blocked: {boot_blocked.why}"
+        _boot_trail = [(f"boot `{_bep}` + drive {route[0]} {route[1]} -> BLOCKED",
+                        (boot_blocked.log or boot_blocked.why or "")[:1500])]
     return {"verdict": verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
             "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
+            "image": img,                                     # which runtime image the sandbox LAUNCHED (diag)
+            "_trail": _boot_trail + list(getattr(v, "trail", []) or []),  # blocked-boot first, then investigate
+            **({"boot": _boot_note} if _boot_note else {}),   # the attempted-but-blocked boot, surfaced in the report
+            **({"witness_plan": wplan.as_dict()} if (wplan and wplan.needed) else {}),  # opt-in boot-witness plan
             "reach_proof": reach_proof,                       # witnessed(tape) | claimed(model) | inferred | none
             "reach_tape": bool(getattr(v, "reach_tape", False)),   # HARNESS saw the reach tracer at a sealed sink (1b)
             "reach_in_prose": reach_in_prose,                 # model CLAIMED driving it in prose (diagnostic only)
@@ -635,13 +762,22 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
                              cwe=c.cwe, family=c.family).id
         transcript = rec.pop("_transcript", None)
         trace_mode = rec.pop("_mode", "")
-        from . import traces
+        trail = rec.pop("_trail", None)
+        from . import traces, transcript_log
         if traces.enabled() and transcript:
             traces.save(target=target, file=surv.get("file", ""), line=int(surv.get("line") or 0),
                         cls=str(surv.get("class") or "other").lower(), cwe=c.cwe, verdict=rec["verdict"],
                         evidence=rec.get("evidence", ""), oracle=rec.get("oracle", ""),
                         model=getattr(model, "model_id", ""), mode=trace_mode, ran=rec.get("ran", 0),
                         transcript=transcript)
+        # DIAGNOSTIC transcript (on by default, EVERY verdict incl believed/blocked): what the model ran +
+        # observed and which runtime image the sandbox launched -- so a lead is explainable without the live
+        # stdout. Compact (truncated results); distinct from the opt-in, verified-only training traces above.
+        transcript_log.save(out_dir, file=surv.get("file", ""), line=int(surv.get("line") or 0),
+                            cls=str(surv.get("class") or "other").lower(), cwe=c.cwe,
+                            verdict=rec.get("verdict", ""), image=rec.get("image", ""),
+                            oracle=rec.get("oracle", ""), ran=rec.get("ran", 0), mode=trace_mode,
+                            trail=trail)
         _record_outcome(case, hyp_id, c, rec)
         out = {"file": surv.get("file", ""), "line": int(surv.get("line") or 0),
                "class": str(surv.get("class") or "other").lower(), "cwe": c.cwe, "unit": c.unit,
@@ -686,6 +822,7 @@ def run(model, target, candidates_path=None, budget=20, out_dir=None, resume=Tru
             model.unload()
         except Exception:
             pass
+    provision.cleanup_library_envs()                         # remove any venvs built for non-web canary proof
 
     by = {v: [] for v in _VERDICT_ORDER}
     for d in prior.values():                                # last verdict per candidate

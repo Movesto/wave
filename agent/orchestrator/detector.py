@@ -25,9 +25,65 @@ from pathlib import Path
 from .repomap import _rel  # noqa: F401  (kept for symmetry with notebook; path handling below uses it indirectly)
 
 # severity for ranking survivors (the proof loop works the most dangerous first)
-_SEV = {"cmd": 9, "eval": 9, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nosqli": 7, "ssrf": 6,
-        "path": 6, "protopollution": 6, "proto": 6, "prototype": 6, "format": 6, "xss": 4, "authz": 5,
-        "redirect": 3, "other": 1}
+_SEV = {"cmd": 9, "eval": 9, "codegen": 8, "deser": 8, "ssti": 8, "sqli": 8, "memory": 8, "nosqli": 7,
+        "xxe": 7, "ldap": 7, "ssrf": 6, "path": 6, "protopollution": 6, "proto": 6, "prototype": 6,
+        "format": 6, "xpath": 6, "crlf": 5, "xss": 4, "weakcrypto": 4,
+        "authz": 5, "idor": 5, "access": 5, "bola": 5, "bfla": 5, "redirect": 3, "other": 1}
+
+# The canonical vulnerability classes the prover/oracle have a recipe for (mirrors prove._CLASS_CWE /
+# oracle.CLASS_WITNESS). A corrected_class is only useful if it is ONE of these -- the prover keys on it
+# for the CWE, the witness tokens, and the severity rank. A free-text relabel the pipeline does NOT know
+# (e.g. the model "correcting" eval -> "code-injection") silently blanks the CWE and floors the rank to 1
+# (prove._SEV's default), benching a real finding before it is ever proved -- this is exactly how the
+# Langflow CVE-2025-3248 unauth-RCE got dropped. So we normalize every correction back to this taxonomy
+# (via _CLASS_ALIAS) and DROP any label that doesn't resolve, keeping the original recognized class.
+_KNOWN_CLASSES = {"cmd", "sqli", "nosqli", "ssrf", "path", "xss", "deser", "redirect", "authz", "idor",
+                  "access", "bola", "bfla", "eval", "codegen", "ssti", "protopollution", "proto",
+                  "prototype", "memory", "format", "xxe", "crlf", "ldap", "xpath", "weakcrypto", "other"}
+
+# synonyms the model commonly emits -> the canonical class name above.
+_CLASS_ALIAS = {
+    "code-injection": "eval", "code_injection": "eval", "codeinjection": "eval", "rce": "eval",
+    "arbitrary-code-execution": "eval", "code-execution": "eval", "codeexec": "eval",
+    "command-injection": "cmd", "command_injection": "cmd", "os-command-injection": "cmd",
+    "os-command": "cmd", "shell-injection": "cmd", "commandinjection": "cmd",
+    "sql-injection": "sqli", "sql_injection": "sqli", "sql": "sqli",
+    "nosql-injection": "nosqli", "nosql": "nosqli",
+    "server-side-request-forgery": "ssrf",
+    "path-traversal": "path", "directory-traversal": "path", "lfi": "path", "file-path": "path",
+    "cross-site-scripting": "xss",
+    "insecure-deserialization": "deser", "deserialization": "deser", "pickle": "deser", "unpickle": "deser",
+    "open-redirect": "redirect", "open_redirect": "redirect",
+    "template-injection": "ssti", "server-side-template-injection": "ssti", "template": "ssti",
+    # codegen injection (CWE-94): attacker text built into EMITTED code that runs in a DIFFERENT program
+    # (an import/def line in generated source), distinct from in-process eval. "code-injection" stays -> eval
+    # (the safer in-process default); only codegen-specific phrasings resolve here.
+    "code-generation": "codegen", "codegen-injection": "codegen", "generated-code-injection": "codegen",
+    "code-generation-injection": "codegen", "template-code-injection": "codegen", "import-injection": "codegen",
+    "prototype-pollution": "protopollution", "prototype_pollution": "protopollution", "proto-pollution": "proto",
+    "broken-access-control": "access", "access-control": "access", "authorization": "authz", "auth": "authz",
+    "insecure-direct-object-reference": "idor",
+    "buffer-overflow": "memory", "format-string": "format",
+    "xml-external-entity": "xxe", "xml-external-entities": "xxe", "xxe-injection": "xxe", "xml-injection": "xxe",
+    "crlf-injection": "crlf", "http-response-splitting": "crlf", "response-splitting": "crlf",
+    "header-injection": "crlf", "http-header-injection": "crlf",
+    "ldap-injection": "ldap", "xpath-injection": "xpath",
+    "weak-crypto": "weakcrypto", "weak-cryptography": "weakcrypto", "broken-crypto": "weakcrypto",
+    "insecure-crypto": "weakcrypto", "weak-hash": "weakcrypto", "weak-cipher": "weakcrypto",
+    "insecure-randomness": "weakcrypto", "predictable-random": "weakcrypto",
+}
+
+
+def _canonical_class(cc):
+    """Normalize a model-proposed corrected_class to the pipeline's known taxonomy. Returns a canonical
+    class name (one the prover/oracle recognize and can rank) or "" when the label doesn't resolve -- in
+    which case the caller KEEPS the original, recognized label rather than relabel to something downstream
+    can neither rank nor prove. This is the guard that stops a cosmetic relabel (eval -> "code-injection")
+    from blanking a finding's CWE and flooring its severity to the prove-budget cut line."""
+    cc = (cc or "").strip().lower()
+    if cc in _KNOWN_CLASSES:
+        return cc
+    return _CLASS_ALIAS.get(cc, "")
 
 _FALSIFY_SYS = (
     "You are a skeptical security reviewer. Another analyst flagged a POSSIBLE vulnerability in the code "
@@ -242,6 +298,7 @@ def falsify(model, root, finding):
     corrected = str(d.get("corrected_class", "") or "").strip().lower()
     if not re.fullmatch(r"[a-z0-9][a-z0-9\-]{0,19}", corrected):   # ignore garbage / prose relabels
         corrected = ""
+    corrected = _canonical_class(corrected)   # map synonyms -> known taxonomy; drop unknowns (keep orig class)
     return {"verdict": v, "reason": str(d.get("reason") or ""),
             "confidence": conf if conf in ("high", "low") else "",
             "corrected_class": corrected}

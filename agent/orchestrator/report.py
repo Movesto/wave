@@ -48,6 +48,18 @@ def _last(findings):
     return list(seen.values())
 
 
+def _witness_line(wp):
+    """Human line for a preflight boot-witness plan (from the persisted dict). Falls back to a terse form if
+    the plan module isn't importable for any reason."""
+    try:
+        from .witness_plan import WitnessPlan
+        return WitnessPlan(**{k: wp.get(k) for k in wp if k in WitnessPlan.__dataclass_fields__}).summary()
+    except Exception:
+        route = wp.get("route") or "the route"
+        pkg = wp.get("package") or "the server package"
+        return f"boot {pkg} and drive {route} ({wp.get('feasibility', '')} — not run, opt-in)."
+
+
 def _sev_key(r):
     """Order findings by severity (critical first), then high-confidence first."""
     from . import cwe_info
@@ -138,6 +150,11 @@ def generate(target, out_dir=None, model="", patches_path=None):
                 lines.append(f"- **how:** {r['oracle']}")
             if r.get("methodology"):
                 lines.append(f"- **method (model's approach):** {r['methodology']}")
+            if r.get("boot"):                                  # a boot-and-drive witness was TRIED but blocked
+                lines.append(f"- **boot witness:** {r['boot']}")
+            wp = r.get("witness_plan")
+            if isinstance(wp, dict) and wp.get("needed") and not r.get("boot"):
+                lines.append(f"- **to witness (preflight, not run):** {_witness_line(wp)}")
             pat = patches.get((r.get("file"), r.get("line")))
             if pat:
                 st = pat.get("status", "")
@@ -174,7 +191,9 @@ def generate(target, out_dir=None, model="", patches_path=None):
                ("wave_notebook.md", "the model's per-file security notes"),
                ("wave_candidates.jsonl", "detector survivors handed to the proof stage"),
                ("wave_findings.jsonl", "machine-readable findings (source for this report)"),
-               ("casefile.json", "full proof transcripts (what the model ran + observed)")]
+               ("wave_transcripts.jsonl", "per-candidate diagnostic trail (runtime image launched + every "
+                                          "command the model ran and observed)"),
+               ("casefile.json", "the CaseFile — each candidate's hypothesis and final conclusion")]
     present = [(nm, desc) for nm, desc in catalog if (src / nm).exists()]
     if present:
         lines.append("## Where the detail lives")
@@ -192,7 +211,7 @@ def generate(target, out_dir=None, model="", patches_path=None):
         (dest / "wave_report.md").write_text("\n".join(lines), encoding="utf-8")
     except OSError:
         pass
-    for name in ("wave_findings.jsonl", "wave_patches.jsonl", "casefile.json"):
+    for name in ("wave_findings.jsonl", "wave_patches.jsonl", "wave_transcripts.jsonl", "casefile.json"):
         s = src / name
         if s.exists():
             try:

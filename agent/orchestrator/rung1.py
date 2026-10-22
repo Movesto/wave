@@ -329,6 +329,23 @@ def _pkg_root(path):
     return d
 
 
+def _dotted_name(path, root):
+    """The dotted module name of `path` relative to `root` (the dir on sys.path), or "" if `path` is not
+    under `root`. Lets a driver import the module BY NAME so the target's own relative imports resolve."""
+    try:
+        rel = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
+    except Exception:
+        return ""
+    rel = rel.replace("\\", "/")
+    if rel.startswith("..") or rel.startswith("/"):
+        return ""
+    if rel.endswith(".py"):
+        rel = rel[:-3]
+    if rel.endswith("/__init__"):
+        rel = rel[:-len("/__init__")]
+    return rel.replace("/", ".").strip(".")
+
+
 def _load_module(path):
     root = _pkg_root(path)
     if root not in sys.path:
@@ -340,17 +357,22 @@ def _load_module(path):
 
 
 def _call_args(fn, marker, target_param=None):
-    """Build kwargs for a handler: marker into the target (or each) str param, benign defaults elsewhere."""
+    """Build kwargs to drive a handler: marker into the target param, benign values for OTHER REQUIRED
+    params, and DEFAULTED params left out so the function uses its real defaults (so a real library leaf
+    like `get_body(url, headers=None, timeout=30)` is callable from just its url). `*args`/`**kwargs` are
+    never passed by name (that TypeErrors). One variant per candidate string param (or just target_param)."""
     sig = inspect.signature(fn)
+    named = [(n, p) for n, p in sig.parameters.items()
+             if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY) and n not in ("self", "cls")]
     variants = []
-    str_params = [n for n, p in sig.parameters.items()
-                  if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY) and n not in ("self", "cls")]
-    for tgt in ([target_param] if target_param else str_params):
+    for tgt in ([target_param] if target_param else [n for n, _ in named]):
         args = {}
-        for n, p in sig.parameters.items():
-            if n in ("self", "cls"):
-                continue
-            args[n] = marker if n == tgt else ("1" if "id" in n.lower() else "")
+        for n, p in named:
+            if n == tgt:
+                args[n] = marker
+            elif p.default is inspect.Parameter.empty:       # required -> supply something benign
+                args[n] = "1" if "id" in n.lower() else ""
+            # else: has a default -> OMIT so the real default is used (keeps library leaves callable)
         variants.append((tgt, args))
     return variants
 
@@ -594,19 +616,26 @@ try:
     except Exception: pass
 except Exception: pass
 MARKER = __MARKER__
-sys.path.insert(0, "/app")
+for _sp in __SYSPATHS__:
+    if _sp and _sp not in sys.path: sys.path.insert(0, _sp)
 try:
-    _spec = importlib.util.spec_from_file_location("_wt", __MODPATH__)
-    _mod = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_mod)
+    if __MODNAME__:                               # import by DOTTED NAME (keeps package context -> relative
+        import importlib as _il                   # imports in the target module resolve); file-path fallback
+        _mod = _il.import_module(__MODNAME__)
+    else:
+        _spec = importlib.util.spec_from_file_location("_wt", __MODPATH__)
+        _mod = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_mod)
     _fn = getattr(_mod, __FUNC__, None)
     if _fn is None: raise RuntimeError("no func " + __FUNC__)
     _sig = inspect.signature(_fn)
-    _ps = [n for n, p in _sig.parameters.items() if n not in ("self", "cls")]
+    _named = [(n, p) for n, p in _sig.parameters.items()
+              if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY) and n not in ("self", "cls")]
+    _ps = [n for n, _p in _named]
     for _tgt in (_ps or [None]):
         _args = {}
-        for n, p in _sig.parameters.items():
-            if n in ("self", "cls"): continue
-            _args[n] = MARKER if n == _tgt else ("1" if "id" in n.lower() else "")
+        for n, p in _named:
+            if n == _tgt: _args[n] = MARKER
+            elif p.default is inspect.Parameter.empty: _args[n] = ("1" if "id" in n.lower() else "")
         try: _fn(**_args)
         except Exception: pass
         _mk = MARKER if isinstance(MARKER, str) else repr(MARKER)
@@ -653,7 +682,10 @@ class PythonContainerExecutor:
         if not func:
             return Observation(error="no handler function for in-container micro-exec")
         modpath = _container_modpath(getattr(candidate, "file", ""), rt.code_root, rt.workdir)
-        driver = (_DRIVER.replace("__MARKER__", repr(payload)).replace("__MODPATH__", repr(modpath))
+        driver = (_DRIVER.replace("__MARKER__", repr(payload))
+                  .replace("__SYSPATHS__", repr(["/app", rt.workdir]))
+                  .replace("__MODNAME__", repr(""))          # in-container: load by path (behaviour preserved)
+                  .replace("__MODPATH__", repr(modpath))
                   .replace("__FUNC__", repr(func)))
         cmd = ["docker", "compose"]
         for f in rt.compose_files:
@@ -681,6 +713,47 @@ def micro_exec_container(candidate, rt, timeout=180) -> MicroResult:
     return _observe(obs, marker, getattr(candidate, "cwe", ""))
 
 
+class PythonVenvExecutor:
+    """EXECUTOR for LIBRARY/CLI candidates whose third-party deps aren't importable in wave's own
+    interpreter (so the in-process executor dies on `import target`): run the SAME driver through a venv
+    built from the target's OWN manifest (provision.library_env) in a subprocess, with the target's source
+    root on sys.path. This is the non-web proof environment -- no server, no compose, just an importable
+    package. Returns the raw sink hits as an Observation (no verdict)."""
+
+    def run(self, candidate, payload, venv, timeout=120) -> Observation:
+        import json as _json
+        import re as _re
+        import subprocess
+
+        path = getattr(candidate, "file", "") or ""
+        unit = getattr(candidate, "unit", "") or ""
+        func = unit.split("(")[0].strip()
+        py = getattr(venv, "python", "") if venv is not None else ""
+        if not py:
+            return Observation(error="no library venv prepared for out-of-process micro-exec")
+        if not path.endswith(".py") or not func:
+            return Observation(error="no importable Python handler for this candidate")
+        root = _pkg_root(path)
+        modname = _dotted_name(path, root)
+        driver = (_DRIVER.replace("__MARKER__", repr(payload))
+                  .replace("__SYSPATHS__", repr([root]))
+                  .replace("__MODNAME__", repr(modname))
+                  .replace("__MODPATH__", repr(os.path.abspath(path)))
+                  .replace("__FUNC__", repr(func)))
+        try:
+            r = subprocess.run([py, "-c", driver], capture_output=True, text=True, timeout=timeout,
+                               encoding="utf-8", errors="replace")
+        except Exception as e:
+            return Observation(error=f"venv micro-exec failed to run: {type(e).__name__}: {e}")
+        out = (r.stdout or "") + (r.stderr or "")
+        m = _re.search(r"WAVE_MICRO_RESULT::(\{.*\})", out)
+        if not m:
+            err = _re.search(r"WAVE_MICRO_ERR::(.*)", out)
+            return Observation(error=f"venv micro-exec: no result ({err.group(1) if err else out[-160:]})")
+        hits = [tuple(h) for h in _json.loads(m.group(1)).get("hits", [])]
+        return Observation(sink_hits=hits, ran=True, stubs=["venv"])
+
+
 # Executor dispatch by candidate language. Only Python today; NodeExecutor (Phase 2) registers here as
 # {"js": NodeExecutor()} and everything else -- the observer, the verdict, the loop -- stays unchanged.
 _PY_EXEC = PythonExecutor()
@@ -698,11 +771,14 @@ import threading as _threading
 _EXEC_LOCK = _threading.Lock()
 
 
-def micro_exec(candidate, target_param=None, rt=None) -> MicroResult:
+def micro_exec(candidate, target_param=None, rt=None, venv=None) -> MicroResult:
     """Confirm a candidate by micro-execution. Dispatch an EXECUTOR by language to run the function and
     return raw facts; the canary OBSERVER renders the verdict. Try IN-PROCESS first (fast; needs deps on
-    the host), then fall back to IN-CONTAINER when a prepared `rt` is given (deps live in the image).
-    Serialized via _EXEC_LOCK -- the in-process path patches globals and is not thread-safe."""
+    the host), then fall back to a VENV built from the target's own manifest (`venv`, for a library whose
+    deps aren't importable on the host -- the non-web path), then to IN-CONTAINER when a prepared `rt` is
+    given (deps live in the app image). Serialized via _EXEC_LOCK -- the in-process path patches globals
+    and is not thread-safe (the venv/container paths are subprocesses, but we keep them serial for
+    simplicity -- micro-exec is fast relative to the parallel docker/model work)."""
     with _EXEC_LOCK:
         cwe = getattr(candidate, "cwe", "")
         payload, marker = _payload(cwe)
@@ -710,6 +786,14 @@ def micro_exec(candidate, target_param=None, rt=None) -> MicroResult:
         mr = _observe(executor.run(candidate, payload, target_param), marker, cwe)
         if mr.verdict in ("proven", "safe"):
             return mr
+        # non-web library: the host interpreter couldn't import the target -> retry through a venv built
+        # from the target's OWN deps (so `import target` works), out-of-process.
+        if venv is not None and getattr(venv, "ready", False):
+            vmr = _observe(PythonVenvExecutor().run(candidate, payload, venv), marker, cwe)
+            if vmr.verdict in ("proven", "safe"):
+                return vmr
+            if mr.verdict == "unknown" and vmr.verdict != "unknown":
+                mr = vmr
         if rt is not None:
             cmr = _observe(PythonContainerExecutor().run(candidate, payload, rt), marker, cwe)
             if cmr.verdict in ("proven", "safe"):

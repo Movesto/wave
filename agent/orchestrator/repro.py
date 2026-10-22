@@ -142,7 +142,7 @@ def _sfx(tag):
     return f"_{tag}" if tag else ""
 
 
-def build(candidate, target, mode="call", workdir="/work", tag="", entry=None):
+def build(candidate, target, mode="call", workdir="/work", tag="", entry=None, run_tmpl="tsx {file}"):
     """Write a reproduction scaffold next to the mounted repo (host side); return (container_path,
     run_hint) the model can invoke, or None if we can't scaffold this candidate. Caller must remove()
     it afterwards. `tag` gives each PARALLEL proof its own scaffold file so concurrent jobs on the same
@@ -151,7 +151,12 @@ def build(candidate, target, mode="call", workdir="/work", tag="", entry=None):
     `entry` = (name, file): scaffold the UNTRUSTED ENTRY instead of the sink function (Half B) -- calling
     the entry with the payload drives the real chain down to the sink, so the reach is WITNESSED, not just
     the sink's mechanism. The sink then fires downstream (proven by a marker side-effect). Used for generic
-    injection classes; when the entry needs framework args the model widens the mirror per the brief."""
+    injection classes; when the entry needs framework args the model widens the mirror per the brief.
+
+    `run_tmpl` (a `<interpreter> {file}` template from the resolved runtime, e.g. `bun {file}` for a Bun
+    project, `tsx {file}` for node) decides HOW the JS scaffold is invoked, so the run-hint matches the
+    image the sandbox actually launches -- without it a Bun project got a `tsx` hint against an image with
+    no tsx (the Bun-witness miss)."""
     func = (getattr(candidate, "unit", "") or "").split("(")[0].strip()
     if not func:
         return None
@@ -169,7 +174,8 @@ def build(candidate, target, mode="call", workdir="/work", tag="", entry=None):
         host = root / f".wave_repro{sfx}.mjs"
         host.write_text(_JS.format(target=mod_c, func=func, mode=mode), encoding="utf-8")
         cont = f"{workdir}/.wave_repro{sfx}.mjs"
-        return cont, f"tsx {cont} '<payload>'"
+        runner = (run_tmpl or "tsx {file}").replace("{file}", cont)
+        return cont, f"{runner} '<payload>'"
     if path.lower().endswith(".py"):
         host = root / f".wave_repro{sfx}.py"
         host.write_text(_PY.format(root=workdir, target=mod_c, func=func), encoding="utf-8")

@@ -17,7 +17,10 @@ import re
 # Infra / CI / build / test / vendor / docs paths. Real application code should be deep-read and PROVEN
 # before these: they are pin-dense with shell commands (every `$(...)` looks like a cmd sink) and otherwise
 # crowd out the real attack surface within a budget on big monorepos (the elasticsearch .buildkite case).
-_LOWPRI_DIRS = {"scripts", "tools", "bin", "ci", ".github", ".buildkite", "packaging", "dev-tools", "devtools",
+# NB: bare "tools" is NOT here -- in agent/LLM frameworks a NESTED tools/ dir (Langflow components/tools/,
+# langchain .../tools/) holds first-class runtime components that ARE the attack surface (the MCP Tools RCE
+# lived in components/tools/mcp_stdio.py). A top-level tools/ IS dev tooling -- handled separately below.
+_LOWPRI_DIRS = {"scripts", "bin", "ci", ".github", ".buildkite", "packaging", "dev-tools", "devtools",
                 "benchmarks", "benchmark", "test", "tests", "testfixtures", "fixtures", "vendor", "examples",
                 "example", "e2e", "__tests__", "__mocks__", "spec", "qa", "docs", "doc"}
 
@@ -46,7 +49,15 @@ def is_low_priority_path(path):
         return True
     if _TESTNAME_RE.search(base):
         return True
-    return bool(set(p.strip("/").split("/")) & _LOWPRI_DIRS)
+    segs = [s for s in p.strip("/").split("/") if s]
+    if set(segs) & _LOWPRI_DIRS:
+        return True
+    # A repo-ROOT tools/ is dev tooling; a NESTED tools/ is agent/LLM runtime code (components/tools/,
+    # .../tools/). Demote only when tools/ is the leading segment -- err toward SCANNING when it's nested or
+    # when the path is absolute (segs[0] is a drive/anchor), since missing real attack surface is the costly way.
+    if segs and segs[0] == "tools":
+        return True
+    return False
 from pathlib import Path
 
 from . import codemap, eyes, reachability
@@ -68,6 +79,13 @@ _ROUTE = re.compile(
     r"|^\s*(resources?|namespace)\s+:"                                                 # ruby: rails resources
     r"|\b(get|post|put|delete|patch|head|options)\s*\(\s*\"[^\"]*\"\s*\)\s*\{"          # kotlin: ktor DSL get(\"/x\"){
     r"|\.route\s*\(\s*\"|\bweb::(get|post|put|delete|patch|resource|scope)\s*\("        # rust: actix .route/web::
+    # --- convention-based routing (no decorator): modern JS frameworks register handlers by FILE + EXPORT
+    # NAME, which the decorator/callback patterns above miss entirely (the next.js App-Router blind spot). ---
+    r"|export\s+(?:async\s+)?function\s+(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*\(" # next app-router / sveltekit +server / astro
+    r"|export\s+const\s+(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*="                  # ... arrow-assigned form
+    r"|export\s+(?:async\s+)?function\s+(?:loader|action)\s*\("                          # remix route loader/action
+    r"|export\s+(?:async\s+)?function\s+getServerSideProps\s*\("                         # next pages-router (request-time) data
+    r"|[\"']use server[\"']"                                                             # next server-actions directive
 )
 
 # --- The 9 injection classes the detector tries FIRST (class label -> sink regex) ---------------------
@@ -95,18 +113,71 @@ _SINKS_COMMON = [
 ]
 _SINKS_PY = [
     ("SQLi",  re.compile(r"\.execute\w*\s*\(|cursor\.execute|\.raw\s*\(|\btext\s*\(\s*[f\"'(]|\.filter\s*\(\s*[f\"']")),
-    ("cmd",   re.compile(r"\bos\.system\s*\(|\bos\.popen\s*\(|\bsubprocess\.|\bpty\.spawn|\bcommands\.getoutput")),
+    # cmd: stdlib process launch + LIBRARY-WRAPPED launchers that take a caller-supplied command. The MCP
+    # stdio transport (StdioServerParameters(command=...) -> stdio_client(...)) spawns command[0] on the host;
+    # a user-controlled command field is arbitrary-command execution (Langflow MCP Tools RCE, CVE-2026-105697),
+    # and the spawn lives inside the `mcp` package so no subprocess/os.system token appears in first-party code.
+    ("cmd",   re.compile(r"\bos\.system\s*\(|\bos\.popen\s*\(|\bsubprocess\.|\bpty\.spawn|\bcommands\.getoutput|"
+                         r"StdioServerParameters\s*\(|\bstdio_client\s*\(")),
     ("eval",  re.compile(r"\beval\s*\(|\bexec\s*\(|\bcompile\s*\(\s*[f\"']|\b__import__\s*\(")),
     ("path",  re.compile(r"\bopen\s*\(|\bsend_file\s*\(|os\.path\.join\s*\(|shutil\.(copy|move|rmtree)")),
+    # codegen injection (CWE-94): an f-string that builds a CODE STATEMENT from an interpolated value -- the
+    # value becomes executable code in the EMITTED/GENERATED file (danger is deferred to whoever imports it,
+    # not an in-process eval). NARROW on purpose: the Python keyword is immediately followed by the `{...}`
+    # interpolation (`f"from {x} import"`, `f"import {x}"`, `f"def {x}("`, `f"class {x}"`, `f"@{x}"`), so
+    # ordinary f-strings don't false-pin. This is the datamodel-code-generator imports.py (CVE-2026-55415) shape.
+    ("codegen", re.compile(r"""[fF]['"] *(?:from \{|import \{|def \{|class \{|@\{)""")),
+    # XXE (CWE-611): an XML parser that can resolve external entities / DTDs. `defusedxml` is the safe variant;
+    # a direct etree/minidom/sax/pulldom/xmlrpc parse of untrusted XML is the sink (lxml resolve_entities=True
+    # is an explicit opt-in to the danger).
+    ("xxe",   re.compile(r"etree\.(parse|fromstring|XML)\s*\(|\bminidom\.parse\w*\s*\(|\bxml\.sax\.|"
+                         r"\bpulldom\.|\bxmlrpc\.client|\bresolve_entities\s*=\s*True")),
+    # XPath injection (CWE-643): a user string built into an XPath query (lxml .xpath() / etree.XPath()).
+    ("xpath", re.compile(r"\.xpath\s*\(|etree\.XPath\s*\(")),
+    # LDAP injection (CWE-90): a user value interpolated into an LDAP search filter (python-ldap / ldap3).
+    ("ldap",  re.compile(r"\.search_s\s*\(|\.search_ext\w*\s*\(|\.search_st\s*\(")),
+    # CRLF / HTTP response splitting (CWE-113): raw input written into a response header name/value.
+    ("crlf",  re.compile(r"\.set_header\s*\(|\.add_header\s*\(|\.send_header\s*\(")),
+    # weak crypto (CWE-327): a broken hash or cipher used where a security property is expected. PRESENCE pin
+    # (like memory/format/redos) -> lands needs-review, not auto-proved. Generic PRNG (random.*) deliberately
+    # NOT pinned -- too noisy on scientific/ML repos; broken-cipher/hash tells are the sound signal.
+    ("weakcrypto", re.compile(r"hashlib\.(md5|sha1)\b|\bCrypto\.Cipher\.(DES|ARC4)\b|\bMODE_ECB\b")),
 ]
 _SINKS_JS = [
     ("SQLi",  re.compile(r"\.query\s*\(|sequelize\.query|\.execute\s*\(|knex\.raw|\$queryRawUnsafe|\.\$queryRaw")),
-    ("cmd",   re.compile(r"child_process|\bexec(Sync|File(Sync)?)?\s*\(|\bspawn(Sync)?\s*\(|\.exec\s*\(")),
+    # SQLi via a RAW SQL STRING assembled by interpolation -- a template literal that holds a SQL statement/clause
+    # AND a `${...}`, even when the exec happens elsewhere (the value is spliced into DDL/DML that a schema-manager
+    # / queryRunner runs later). This is the "build the SQL far from the .query() call" shape the call-site
+    # patterns above miss -- e.g. TypeORM `GENERATED ALWAYS AS (${expr})` (twenty, CVE-2026-73069). Two-token SQL
+    # forms (INSERT INTO / DELETE FROM / SELECT...FROM / ALTER TABLE / GENERATED ALWAYS AS ...) keep the English
+    # words "update/select/create" from false-pinning ordinary template strings; the `${` lookahead requires a
+    # real interpolation in the same backtick span.
+    ("SQLi",  re.compile(r"`(?=[^`]*\$\{)[^`]*(?:GENERATED\s+ALWAYS\s+AS|SELECT\b[^`]*\bFROM\b|INSERT\s+INTO\b|"
+                         r"DELETE\s+FROM\b|UPDATE\b[^`]*\bSET\b|CREATE\s+(?:TABLE|UNIQUE\s+INDEX|INDEX|VIEW|"
+                         r"MATERIALIZED\s+VIEW)\b|ALTER\s+TABLE\b|DROP\s+(?:TABLE|INDEX|VIEW)\b|TRUNCATE\s+TABLE\b|"
+                         r"UNION\s+(?:ALL\s+)?SELECT\b)", re.I)),
+    ("cmd",   re.compile(r"child_process|\bexec(Sync|File(Sync)?)?\s*\(|\bspawn(Sync)?\s*\(|\.exec\s*\(|"
+                         r"\bStdioClientTransport\s*\(")),   # MCP JS/TS stdio launcher takes {command, args}
     ("eval",  re.compile(r"\beval\s*\(|new\s+Function\s*\(|vm\.(runIn|createContext)|setTimeout\s*\(\s*['\"]")),
     ("path",  re.compile(r"fs\.(readFile|writeFile|createReadStream|createWriteStream|sendFile|readdir|unlink)|res\.sendFile|\.sendFile\s*\(")),
     # prototype pollution: a recursive merge/extend/set that copies attacker keys into an object (and thus
     # Object.prototype). __proto__ appearing literally is a strong tell.
     ("protopollution", re.compile(r"\bdefaultsDeep\b|\bmergeWith\b|_\.merge\s*\(|\.deepMerge\s*\(|deepmerge|\bsetWith\b|_\.set\s*\(|__proto__")),
+    # codegen injection (CWE-94): a template literal that builds a CODE STATEMENT from an interpolated value
+    # (`import ${x}`, `function ${x}(`, `class ${x}`) -> the value becomes code in the EMITTED file. Narrow.
+    ("codegen", re.compile(r"`\s*(?:import \$\{|export [^`]*\$\{|function \$\{|class \$\{)")),
+    # XXE (CWE-611): a node XML parser with entity resolution on (libxmljs, xmldom with noent).
+    ("xxe",   re.compile(r"\blibxmljs\b|\.parseXmlString\s*\(|\bnoent\s*:\s*true\b")),
+    # XPath injection (CWE-643): a user string built into an XPath query.
+    ("xpath", re.compile(r"document\.evaluate\s*\(|\bxpath\.(select|evaluate)\s*\(|\.selectNodes\s*\(")),
+    # LDAP injection (CWE-90): an LDAP search with an interpolated filter (ldapjs).
+    ("ldap",  re.compile(r"\bldapjs\b|\bnew\s+ldap\.")),
+    # CRLF / HTTP response splitting (CWE-113): raw input into a response header.
+    ("crlf",  re.compile(r"\.setHeader\s*\(|\.writeHead\s*\(|\bres\.set\s*\(")),
+    # weak crypto / insecure randomness (CWE-327/338): broken hash/cipher, or Math.random() where a token is
+    # expected. PRESENCE pin -> needs-review.
+    ("weakcrypto", re.compile(r"createHash\s*\(\s*['\"](md5|sha1)['\"]|createCipheriv?\s*\(\s*['\"]des|"
+                              r"\bMath\.random\s*\(\s*\)")),
 ]
 
 
@@ -121,6 +192,15 @@ _SINKS_PHP = [
     ("deser",    re.compile(r"\bunserialize\s*\(")),
     ("xss",      re.compile(r"\becho\s+[^;]*\$|\bprint\s+[^;]*\$|print_r\s*\(\s*\$")),
     ("redirect", re.compile(r"header\s*\(\s*[\"']\s*Location\s*:")),
+    # XXE (CWE-611): simplexml/DOM/xml_parse loading untrusted XML (classic PHP XXE via LIBXML_NOENT).
+    ("xxe",      re.compile(r"simplexml_load_(string|file)\s*\(|->loadXML\s*\(|new\s+DOMDocument|"
+                            r"xml_parse\s*\(|LIBXML_NOENT")),
+    # XPath injection (CWE-643).
+    ("xpath",    re.compile(r"->xpath\s*\(|new\s+DOMXPath|xpath_eval\s*\(")),
+    # LDAP injection (CWE-90).
+    ("ldap",     re.compile(r"ldap_search\s*\(|ldap_list\s*\(|ldap_read\s*\(")),
+    # weak crypto (CWE-327): md5/sha1 as a security hash, or mt_rand/rand for tokens.
+    ("weakcrypto", re.compile(r"\bmd5\s*\(|\bsha1\s*\(|\bmcrypt_|\bmt_rand\s*\(")),
 ]
 # Ruby sinks (complete table)
 _SINKS_RUBY = [
@@ -156,6 +236,18 @@ _SINKS_JAVA = [
     ("eval",     re.compile(r"ScriptEngine|\.eval\s*\(|Nashorn|GroovyShell")),
     ("xss",      re.compile(r"\.getWriter\(\)\.(print|write)|response\.getWriter|out\.print\s*\(")),
     ("redirect", re.compile(r"sendRedirect\s*\(|RedirectView")),
+    # XXE (CWE-611): a JAXP/DOM/SAX/StAX/JAXB parser factory (unsafe unless FEATURE_SECURE_PROCESSING is set).
+    ("xxe",      re.compile(r"DocumentBuilderFactory|SAXParserFactory|XMLInputFactory|SAXReader|XMLReader\b|"
+                            r"SAXBuilder|TransformerFactory|SchemaFactory|Unmarshaller\b")),
+    # XPath injection (CWE-643).
+    ("xpath",    re.compile(r"XPathFactory|xpath\.(compile|evaluate)|XPathExpression")),
+    # LDAP injection (CWE-90): a JNDI DirContext search with an interpolated filter.
+    ("ldap",     re.compile(r"\bDirContext\b|InitialDirContext|new\s+SearchControls")),
+    # CRLF / HTTP response splitting (CWE-113).
+    ("crlf",     re.compile(r"\.setHeader\s*\(|\.addHeader\s*\(|response\.addCookie")),
+    # weak crypto (CWE-327): broken hash/cipher or java.util.Random for security.
+    ("weakcrypto", re.compile(r"MessageDigest\.getInstance\s*\(\s*\"(MD5|SHA-1)\"|"
+                              r"Cipher\.getInstance\s*\(\s*\"(DES|RC4|DESede)|new\s+Random\s*\(")),
 ]
 _SINKS_CSHARP = [
     ("SQLi",     re.compile(r"SqlCommand\s*\(|\.(ExecuteReader|ExecuteNonQuery|ExecuteScalar)\s*\(|"
@@ -166,6 +258,15 @@ _SINKS_CSHARP = [
     ("deser",    re.compile(r"BinaryFormatter|XmlSerializer|JavaScriptSerializer|LosFormatter|NetDataContractSerializer")),
     ("xss",      re.compile(r"Response\.Write\s*\(|Html\.Raw\s*\(")),
     ("redirect", re.compile(r"Response\.Redirect\s*\(")),
+    # XXE (CWE-611): .NET XML readers that resolve a DTD unless XmlResolver is nulled.
+    ("xxe",      re.compile(r"XmlTextReader|XmlDocument\b|XDocument\.(Load|Parse)|DataSet\.ReadXml|XmlReader\.Create")),
+    # XPath injection (CWE-643).
+    ("xpath",    re.compile(r"SelectNodes\s*\(|SelectSingleNode\s*\(|XPathExpression")),
+    # LDAP injection (CWE-90).
+    ("ldap",     re.compile(r"DirectorySearcher|new\s+DirectoryEntry|SearchRequest\s*\(")),
+    # weak crypto (CWE-327): broken hash/cipher providers or System.Random for security.
+    ("weakcrypto", re.compile(r"MD5\.Create|SHA1\.Create|DESCryptoServiceProvider|RC2CryptoServiceProvider|"
+                              r"new\s+Random\s*\(")),
 ]
 _SINKS_RUST = [
     ("cmd",      re.compile(r"Command::new\s*\(|process::Command|\.arg\s*\(")),
@@ -469,6 +570,61 @@ def _authz_pins(finfo, src_lines):
     return out
 
 
+# --- capability pins: a file that IMPORTS a risk-bearing library is worth a full read even when NO
+# call-site matched the sink dictionary -- the library-wrapped blind spot that hid the Langflow MCP RCE
+# (`import mcp` was the tell; the call-site regex missed `stdio_client(...)`). These are NOMINATIONS, not
+# located sinks: they carry a real class so the file flows through to a model read + CWE, anchored at the
+# first CODE line (never the import line, honoring the invariant above), and are SKIPPED when a real sink
+# of the same class already pinned the file. Deliberately NARROW -- only libraries whose mere presence
+# implies a risky capability the dictionary under-covers (XML parsers, LDAP clients, remote-exec/MCP). NOT
+# yaml/pickle/subprocess: their call sites are already well covered, so a presence pin there is pure noise.
+# defusedxml (the XXE *fix*) is excluded so the safe stack is not nominated.
+_CAP_IMPORTS = [
+    (re.compile(r"\bmcp\b"), "cmd", "mcp (spawns host processes over stdio)"),
+    (re.compile(r"\bparamiko\b|\bfabric\b|\bpexpect\b"), "cmd", "a remote/pty exec client"),
+    (re.compile(r"\blxml\b|\bxml\.etree\b|\bxml\.dom\b|\bxml\.sax\b|\bminidom\b|\bpulldom\b|\bxmlrpc\b"
+                r"|\blibxmljs\b|\bxml2js\b|fast-xml-parser"), "xxe", "an XML parser"),
+    (re.compile(r"\bldap3\b|python-ldap|\bimport\s+ldap\b|\bfrom\s+ldap\b|\bldapjs\b|ldapauth"),
+     "ldap", "an LDAP client"),
+]
+
+
+def _first_code_line(src_lines):
+    """First non-blank, non-comment, non-import source line -- where a capability pin anchors (never an
+    import line). 0 when the file is all imports/blank (nothing meaningful to read -> caller skips)."""
+    for i, raw in enumerate(src_lines, 1):
+        s = raw.strip()
+        if not s or s[0] in "#*" or s.startswith(("//", "/*")):
+            continue
+        if _is_import(raw):
+            continue
+        return i
+    return 0
+
+
+def _capability_pins(finfo, src_lines, existing, is_client):
+    """Nominate a file that imports a risk-bearing library (see _CAP_IMPORTS), even when the per-line sink
+    dictionary matched nothing. Dedupes against a real sink of the same class and respects the frontend
+    server-only suppression, so it only ADDS the library-wrapped files the dictionary alone would miss."""
+    have = {lbl for _ln, lbl, _c in existing}
+    blob = "\n".join(list(getattr(finfo, "imports", None) or ()) + src_lines[:40])
+    anchor = _first_code_line(src_lines)
+    if not anchor:
+        return []
+    out = []
+    for rx, cls, desc in _CAP_IMPORTS:
+        if cls in have:                                        # a real sink already located this class here
+            continue
+        if is_client and cls in reachability.SERVER_ONLY_CLASSES:
+            continue
+        if cls == "xxe" and "defusedxml" in blob:              # the safe XML stack -- not a candidate
+            continue
+        if rx.search(blob):
+            out.append((anchor, cls, f"uses {desc} — capability pin (no direct sink line matched)"))
+            have.add(cls)
+    return out
+
+
 def scan_pins(finfo):
     """Scan one file's lines for routes, 9-class sinks, and dynamic blind spots. Returns three lists of
     (line, label, code). Sink pins are hints, not verdicts."""
@@ -507,6 +663,7 @@ def scan_pins(finfo):
                 if rx.search(s):
                     dyn.append((i, kind, code))
                     break
+    sinks.extend(_capability_pins(finfo, src_lines, sinks, is_client))  # library-import nominations (dict blind spots)
     if not is_client:                                      # server-side only -- no authz surface in the browser
         sinks.extend(_authz_pins(finfo, src_lines))        # no-sink IDOR leads (deterministic recall)
     return routes, sinks, dyn
@@ -647,16 +804,25 @@ def render(cmap, root, per_file, pinned, rest, infra=None):
     return "\n".join(out)
 
 
-def _render_digest(cmap, root, per_file, pinned, infra):
+_DIGEST_FILE_BUDGET = 400      # cap pinned files in the dense digest so a huge monorepo can't blow the
+                               # model's context. `pinned` is reachability-ranked (see build_map), so the
+                               # kept top-N are the real attack surface and only the lowest-priority tail is
+                               # summarized out -- the inverse of the old pincount order, which kept the
+                               # loudest dev-tool files and truncated the subtle runtime sinks.
+
+
+def _render_digest(cmap, root, per_file, pinned, infra, budget=_DIGEST_FILE_BUDGET):
     """A DENSE attack-surface digest for the ledger's model input: per pinned file, only its path +
     purpose + [ROUTE]/[SINK]/[DYN] pins (no signature/structure dumps), plus infra misconfig pins. ~10x
     smaller than the full map, so the ledger sees the whole pinned surface even on a monorepo. The full
-    detailed map (with structure) stays as wave_map.md for viewing and tool-calling depth."""
+    detailed map (with structure) stays as wave_map.md for viewing and tool-calling depth. On a repo with
+    more than `budget` pinned files the lowest-priority tail is omitted (noted inline) to protect context."""
     out = ["# wave attack-surface digest — " + Path(root).name, "",
            "Pinned files (routes + 9-class sink candidates) and infra/CI misconfigs only -- the surface to "
            "triage. Pins are HINTS, not verdicts. Full source + structure of any file are available on "
            "request via tools.", "", "## PINNED CODE (routes + sinks)"]
-    for p in pinned:
+    shown = pinned[:budget] if (budget and len(pinned) > budget) else pinned
+    for p in shown:
         routes, sinks, dyn = per_file[p]
         fi = cmap.files[p]
         out.append("")
@@ -668,6 +834,9 @@ def _render_digest(cmap, root, per_file, pinned, infra):
             out.append(f"   [SINK:{label}] {code}   L{ln}" + (f"   {flow}" if flow else ""))
         for ln, kind, code in dyn:
             out.append(f"   [DYN:{kind}] {code}   L{ln}")
+    if len(shown) < len(pinned):
+        out += ["", f"... {len(pinned) - len(shown)} more pinned files omitted from this digest "
+                    f"(lowest reachability priority; all appear in wave_map.md). Request any by path."]
     sec = [i for i in infra if i["category"] not in _INVENTORY_ONLY and i["pins"]]
     if sec:
         out += ["", "## INFRASTRUCTURE & CI (misconfig pins)"]
@@ -693,7 +862,23 @@ def build_map(target, out=None):
         r, s, d = per_file[p]
         return len(r) * 2 + len(s) * 2 + len(d)
 
-    pinned = sorted([p for p in cmap.files if pincount(p) > 0], key=lambda p: (-pincount(p), p))
+    # Rank pinned files by REACHABILITY -- can untrusted input actually reach a sink here, following the
+    # call graph ACROSS files -- the same priority select.py applies at selection, lifted into the map
+    # stage so the digest the ledger model reads leads with the real attack surface instead of whatever
+    # file has the most raw pin lines. pincount only breaks ties. (Lazy import: select imports repomap, so
+    # a module-level import here would be a cycle.)
+    from . import select as _select
+
+    def _prio(p):
+        try:
+            pr, _sig = _select.file_priority(cmap, per_file, p)
+            return pr
+        except Exception:
+            return ()
+
+    pinned = [p for p in cmap.files if pincount(p) > 0]
+    pinned.sort()                                          # path asc -> deterministic, stable tie-break
+    pinned.sort(key=lambda p: (_prio(p), pincount(p)), reverse=True)
     rest = sorted(p for p in cmap.files if pincount(p) == 0)
     infra = scan_infra(target)
     text = render(cmap, root, per_file, pinned, rest, infra=infra)

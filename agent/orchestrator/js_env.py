@@ -16,7 +16,14 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections import namedtuple
 from pathlib import Path
+
+# The resolved JS/TS runtime for the investigate sandbox: the image to launch, the run-a-file template
+# (e.g. "bun {file}" vs "tsx {file}"), a blocked reason (set only when a DETECTED non-node runtime can't be
+# provisioned), and the runtime name. One object so the image, the scaffold run-hint, and the brief all
+# name the SAME interpreter -- the fix for the Bun-witness miss (image was bun but brief/scaffold said tsx).
+JsRuntime = namedtuple("JsRuntime", "image run blocked name")
 
 RUNNER_IMAGE = "wave-js-runner:latest"
 _DOCKERFILE = "FROM node:20-slim\nRUN npm install -g tsx@4 >/dev/null 2>&1 || npm install -g tsx\n"
@@ -126,9 +133,92 @@ def ensure_deps(target: str, timeout: int = 600) -> bool:
     return ok
 
 
+def ensure_image(image: str, timeout: int = 600) -> str | None:
+    """Make a TRUSTED base image available: return it if already present, else `docker pull` it (the only
+    place a runtime image is fetched). Returns the tag, or None if Docker is absent, the image is not in the
+    runtime registry's trusted set, or the pull fails -- callers fall back to their default image."""
+    import shutil
+    from . import runtimes
+    if shutil.which("docker") is None or not image:
+        return None
+    if not runtimes.is_trusted_image(image):                # strict HOW: never pull an un-vetted image
+        print(f"[js_env] refusing to pull untrusted image {image!r}", flush=True)
+        return None
+    if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0:
+        return image
+    print(f"[js_env] pulling runtime image {image} -- one time ...", flush=True)
+    try:
+        r = subprocess.run(["docker", "pull", image], capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        print(f"[js_env] pull failed ({type(e).__name__}) -- falling back", flush=True)
+        return None
+    return image if r.returncode == 0 else None
+
+
+def ensure_runtime_deps(target: str, rt, timeout: int = 600) -> bool:
+    """Install the project's declared deps using a runtime's OWN installer (e.g. `bun install`) in that
+    runtime's image, mounted at the package root. Idempotent (skips when node_modules already exists).
+    Best-effort -- a failure just leaves the model to read code / provision on demand."""
+    import shutil
+    if shutil.which("docker") is None:
+        return False
+    root = _pkg_root(target)
+    if root is None or not getattr(rt, "install", ""):
+        return False
+    if (root / "node_modules").is_dir():                    # bun/node install land here; good enough signal
+        return True
+    print(f"[js_env] {rt.name} install for {root.name} (once) ...", flush=True)
+    inner = rt.install.replace("{file}", ".")
+    try:
+        r = subprocess.run(
+            ["docker", "run", "--rm", "-v", _docker_mount(str(root)) + ":/app", "-w", "/app",
+             rt.image, "sh", "-c", inner],
+            capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        print(f"[js_env] {rt.name} install failed ({type(e).__name__})", flush=True)
+        return False
+    if r.returncode != 0:
+        print(f"[js_env] {rt.name} install did not complete (exit {r.returncode})", flush=True)
+    return r.returncode == 0
+
+
 def prepare(target: str) -> str | None:
-    """Ensure the runner image + the repo's deps for the investigate sandbox. Returns the runner image
-    tag to use (or None to fall back to the default node image)."""
+    """Ensure the right runner image + the repo's deps for the investigate sandbox. Returns the image tag to
+    use (or None to fall back to the default node image). Runtime-aware (runtimes.detect): a Bun/Deno project
+    is provisioned with its OWN image + installer instead of the node+tsx default -- that is what lets a
+    non-Node JS stack (opencode/Bun) actually RUN in the sandbox, driven by a data row, not a hard-coded
+    branch. Graceful: if the detected runtime's image can't be pulled, fall through to the node path."""
+    from . import runtimes
+    rt = runtimes.detect(target)
+    if rt is not None and rt.family == "js" and rt.name != "node":
+        img = ensure_image(rt.image)
+        if img:
+            ensure_runtime_deps(target, rt)                 # best-effort
+            return img
+        # pull unavailable (offline / not cached) -> fall through to the node default below
     image = ensure_runner()
     ensure_deps(target)                                     # best-effort; the model can still read code without it
     return image
+
+
+def resolve(target: str) -> JsRuntime:
+    """Resolve the JS/TS runtime END TO END: the image to launch, the run-a-file template, and (when a
+    non-node runtime is DETECTED but its image can't be provisioned) a blocked reason. This is `prepare`'s
+    richer sibling -- it returns the run template too, so the caller can make the scaffold's run-hint AND the
+    brief name the SAME interpreter the image provides (bun/deno vs node+tsx). A detected Bun/Deno project
+    whose image can't be provisioned returns `blocked` rather than silently falling back to Node -- running a
+    Bun-only path on `tsx`/`node` would misreport it as a 'believed' lead. Never raises."""
+    from . import runtimes
+    rt = runtimes.detect(target)
+    if rt is not None and rt.family == "js" and rt.name != "node":
+        img = ensure_image(rt.image)
+        if img:
+            ensure_runtime_deps(target, rt)                 # best-effort: the project's own deps (bun install)
+            return JsRuntime(img, rt.run or "{file}", None, rt.name)
+        return JsRuntime(None, rt.run or "{file}",
+                         f"detected the {rt.name} runtime (needs image {rt.image}) but could not provision it "
+                         f"here (offline / image not cached / Docker unavailable)", rt.name)
+    image = ensure_runner()
+    ensure_deps(target)                                     # best-effort
+    node = runtimes.by_name("node")
+    return JsRuntime(image or "node:20-slim", (node.run if node else "tsx {file}"), None, "node")

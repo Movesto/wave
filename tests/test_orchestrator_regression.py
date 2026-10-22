@@ -1410,6 +1410,23 @@ def test_reconcile_merges_same_line_contradiction_keeps_witnessed():
     assert log and log[0]["action"] == "contradiction"
 
 
+def test_reconcile_merge_preserves_the_witness_plan_from_either_member():
+    # the opencode shell-RCE shape: two believed leads at the SAME sink, only ONE carries the preflight
+    # witness plan (the route-resolved prove). Whichever member becomes the base, the merged finding must
+    # keep the plan -- else the report silently drops the "to witness (preflight)" line for the headline CVE.
+    from agent.orchestrator import reconcile as rc
+    plan = {"needed": True, "runtime": "bun", "route": "POST /session/:sessionID/shell",
+            "feasibility": "heavy", "cost_tier": "heavy"}
+    with_plan = {"file": "server.ts", "line": "1434", "unit": "", "class": "cmd", "cwe": "CWE-78",
+                 "sink": "SessionPrompt.shell({ ...body, sessionID })", "verdict": "believed",
+                 "witness_plan": plan, "why": "route-resolved"}
+    without = {"file": "server.ts", "line": "1434", "unit": "", "class": "cmd", "cwe": "CWE-78",
+               "sink": "SessionPrompt.shell({ ...body, sessionID })", "verdict": "believed", "why": "dup"}
+    for pair in ([with_plan, without], [without, with_plan]):       # base is either member
+        out, _ = rc.reconcile([dict(x) for x in pair])
+        assert len(out) == 1 and out[0].get("witness_plan") == plan
+
+
 def test_reconcile_keeps_confirmed_over_reasoned_and_never_over_merges():
     from agent.orchestrator import reconcile as rc
     # witnessed confirmed + reasoned on the same sink -> confirmed kept (guardrail)

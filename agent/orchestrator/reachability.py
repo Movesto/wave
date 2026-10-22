@@ -23,33 +23,55 @@ from collections import deque
 # authorization is enforced SERVER-side: a browser/React click-handler that forwards an id is not where the
 # authz check lives (the backend command is), so authz/IDOR in a frontend file is misplaced -- treat it like
 # the other server-only classes (MemWhale flagged approveLesson/deleteLesson in App.tsx this way).
-SERVER_ONLY_CLASSES = {"ssrf", "sqli", "nosqli", "cmd", "path", "deser", "authz", "idor", "access", "bola"}
+SERVER_ONLY_CLASSES = {"ssrf", "sqli", "nosqli", "cmd", "path", "deser", "authz", "idor", "access", "bola",
+                       "xxe", "ldap", "xpath", "crlf"}       # XML/LDAP/XPath parsing + response-splitting are
+                                                             # server-side; weakcrypto stays (browser crypto misuse is real)
 SERVER_ONLY_CWE = {"CWE-918", "CWE-89", "CWE-943", "CWE-78", "CWE-22", "CWE-502", "CWE-95",
-                   "CWE-639", "CWE-284", "CWE-862", "CWE-863", "CWE-566"}
+                   "CWE-639", "CWE-284", "CWE-862", "CWE-863", "CWE-566",
+                   "CWE-611", "CWE-90", "CWE-643", "CWE-113"}
 
 # browser-only globals -- their presence in the source is a reliable "this runs in a browser" signal (Node
 # has no window/document/localStorage), and catches a plain .js util that no path/suffix rule would.
 _BROWSER_SIGNAL = re.compile(r"\bwindow\.|\bdocument\.|\blocalStorage\b|\bsessionStorage\b|\bnavigator\.|"
                              r"import\.meta\.env|\baddEventListener\s*\(|\bdispatchEvent\s*\(")
-_FRONTEND_IMPORT = re.compile(r"\b(react|next|vue|svelte|@angular|solid-js|preact|@remix-run|react-router)\b", re.I)
+# NB: a leading `\b` would never match the @-scoped names (`\b` can't hold before `@`, a non-word char at the
+# start of a token), so @angular/@remix-run silently never matched. Use a non-word lookbehind, which holds for
+# both a plain name and an `@scope`.
+_FRONTEND_IMPORT = re.compile(r"(?<!\w)(react|next|vue|svelte|@angular|solid-js|preact|@remix-run|react-router)\b", re.I)
 # only UNAMBIGUOUS frontend dirs -- "components"/"pages"/"views" also occur server-side (MVC templates),
 # and misclassifying a backend file there would SUPPRESS a real vuln (the dangerous direction); the
 # browser-global signal + JSX + framework-import catch real frontend robustly without them.
 _FRONTEND_DIRS = {"frontend", "client", "public", "webapp", "www"}
+# A SERVER directory is AUTHORITATIVE: a browser bundle does not live under server/ or backend/. This has to
+# win over the framework-import signal, which over-matches the SERVER builds of ISOMORPHIC libraries --
+# react-dom/server, react-server-dom-*/server, next/dist server code -- and would otherwise flag a server
+# file as frontend and suppress its real server-side sinks (the SSRF/CRLF in next's app-render/*.ts was lost
+# exactly this way). Suppressing a server sink is the dangerous direction, so a clear server marker overrides.
+_SERVER_DIRS = {"server", "backend"}
 
 
 def is_frontend(path, source="", imports=()):
     """Best-effort: does this file run in the BROWSER (not the server)? JSX suffix, a frontend directory, a
-    frontend-framework import, or a browser-only global in the source. Python is virtually never frontend."""
+    frontend-framework import, or a browser-only global in the source. A server/ or backend/ path segment is
+    authoritative (server, never browser) and wins over every frontend signal. Python is never frontend."""
     p = str(path).replace("\\", "/").lower()
+    segs = set(p.split("/"))
+    if segs & _SERVER_DIRS:                                 # under server/ or backend/ -> server code, full stop
+        return False
     if p.rsplit(".", 1)[-1] in ("tsx", "jsx"):
         return True
     if p.endswith(".py"):                                   # server language -- never browser code
         return False
-    if set(p.split("/")) & _FRONTEND_DIRS:
+    if segs & _FRONTEND_DIRS:
         return True
-    if any(_FRONTEND_IMPORT.search(str(i)) for i in (imports or ())):
-        return True
+    # a frontend-framework import -- but NOT its SERVER entrypoint (react-dom/server, .../server), which is
+    # server code shipped by an isomorphic package and must not mark the file as browser.
+    for i in (imports or ()):
+        s = str(i)
+        if "/server" in s.lower():
+            continue
+        if _FRONTEND_IMPORT.search(s):
+            return True
     return bool(source and _BROWSER_SIGNAL.search(source))
 
 # decorator / attribute-macro / annotation signals that a function receives external input DIRECTLY.
@@ -86,6 +108,12 @@ _REMOTE_ENTRY_NAMES = {"handler", "handle", "lambda_handler", "handle_request", 
                        "onmessage", "on_data", "handle_message", "message_handler", "handle_event",
                        "resolver", "resolve_reference"}
 _LOCAL_ENTRY_NAMES = {"main"}                               # a CLI/process main() is NOT a remote attack surface
+# Modern JS frameworks register HTTP handlers with NO decorator -- by export NAME: Next.js App Router /
+# SvelteKit +server / Astro export GET/POST/..., Remix exports loader/action, Next pages-router exports
+# getServerSideProps. The uppercase method names are distinctive enough to trust on their own; the generic
+# ones (loader/action/getServerSideProps) are gated on the function being EXPORTED to stay low-FP.
+_HTTP_METHOD_EXPORTS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+_FRAMEWORK_ENTRY_EXPORTS = {"loader", "action", "getServerSideProps"}
 
 
 def entry_trust(func):
@@ -97,7 +125,12 @@ def entry_trust(func):
         return "local"
     if any(h in decs for h in _ROUTE_HINTS):
         return "remote"
-    name = (getattr(func, "name", "") or "").lower()
+    raw = getattr(func, "name", "") or ""                   # case-SENSITIVE: `GET` is a route handler, `get` is a getter
+    if raw in _HTTP_METHOD_EXPORTS:
+        return "remote"
+    if getattr(func, "exported", False) and raw in _FRAMEWORK_ENTRY_EXPORTS:
+        return "remote"
+    name = raw.lower()
     if name in _REMOTE_ENTRY_NAMES:
         return "remote"
     if name in _LOCAL_ENTRY_NAMES:

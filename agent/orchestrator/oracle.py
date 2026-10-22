@@ -44,6 +44,7 @@ CLASS_WITNESS = {
     "xss":    ("WAVE_RENDER_CANARY:1",),        # TIER 2: only the FIRED canary (value 1); scan() adds it via regex
     # TIER 3 (no deterministic marker -> judgment + second-model audit):
     "authz": (), "idor": (), "access": (), "bola": (), "bfla": (), "redirect": (), "other": (),
+    "xxe": (), "crlf": (), "ldap": (), "xpath": (), "weakcrypto": (),
 }
 # tokens scanned generically from run output. `wave_HIT` is EXCLUDED here on purpose: it is model-planted
 # (the exploit does `touch <marker>`), so a memorized/prompt-injected bare "wave_HIT" must NOT auto-witness.

@@ -150,8 +150,10 @@ def generate(target, out_dir=None, model="", patches_path=None):
                 lines.append(f"- **how:** {r['oracle']}")
             if r.get("methodology"):
                 lines.append(f"- **method (model's approach):** {r['methodology']}")
+            if r.get("boot"):                                  # a boot-and-drive witness was TRIED but blocked
+                lines.append(f"- **boot witness:** {r['boot']}")
             wp = r.get("witness_plan")
-            if isinstance(wp, dict) and wp.get("needed"):
+            if isinstance(wp, dict) and wp.get("needed") and not r.get("boot"):
                 lines.append(f"- **to witness (preflight, not run):** {_witness_line(wp)}")
             pat = patches.get((r.get("file"), r.get("line")))
             if pat:

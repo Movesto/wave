@@ -322,6 +322,7 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     # (confirmed/anomalous_state/refuted) short-circuits; a 'blocked' boot falls through to the normal lead so
     # we still report it. Gated: WAVE_BOOT_WITNESS=1 + the preflight plan's feasibility ('ready', or 'heavy'
     # only with WAVE_BOOT_HEAVY=1); 'underspecified' is never auto-booted.
+    boot_blocked = None                                      # a boot that was ATTEMPTED but couldn't bind/drive
     if (route is not None and wplan is not None and getattr(wplan, "needed", False)
             and have_docker and boot_witness.enabled() and briefs._is_js(c.file)
             and boot_witness.is_applicable(c, wplan)):
@@ -340,7 +341,13 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
                         "oracle_tier": "marker", "witness_plan": wplan.as_dict(),
                         "_trail": [(f"boot `{getattr(br, 'entrypoint', '') or wplan.entrypoint}` + drive "
                                     f"{route[0]} {route[1]}", (br.log or br.why)[:1500])]}
-            # a 'blocked' boot (couldn't bind / too heavy) -> fall through to the normal model investigate
+            # a 'blocked' boot (couldn't bind / too heavy / needs network at startup) FALLS THROUGH to the normal
+            # model investigate -- but we REMEMBER it so the attempt is never invisible: the lead records WHY the
+            # boot failed (in its trail + a `boot` note) instead of looking like boot was never tried (the
+            # opencode case: the user enabled boot, it ran, it crashed on an offline startup fetch, and the
+            # report showed nothing).
+            if br is not None:
+                boot_blocked = br
     scaffold = repro.build(c, target, mode=("render" if mode == "render" else "call"), tag=tag,
                            entry=build_entry, run_tmpl=js_run)
     step_to = (300 if mode in briefs.COMPILED_MODES               # build/fetch a standalone repro
@@ -398,10 +405,19 @@ def _prove_one(model, target, c, have_docker, max_steps, online=False, tag="", c
     markers = set(getattr(v, "witness", []) or [])
     cls_name = (getattr(c, "family", "") or "").split()[0]
     hw, hmarker, htier = oracle.graded(cls_name, markers, cwe=getattr(c, "cwe", ""))
+    # A boot was ATTEMPTED and blocked -> record it so the lead is never silent about it: a trail line (for the
+    # diagnostic transcript) + a `boot` note (for the report), both naming the command tried and why it failed.
+    _boot_trail, _boot_note = [], None
+    if boot_blocked is not None:
+        _bep = getattr(boot_blocked, "entrypoint", "") or (wplan.entrypoint if wplan else "")
+        _boot_note = f"boot-and-drive attempted via `{_bep}` -> blocked: {boot_blocked.why}"
+        _boot_trail = [(f"boot `{_bep}` + drive {route[0]} {route[1]} -> BLOCKED",
+                        (boot_blocked.log or boot_blocked.why or "")[:1500])]
     return {"verdict": verdict, "evidence": (v.evidence or "")[:400], "why": (v.why or "")[:300],
             "oracle": f"investigate ({v.ran} run(s), {mode})", "ran": v.ran, "taint": tstatus,
             "image": img,                                     # which runtime image the sandbox LAUNCHED (diag)
-            "_trail": list(getattr(v, "trail", []) or []),    # [(cmd, result)] for the diagnostic transcript log
+            "_trail": _boot_trail + list(getattr(v, "trail", []) or []),  # blocked-boot first, then investigate
+            **({"boot": _boot_note} if _boot_note else {}),   # the attempted-but-blocked boot, surfaced in the report
             **({"witness_plan": wplan.as_dict()} if (wplan and wplan.needed) else {}),  # opt-in boot-witness plan
             "reach_proof": reach_proof,                       # witnessed(tape) | claimed(model) | inferred | none
             "reach_tape": bool(getattr(v, "reach_tape", False)),   # HARNESS saw the reach tracer at a sealed sink (1b)

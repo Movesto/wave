@@ -74,11 +74,12 @@ def _merge_group(items):
     # if ANY merged member computed it, the kept finding must keep it. Otherwise collapsing two leads at one
     # sink can silently drop the "to witness (preflight)" line from the survivor when the base happened to be
     # the member proved without a route (the opencode shell-RCE lost its plan this way).
-    if not base.get("witness_plan"):
-        for f in ordered:
-            if f.get("witness_plan"):
-                base["witness_plan"] = f["witness_plan"]
-                break
+    for loc_key in ("witness_plan", "boot"):                 # plan + the attempted-boot note are location-level
+        if not base.get(loc_key):
+            for f in ordered:
+                if f.get(loc_key):
+                    base[loc_key] = f[loc_key]
+                    break
     # union the evidence + reasoning of the OTHER members so nothing is hidden by the merge
     others = [f for f in ordered[1:]]
     extra_ev = [e for e in (f.get("evidence") or "" for f in others) if e]

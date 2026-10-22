@@ -273,6 +273,27 @@ def _runner_cmd(runtime):
     return {"bun": "bun", "deno": "deno run -A", "node": "node"}.get(runtime, "node")
 
 
+# a server that CRASHED on a DNS/network egress at startup -- the witness sandbox is `--network none` (offline),
+# so an app that fetches at boot (opencode fetches models.dev to build its model catalog) never binds a port.
+_NET_EGRESS = re.compile(r"EAI_AGAIN|ENOTFOUND|getaddrinfo|EAI_FAIL|dns\s|network is unreachable|ECONNREFUSED",
+                         re.I)
+
+
+def _network_block_why(out: str) -> str:
+    """If the boot log shows an offline-startup crash, say so precisely + point at the opt-in. Else ''."""
+    m = _NET_EGRESS.search(out or "")
+    if not m:
+        return ""
+    host = ""
+    hm = re.search(r"(?:getaddrinfo|EAI_AGAIN|ENOTFOUND)[^\n]*?([a-z0-9.-]+\.[a-z]{2,})", out or "", re.I)
+    if hm:
+        host = hm.group(1)
+    return ("the server needs network egress at STARTUP" + (f" (fetches {host})" if host else "")
+            + " but the witness sandbox is offline (--network none), so it crashed before binding a port. The "
+              "HTTP drive itself is local; only the app's boot-time fetch needs the net. Set WAVE_BOOT_NETWORK=1 "
+              "to let the boot reach the network (only for a target you trust) -- the request is still local.")
+
+
 def _classify(out: str, marker: str) -> BootResult:
     """Grade the container's stdout. The MARKER FILE appearing is the witness (deterministic, harness-read)."""
     log_tail = out.split("---LOG---", 1)[1].strip()[:800] if "---LOG---" in out else ""
@@ -287,9 +308,10 @@ def _classify(out: str, marker: str) -> BootResult:
                           f"marker file /work/{marker} was created (HTTP {status or '?'}).",
                           why="boot-and-drive witness: live request to the route created the marker side-effect",
                           log=log_tail, status=status, marker=f"boot:/work/{marker}")
+    _net = _network_block_why(out)
     if "WAVE_BOOT: NO_PORT" in out or "WAVE_BOOT: SERVER_EXITED" in out:
-        return BootResult("blocked", why="the server did not boot/bind a port within the budget "
-                          "(entrypoint may need config/services, or a longer boot)", log=log_tail)
+        return BootResult("blocked", why=(_net or "the server did not boot/bind a port within the budget "
+                          "(entrypoint may need config/services, or a longer boot)"), log=log_tail)
     if status and status not in (401, 403):
         return BootResult("anomalous_state", evidence=f"the route answered WITHOUT credentials (HTTP {status}"
                           + (f": {body}" if body else "") + f") but the exec marker did not appear.",
@@ -298,8 +320,8 @@ def _classify(out: str, marker: str) -> BootResult:
     if status in (401, 403):
         return BootResult("refuted", why=f"the route required authentication (HTTP {status}) -- an auth guard "
                           "is present on this path", log=log_tail, status=status)
-    return BootResult("blocked", why="booted and sent the request but observed neither the marker nor a usable "
-                      "response", log=log_tail, status=status)
+    return BootResult("blocked", why=(_net or "booted and sent the request but observed neither the marker nor a "
+                      "usable response"), log=log_tail, status=status)
 
 
 def drive(target, candidate, plan, *, image, runtime, route, model=None, code_window="",
@@ -328,14 +350,21 @@ def drive(target, candidate, plan, *, image, runtime, route, model=None, code_wi
     cpus = cpus or os.environ.get("WAVE_BOOT_CPUS") or DEFAULT_CPUS
     script = _render_driver(sub=sub, marker=marker, ep=ep, wait=_BOOT_WAIT,
                             spec=json.dumps(spec), runner=_runner_cmd(runtime))
-    cmd = ["docker", "run", "--rm", "--network", "none",
+    # The sandbox is OFFLINE by default (--network none): the HTTP drive is local (localhost in the container),
+    # so no egress is needed to test the route. But some apps fetch at STARTUP (opencode pulls its model catalog
+    # from models.dev) and won't bind a port offline. WAVE_BOOT_NETWORK=1 lets the boot reach the network so init
+    # can finish -- opt-in, off by default, ONLY for a target you trust (it lets the booted code egress freely).
+    netgress = os.environ.get("WAVE_BOOT_NETWORK", "").strip().lower() in ("1", "true", "yes", "on")
+    net = "bridge" if netgress else "none"
+    cmd = ["docker", "run", "--rm", "--network", net,
            "--memory", str(memory), "--cpus", str(cpus),
            "-v", _docker_mount(str(root)) + ":/work", "-w", "/work",
            image, "sh", "-c", script]
     env = dict(os.environ)
     env["MSYS_NO_PATHCONV"] = "1"                              # Git-Bash: don't mangle /work
     print(f"🔌 [boot-witness] booting {plan.package} ({runtime}) under {memory}/{cpus}cpu via `{ep}` "
-          f"[{ep_src}] to drive {route[0]} {route[1]} ...", flush=True)
+          f"[{ep_src}] to drive {route[0]} {route[1]}"
+          + (" [NETWORK ALLOWED -- WAVE_BOOT_NETWORK]" if netgress else " [offline]") + " ...", flush=True)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=int(timeout or DEFAULT_TIMEOUT), env=env)
     except subprocess.TimeoutExpired:

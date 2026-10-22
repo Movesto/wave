@@ -62,6 +62,19 @@ def test_classify_confirmed_carries_marker_for_the_confirm_pipeline():
     assert res.verdict == "confirmed" and res.marker == "boot:/work/MK" and res.status == 200
 
 
+def test_classify_names_an_offline_startup_fetch_as_the_blocker():
+    # the opencode case: the server fetches models.dev at boot; offline (--network none) it crashes before
+    # binding a port. The blocked reason must SAY so (not "neither marker nor usable response") and name the
+    # opt-in -- so the user knows boot ran, why it failed, and how to let it complete.
+    out = ("WAVE_BOOT: SERVER_EXITED\n---LOG---\n"
+           "TypeError: getaddrinfo EAI_AGAIN models.dev\n  at fetch(\"https://models.dev/api.json\")")
+    res = boot_witness._classify(out, "MK")
+    assert res.verdict == "blocked"
+    assert "models.dev" in res.why and "--network none" in res.why and "WAVE_BOOT_NETWORK" in res.why
+    # a crash with no network signature keeps the generic bind-a-port reason
+    assert "bind a port" in boot_witness._classify("WAVE_BOOT: NO_PORT\n---LOG---\nOOM killed", "MK").why
+
+
 def test_render_driver_survives_shell_and_regex_braces():
     # _render_driver uses token replacement, NOT str.format, so `{2,5}` / `${...}` are untouched.
     script = boot_witness._render_driver(sub=".", marker="MK", ep="bun run start", wait=5,

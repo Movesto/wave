@@ -145,6 +145,17 @@ _SINKS_PY = [
 ]
 _SINKS_JS = [
     ("SQLi",  re.compile(r"\.query\s*\(|sequelize\.query|\.execute\s*\(|knex\.raw|\$queryRawUnsafe|\.\$queryRaw")),
+    # SQLi via a RAW SQL STRING assembled by interpolation -- a template literal that holds a SQL statement/clause
+    # AND a `${...}`, even when the exec happens elsewhere (the value is spliced into DDL/DML that a schema-manager
+    # / queryRunner runs later). This is the "build the SQL far from the .query() call" shape the call-site
+    # patterns above miss -- e.g. TypeORM `GENERATED ALWAYS AS (${expr})` (twenty, CVE-2026-73069). Two-token SQL
+    # forms (INSERT INTO / DELETE FROM / SELECT...FROM / ALTER TABLE / GENERATED ALWAYS AS ...) keep the English
+    # words "update/select/create" from false-pinning ordinary template strings; the `${` lookahead requires a
+    # real interpolation in the same backtick span.
+    ("SQLi",  re.compile(r"`(?=[^`]*\$\{)[^`]*(?:GENERATED\s+ALWAYS\s+AS|SELECT\b[^`]*\bFROM\b|INSERT\s+INTO\b|"
+                         r"DELETE\s+FROM\b|UPDATE\b[^`]*\bSET\b|CREATE\s+(?:TABLE|UNIQUE\s+INDEX|INDEX|VIEW|"
+                         r"MATERIALIZED\s+VIEW)\b|ALTER\s+TABLE\b|DROP\s+(?:TABLE|INDEX|VIEW)\b|TRUNCATE\s+TABLE\b|"
+                         r"UNION\s+(?:ALL\s+)?SELECT\b)", re.I)),
     ("cmd",   re.compile(r"child_process|\bexec(Sync|File(Sync)?)?\s*\(|\bspawn(Sync)?\s*\(|\.exec\s*\(|"
                          r"\bStdioClientTransport\s*\(")),   # MCP JS/TS stdio launcher takes {command, args}
     ("eval",  re.compile(r"\beval\s*\(|new\s+Function\s*\(|vm\.(runIn|createContext)|setTimeout\s*\(\s*['\"]")),
